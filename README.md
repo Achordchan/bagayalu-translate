@@ -6,6 +6,10 @@
 ![平台](https://img.shields.io/badge/平台-macOS-lightgrey.svg)
 ![Swift](https://img.shields.io/badge/Swift-5.9-orange.svg)
 
+<img width="929" alt="image" src="https://github.com/user-attachments/assets/289b7fa6-0a59-43ea-849a-1cc5d3af8ec0">
+
+![QQ_1733133550883](https://github.com/user-attachments/assets/d3f97350-8a8c-492b-b7a1-35a4e0424141)
+
 ## 功能特性
 
 ### 核心功能
