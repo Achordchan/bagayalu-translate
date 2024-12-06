@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="660" height="400" xmlns="http://www.w3.org/2000/svg">
+    <!-- 渐变背景 -->
+    <defs>
+        <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" style="stop-color:#f3f4f6;stop-opacity:1"/>
+            <stop offset="100%" style="stop-color:#e5e7eb;stop-opacity:1"/>
+        </linearGradient>
+    </defs>
+    
+    <!-- 背景 -->
+    <rect width="660" height="400" fill="url(#bg)"/>
+    
+    <!-- 标题 -->
+    <text x="330" y="80" font-family="PingFang SC, -apple-system" font-size="24" fill="#1f2937" text-anchor="middle">
+        将应用程序拖入Applications文件夹以完成安装
+    </text>
+    
+    <!-- 箭头 -->
+    <path d="M320,160 L340,180 L320,200" stroke="#4b5563" stroke-width="2" fill="none"/>
+    
+    <!-- 作者信息 -->
+    <text x="330" y="340" font-family="PingFang SC, -apple-system" font-size="14" fill="#6b7280" text-anchor="middle">
+        大佐翻译官 v1.0
+    </text>
+    <text x="330" y="360" font-family="PingFang SC, -apple-system" font-size="12" fill="#9ca3af" text-anchor="middle">
+        作者：Achord Chen
+    </text>
+</svg> 

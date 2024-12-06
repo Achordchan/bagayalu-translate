@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <!-- 背景 -->
+    <rect width="1024" height="1024" rx="224" fill="#1E1E1E"/>
+    
+    <!-- 装饰性背景圆形 -->
+    <circle cx="512" cy="512" r="400" fill="url(#circleGradient)" opacity="0.8"/>
+    
+    <!-- 主图形：指挥官帽檐的抽象化设计 -->
+    <path d="M312 412 
+             C312 412, 512 312, 712 412
+             C712 412, 612 612, 512 612
+             C412 612, 312 412, 312 412
+             Z" 
+          fill="url(#goldGradient)"/>
+    
+    <!-- 翻译符号：动态箭头 -->
+    <g transform="translate(362, 462)">
+        <!-- 左侧箭头 -->
+        <path d="M50 50 
+                 C150 50, 150 150, 50 150
+                 L100 150 L50 200 L0 150 L50 150" 
+              fill="white"/>
+        
+        <!-- 右侧箭头 -->
+        <path d="M250 50
+                 C150 50, 150 150, 250 150
+                 L200 150 L250 200 L300 150 L250 150" 
+              fill="white"/>
+    </g>
+    
+    <!-- 渐变定义 -->
+    <defs>
+        <!-- 背景圆形渐变 -->
+        <linearGradient id="circleGradient" x1="0" y1="0" x2="1024" y2="1024">
+            <stop offset="0%" style="stop-color:#2A2A2A"/>
+            <stop offset="100%" style="stop-color:#1E1E1E"/>
+        </linearGradient>
+        
+        <!-- 金色渐变 -->
+        <linearGradient id="goldGradient" x1="512" y1="312" x2="512" y2="612">
+            <stop offset="0%" style="stop-color:#FFD700"/>
+            <stop offset="100%" style="stop-color:#FFA500"/>
+        </linearGradient>
+    </defs>
+    
+    <!-- 高光效果 -->
+    <circle cx="412" cy="412" r="10" fill="white" opacity="0.8"/>
+    <circle cx="612" cy="412" r="10" fill="white" opacity="0.8"/>
+</svg> 
