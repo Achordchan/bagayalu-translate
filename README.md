@@ -1,6 +1,6 @@
 # 大佐翻译官
 
-一个优雅的 macOS 翻译工具，支持多种翻译服务和智能功能。
+一个优雅的 macOS+windows((因代码混乱暂时闭源) 翻译工具，支持多种翻译服务和智能功能。
 
 ![版本](https://img.shields.io/badge/版本-1.0-blue.svg)
 ![平台](https://img.shields.io/badge/平台-macOS-lightgrey.svg)
