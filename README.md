@@ -2,15 +2,18 @@
 
 仓库地址：https://github.com/Achordchan/bagayalu-translate
 
-一个专注于 **macOS** 的轻量翻译工具：
+一个专注于 **MacOS** 的轻量翻译工具：
 
 - 输入框翻译（支持自动识别源语言）
+- Cmd+C+C快速翻译
 - 截图 OCR + 翻译（支持框选区域、翻译覆盖层）
 - 钉图（把截图固定在桌面，右键复制/保存/关闭）
 - 支持 Google / OpenAI Compatible（自定义 BaseURL / Model）
 
 > 本项目仍在快速迭代中。欢迎 issue / PR。
-
+![截图1](https://raw.githubusercontent.com/Achordchan/bagayalu-translate/refs/heads/main/dazuofanyiguan/img/git1.png)
+>
+ ![截图2](https://raw.githubusercontent.com/Achordchan/bagayalu-translate/refs/heads/main/dazuofanyiguan/img/git2.png)
 ---
 
 ## 功能特性
@@ -26,7 +29,7 @@
 
 - **钉图（Pinned Screenshot）**
   - 将截图固定为浮窗
-  - 右键菜单：复制 / 保存 / 关闭 / 全部关闭
+  - 右键菜单
 
 - **多引擎**
   - Google Translate
@@ -34,11 +37,6 @@
 
 ---
 
-## 预览图标
-
-> 仓库内提供了可编辑的 SVG 图标：`Branding/AppIcon.svg`（可转 PNG / ICNS）。
-
----
 
 ## 权限说明（macOS）
 
