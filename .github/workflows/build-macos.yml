@@ -1,0 +1,55 @@
+name: Build macOS App
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-macos:
+    name: Build macOS App
+    runs-on: macos-15
+
+    env:
+      XCODE_PROJECT: 大佐翻译官v1.xcodeproj
+      XCODE_SCHEME: dazuofanyiguan
+      APP_NAME: 大佐翻译官v1
+      DERIVED_DATA_PATH: build
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Build Release app
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project "$XCODE_PROJECT" \
+            -scheme "$XCODE_SCHEME" \
+            -configuration Release \
+            -derivedDataPath "$DERIVED_DATA_PATH" \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Package app
+        run: |
+          set -euo pipefail
+          APP_PATH="$DERIVED_DATA_PATH/Build/Products/Release/$APP_NAME.app"
+          if [ ! -d "$APP_PATH" ]; then
+            echo "找不到构建产物：$APP_PATH" >&2
+            find "$DERIVED_DATA_PATH/Build/Products" -maxdepth 3 -print >&2
+            exit 1
+          fi
+          mkdir -p dist
+          ditto -c -k --keepParent "$APP_PATH" "dist/$APP_NAME.app.zip"
+
+      - name: Upload app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: 大佐翻译官v1-macOS-app
+          path: dist/大佐翻译官v1.app.zip
+          if-no-files-found: error
