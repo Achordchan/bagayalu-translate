@@ -24,9 +24,9 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		55115C462EF4DD8E00FAF4C0 /* dazuofanyiguan.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = dazuofanyiguan.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		55115C572EF4DD8F00FAF4C0 /* dazuofanyiguanTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = dazuofanyiguanTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		55115C612EF4DD8F00FAF4C0 /* dazuofanyiguanUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = dazuofanyiguanUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		55115C462EF4DD8E00FAF4C0 /* 大佐翻译官v1.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "大佐翻译官v1.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		55115C572EF4DD8F00FAF4C0 /* 大佐翻译官v1Tests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "大佐翻译官v1Tests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
+		55115C612EF4DD8F00FAF4C0 /* 大佐翻译官v1UITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "大佐翻译官v1UITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -85,9 +85,9 @@
 		55115C472EF4DD8E00FAF4C0 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				55115C462EF4DD8E00FAF4C0 /* dazuofanyiguan.app */,
-				55115C572EF4DD8F00FAF4C0 /* dazuofanyiguanTests.xctest */,
-				55115C612EF4DD8F00FAF4C0 /* dazuofanyiguanUITests.xctest */,
+				55115C462EF4DD8E00FAF4C0 /* 大佐翻译官v1.app */,
+				55115C572EF4DD8F00FAF4C0 /* 大佐翻译官v1Tests.xctest */,
+				55115C612EF4DD8F00FAF4C0 /* 大佐翻译官v1UITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -95,9 +95,9 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		55115C452EF4DD8E00FAF4C0 /* dazuofanyiguan */ = {
+		55115C452EF4DD8E00FAF4C0 /* 大佐翻译官v1 */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 55115C6B2EF4DD8F00FAF4C0 /* Build configuration list for PBXNativeTarget "dazuofanyiguan" */;
+			buildConfigurationList = 55115C6B2EF4DD8F00FAF4C0 /* Build configuration list for PBXNativeTarget "大佐翻译官v1" */;
 			buildPhases = (
 				55115C422EF4DD8E00FAF4C0 /* Sources */,
 				55115C432EF4DD8E00FAF4C0 /* Frameworks */,
@@ -110,16 +110,16 @@
 			fileSystemSynchronizedGroups = (
 				55115C482EF4DD8E00FAF4C0 /* dazuofanyiguan */,
 			);
-			name = dazuofanyiguan;
+			name = "大佐翻译官v1";
 			packageProductDependencies = (
 			);
 			productName = dazuofanyiguan;
-			productReference = 55115C462EF4DD8E00FAF4C0 /* dazuofanyiguan.app */;
+			productReference = 55115C462EF4DD8E00FAF4C0 /* 大佐翻译官v1.app */;
 			productType = "com.apple.product-type.application";
 		};
-		55115C562EF4DD8F00FAF4C0 /* dazuofanyiguanTests */ = {
+		55115C562EF4DD8F00FAF4C0 /* 大佐翻译官v1Tests */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 55115C6E2EF4DD8F00FAF4C0 /* Build configuration list for PBXNativeTarget "dazuofanyiguanTests" */;
+			buildConfigurationList = 55115C6E2EF4DD8F00FAF4C0 /* Build configuration list for PBXNativeTarget "大佐翻译官v1Tests" */;
 			buildPhases = (
 				55115C532EF4DD8F00FAF4C0 /* Sources */,
 				55115C542EF4DD8F00FAF4C0 /* Frameworks */,
@@ -133,16 +133,16 @@
 			fileSystemSynchronizedGroups = (
 				55115C5A2EF4DD8F00FAF4C0 /* dazuofanyiguanTests */,
 			);
-			name = dazuofanyiguanTests;
+			name = "大佐翻译官v1Tests";
 			packageProductDependencies = (
 			);
 			productName = dazuofanyiguanTests;
-			productReference = 55115C572EF4DD8F00FAF4C0 /* dazuofanyiguanTests.xctest */;
+			productReference = 55115C572EF4DD8F00FAF4C0 /* 大佐翻译官v1Tests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
-		55115C602EF4DD8F00FAF4C0 /* dazuofanyiguanUITests */ = {
+		55115C602EF4DD8F00FAF4C0 /* 大佐翻译官v1UITests */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 55115C712EF4DD8F00FAF4C0 /* Build configuration list for PBXNativeTarget "dazuofanyiguanUITests" */;
+			buildConfigurationList = 55115C712EF4DD8F00FAF4C0 /* Build configuration list for PBXNativeTarget "大佐翻译官v1UITests" */;
 			buildPhases = (
 				55115C5D2EF4DD8F00FAF4C0 /* Sources */,
 				55115C5E2EF4DD8F00FAF4C0 /* Frameworks */,
@@ -156,11 +156,11 @@
 			fileSystemSynchronizedGroups = (
 				55115C642EF4DD8F00FAF4C0 /* dazuofanyiguanUITests */,
 			);
-			name = dazuofanyiguanUITests;
+			name = "大佐翻译官v1UITests";
 			packageProductDependencies = (
 			);
 			productName = dazuofanyiguanUITests;
-			productReference = 55115C612EF4DD8F00FAF4C0 /* dazuofanyiguanUITests.xctest */;
+			productReference = 55115C612EF4DD8F00FAF4C0 /* 大佐翻译官v1UITests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
 		};
 /* End PBXNativeTarget section */
@@ -186,7 +186,7 @@
 					};
 				};
 			};
-			buildConfigurationList = 55115C412EF4DD8E00FAF4C0 /* Build configuration list for PBXProject "dazuofanyiguan" */;
+			buildConfigurationList = 55115C412EF4DD8E00FAF4C0 /* Build configuration list for PBXProject "大佐翻译官v1" */;
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -200,9 +200,9 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				55115C452EF4DD8E00FAF4C0 /* dazuofanyiguan */,
-				55115C562EF4DD8F00FAF4C0 /* dazuofanyiguanTests */,
-				55115C602EF4DD8F00FAF4C0 /* dazuofanyiguanUITests */,
+				55115C452EF4DD8E00FAF4C0 /* 大佐翻译官v1 */,
+				55115C562EF4DD8F00FAF4C0 /* 大佐翻译官v1Tests */,
+				55115C602EF4DD8F00FAF4C0 /* 大佐翻译官v1UITests */,
 			);
 		};
 /* End PBXProject section */
@@ -258,12 +258,12 @@
 /* Begin PBXTargetDependency section */
 		55115C592EF4DD8F00FAF4C0 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
-			target = 55115C452EF4DD8E00FAF4C0 /* dazuofanyiguan */;
+			target = 55115C452EF4DD8E00FAF4C0 /* 大佐翻译官v1 */;
 			targetProxy = 55115C582EF4DD8F00FAF4C0 /* PBXContainerItemProxy */;
 		};
 		55115C632EF4DD8F00FAF4C0 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
-			target = 55115C452EF4DD8E00FAF4C0 /* dazuofanyiguan */;
+			target = 55115C452EF4DD8E00FAF4C0 /* 大佐翻译官v1 */;
 			targetProxy = 55115C622EF4DD8F00FAF4C0 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
@@ -401,6 +401,8 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "大佐翻译官v1";
+				INFOPLIST_KEY_CFBundleName = "大佐翻译官";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -428,6 +430,8 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "大佐翻译官v1";
+				INFOPLIST_KEY_CFBundleName = "大佐翻译官";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -455,7 +459,7 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_VERSION = 5.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/dazuofanyiguan.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/dazuofanyiguan";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/大佐翻译官v1.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/大佐翻译官v1";
 			};
 			name = Debug;
 		};
@@ -473,7 +477,7 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_VERSION = 5.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/dazuofanyiguan.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/dazuofanyiguan";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/大佐翻译官v1.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/大佐翻译官v1";
 			};
 			name = Release;
 		};
@@ -512,7 +516,7 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		55115C412EF4DD8E00FAF4C0 /* Build configuration list for PBXProject "dazuofanyiguan" */ = {
+		55115C412EF4DD8E00FAF4C0 /* Build configuration list for PBXProject "大佐翻译官v1" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				55115C692EF4DD8F00FAF4C0 /* Debug */,
@@ -521,7 +525,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		55115C6B2EF4DD8F00FAF4C0 /* Build configuration list for PBXNativeTarget "dazuofanyiguan" */ = {
+		55115C6B2EF4DD8F00FAF4C0 /* Build configuration list for PBXNativeTarget "大佐翻译官v1" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				55115C6C2EF4DD8F00FAF4C0 /* Debug */,
@@ -530,7 +534,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		55115C6E2EF4DD8F00FAF4C0 /* Build configuration list for PBXNativeTarget "dazuofanyiguanTests" */ = {
+		55115C6E2EF4DD8F00FAF4C0 /* Build configuration list for PBXNativeTarget "大佐翻译官v1Tests" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				55115C6F2EF4DD8F00FAF4C0 /* Debug */,
@@ -539,7 +543,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		55115C712EF4DD8F00FAF4C0 /* Build configuration list for PBXNativeTarget "dazuofanyiguanUITests" */ = {
+		55115C712EF4DD8F00FAF4C0 /* Build configuration list for PBXNativeTarget "大佐翻译官v1UITests" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				55115C722EF4DD8F00FAF4C0 /* Debug */,
