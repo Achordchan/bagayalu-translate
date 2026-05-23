@@ -31,9 +31,26 @@ jobs:
             -project "$XCODE_PROJECT" \
             -scheme "$XCODE_SCHEME" \
             -configuration Release \
+            -destination "generic/platform=macOS" \
             -derivedDataPath "$DERIVED_DATA_PATH" \
+            ONLY_ACTIVE_ARCH=NO \
             CODE_SIGNING_ALLOWED=NO \
             build
+
+      - name: Ad-hoc sign app bundle
+        run: |
+          set -euo pipefail
+          APP_PATH="$DERIVED_DATA_PATH/Build/Products/Release/$APP_NAME.app"
+          if [ ! -d "$APP_PATH" ]; then
+            echo "找不到构建产物：$APP_PATH" >&2
+            find "$DERIVED_DATA_PATH/Build/Products" -maxdepth 3 -print >&2
+            exit 1
+          fi
+          codesign --force --deep --sign - \
+            --entitlements "dazuofanyiguan/dazuofanyiguan.entitlements" \
+            "$APP_PATH"
+          codesign --verify --deep --strict --verbose=4 "$APP_PATH"
+          file "$APP_PATH/Contents/MacOS/$APP_NAME"
 
       - name: Package app
         run: |
