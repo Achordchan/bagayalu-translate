@@ -21,3 +21,7 @@ playground.xcworkspace
 
 # Logs
 *.log
+
+# Distribution artifacts
+dist/
+*.dmg

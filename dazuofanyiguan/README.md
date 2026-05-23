@@ -36,7 +36,7 @@
 
 ## 预览图标
 
-> 仓库内提供了可编辑的 SVG 图标：`Branding/AppIcon.svg`（可转 PNG / ICNS）。
+> 应用图标资源位于 `Assets.xcassets/AppIcon.appiconset`。
 
 ---
 

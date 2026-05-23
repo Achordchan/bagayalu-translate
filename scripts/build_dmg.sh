@@ -1,15 +1,18 @@
 #!/bin/zsh
 set -euo pipefail
 
-APP_PATH_DEFAULT="/Users/achordchan/Downloads/不同步的桌面/项目/dazuofanyiguan/大佐翻译官v1/大佐翻译官v1.app"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+APP_PATH_DEFAULT="$PROJECT_ROOT/build/Release/大佐翻译官v1.app"
 REPO_URL_DEFAULT="https://github.com/Achordchan/bagayalu-translate"
 AUTHOR_DEFAULT="AchordChan"
 
 APP_PATH="${1:-$APP_PATH_DEFAULT}"
-OUT_DIR="${2:-$(pwd)/dist}"
+OUT_DIR="${2:-$PROJECT_ROOT/dist}"
 
 if [[ ! -d "$APP_PATH" ]]; then
   echo "[ERROR] 找不到 .app：$APP_PATH" >&2
+  echo "[INFO] 请先用 Xcode 归档/构建，或把 .app 路径作为第一个参数传入。" >&2
   exit 1
 fi
 
@@ -168,5 +171,5 @@ echo "[OK] DMG 已生成：$OUTPUT_DMG"
 
 echo "\n使用方式："
 echo "  1) 给脚本执行权限：chmod +x scripts/build_dmg.sh"
-echo "  2) 直接运行（默认使用你给的 app 路径）：./scripts/build_dmg.sh"
+echo "  2) 直接运行（默认使用 build/Release/大佐翻译官v1.app）：./scripts/build_dmg.sh"
 echo "  3) 或者指定 app 路径与输出目录：./scripts/build_dmg.sh \"/path/to/App.app\" \"./dist\""
