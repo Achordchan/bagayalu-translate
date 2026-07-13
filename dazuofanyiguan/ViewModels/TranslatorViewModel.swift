@@ -1,6 +1,34 @@
 import AppKit
 import Foundation
 
+enum TranslationFeedbackMode: Equatable {
+    case standard
+    case external
+}
+
+typealias TranslationCompletion = @MainActor (Result<TranslationResult, Error>) -> Void
+
+struct TranslationInputChangeGuard {
+    private var programmaticText: String?
+
+    mutating func markProgrammaticText(_ text: String) {
+        programmaticText = text
+    }
+
+    mutating func shouldSchedule(for currentText: String) -> Bool {
+        guard let programmaticText else {
+            return true
+        }
+
+        if currentText == programmaticText {
+            return false
+        }
+
+        self.programmaticText = nil
+        return true
+    }
+}
+
 @MainActor
 final class TranslatorViewModel: ObservableObject {
     @Published var inputText: String = ""
@@ -15,6 +43,8 @@ final class TranslatorViewModel: ObservableObject {
     @Published private(set) var activeAIModelName: String?
     @Published private(set) var estimatedAITokenCount: Int?
     @Published private(set) var aiRequestPhase: String?
+    @Published private(set) var appleRequestPhase: String?
+    @Published private(set) var isWaitingForLanguageDownload: Bool = false
 
     @Published private(set) var lastTranslationDurationMs: Int?
     @Published private(set) var lastAIModelName: String?
@@ -22,12 +52,22 @@ final class TranslatorViewModel: ObservableObject {
 
     private var debounceTask: Task<Void, Never>?
     private var translateTask: Task<Void, Never>?
+    private var inputChangeGuard = TranslationInputChangeGuard()
 
     private var translationTokenCounter: Int = 0
 
     private let http = HTTPClient()
+    private let appleTranslationCoordinator: AppleTranslationCoordinator
 
     private let newlineMarker: String = "[[DAZUO_NL]]"
+
+    init(appleTranslationCoordinator: AppleTranslationCoordinator) {
+        self.appleTranslationCoordinator = appleTranslationCoordinator
+    }
+
+    func shouldScheduleTranslationForCurrentInputChange() -> Bool {
+        inputChangeGuard.shouldSchedule(for: inputText)
+    }
 
     func scheduleTranslate(settings: AppSettings, log: LogStore, toast: ToastCenter) {
         debounceTask?.cancel()
@@ -53,7 +93,8 @@ final class TranslatorViewModel: ObservableObject {
         targetLanguageCode: String,
         settings: AppSettings,
         log: LogStore,
-        toast: ToastCenter
+        toast: ToastCenter,
+        feedbackMode: TranslationFeedbackMode
     ) async throws -> TranslationResult {
         do {
             return try await engine.translate(
@@ -70,12 +111,16 @@ final class TranslatorViewModel: ObservableObject {
             lastErrorMessage = base
             log.warn("翻译遇到限流：\(base)，2秒后重试")
 
-            toast.show(base, style: .warning, duration: 1.0)
-            toast.show("准备重试中（2秒）", style: .info, duration: 1.0)
+            if feedbackMode == .standard {
+                toast.show(base, style: .warning, duration: 1.0)
+                toast.show("准备重试中（2秒）", style: .info, duration: 1.0)
+            }
             try? await Task.sleep(nanoseconds: 1_000_000_000)
             if Task.isCancelled { throw error }
 
-            toast.show("准备重试中（1秒）", style: .info, duration: 1.0)
+            if feedbackMode == .standard {
+                toast.show("准备重试中（1秒）", style: .info, duration: 1.0)
+            }
             try? await Task.sleep(nanoseconds: 1_000_000_000)
             if Task.isCancelled { throw error }
 
@@ -89,7 +134,13 @@ final class TranslatorViewModel: ObservableObject {
         }
     }
 
-    func translateNow(settings: AppSettings, log: LogStore, toast: ToastCenter) async {
+    func translateNow(
+        settings: AppSettings,
+        log: LogStore,
+        toast: ToastCenter,
+        feedbackMode: TranslationFeedbackMode = .standard,
+        completion: TranslationCompletion? = nil
+    ) async {
         translateTask?.cancel()
 
         let rawText = inputText
@@ -105,9 +156,13 @@ final class TranslatorViewModel: ObservableObject {
             activeAIModelName = nil
             estimatedAITokenCount = nil
             aiRequestPhase = nil
+            appleRequestPhase = nil
+            isWaitingForLanguageDownload = false
             return
         }
-        let text = normalizedText.replacingOccurrences(of: "\n", with: " \(newlineMarker) ")
+        let text = settings.engineType == .apple
+            ? normalizedText
+            : normalizedText.replacingOccurrences(of: "\n", with: " \(newlineMarker) ")
         let sl = settings.sourceLanguageCode
         let tl = settings.targetLanguageCode
 
@@ -116,6 +171,8 @@ final class TranslatorViewModel: ObservableObject {
             detectedSourceLanguageCode = nil
             estimatedAITokenCount = nil
             aiRequestPhase = nil
+            appleRequestPhase = nil
+            isWaitingForLanguageDownload = false
             return
         }
 
@@ -132,6 +189,8 @@ final class TranslatorViewModel: ObservableObject {
         isUsingAI = settings.engineType == .openAICompatible
         let modelName = settings.openAIModel.trimmingCharacters(in: .whitespacesAndNewlines)
         activeAIModelName = settings.engineType == .openAICompatible ? (modelName.isEmpty ? nil : modelName) : nil
+        appleRequestPhase = settings.engineType == .apple ? "正在准备 Apple 本地翻译" : nil
+        isWaitingForLanguageDownload = false
 
         if isUsingAI {
             estimatedAITokenCount = estimateTotalTokensForAI(text: text, targetLanguageCode: tl, model: modelName)
@@ -141,10 +200,15 @@ final class TranslatorViewModel: ObservableObject {
             aiRequestPhase = nil
         }
 
-        let engine: TranslationEngine
+        let engine: TranslationEngine?
+        let engineTitle: String
         switch settings.engineType {
+        case .apple:
+            engine = nil
+            engineTitle = settings.engineType.title
         case .google:
             engine = GoogleTranslateEngine()
+            engineTitle = settings.engineType.title
         case .openAICompatible:
             let key: String?
             do {
@@ -164,12 +228,13 @@ final class TranslatorViewModel: ObservableObject {
                     }
                 }
             )
+            engineTitle = settings.engineType.title
         }
 
         if let estimated = estimatedAITokenCount {
-            log.info("开始翻译（引擎：\(engine.title) sl=\(sl) tl=\(tl) 字数=\(rawText.count) 预计Token=\(estimated)）")
+            log.info("开始翻译（引擎：\(engineTitle) sl=\(sl) tl=\(tl) 字数=\(rawText.count) 预计Token=\(estimated)）")
         } else {
-            log.info("开始翻译（引擎：\(engine.title) sl=\(sl) tl=\(tl) 字数=\(rawText.count)）")
+            log.info("开始翻译（引擎：\(engineTitle) sl=\(sl) tl=\(tl) 字数=\(rawText.count)）")
         }
         let start = Date()
 
@@ -178,19 +243,44 @@ final class TranslatorViewModel: ObservableObject {
                 if self.isUsingAI {
                     self.aiRequestPhase = "正在等待服务端响应"
                 }
-                let result = try await translateWithRateLimitRetry(
-                    engine: engine,
-                    text: text,
-                    sourceLanguageCode: sl,
-                    targetLanguageCode: tl,
-                    settings: settings,
-                    log: log,
-                    toast: toast
-                )
+                let result: TranslationResult
+                if settings.engineType == .apple {
+                    result = try await appleTranslationCoordinator.translate(
+                        text: text,
+                        sourceLanguageCode: sl,
+                        targetLanguageCode: tl,
+                        onPhaseChange: { [weak self] phase in
+                            Task { @MainActor in
+                                self?.appleRequestPhase = phase
+                            }
+                        },
+                        onLanguageDownloadStateChange: { [weak self] isWaiting in
+                            Task { @MainActor in
+                                self?.isWaitingForLanguageDownload = isWaiting
+                            }
+                        }
+                    )
+                } else if let engine {
+                    result = try await translateWithRateLimitRetry(
+                        engine: engine,
+                        text: text,
+                        sourceLanguageCode: sl,
+                        targetLanguageCode: tl,
+                        settings: settings,
+                        log: log,
+                        toast: toast,
+                        feedbackMode: feedbackMode
+                    )
+                } else {
+                    return
+                }
                 if Task.isCancelled { return }
                 if token != translationToken { return }
-                outputText = restoreNewlines(from: result.translatedText)
+                outputText = settings.engineType == .apple
+                    ? result.translatedText
+                    : restoreNewlines(from: result.translatedText)
                 detectedSourceLanguageCode = result.detectedSourceLanguageCode
+                lastErrorMessage = nil
                 let cost = Int(Date().timeIntervalSince(start) * 1000)
                 lastTranslationDurationMs = cost
                 if self.isUsingAI {
@@ -201,12 +291,23 @@ final class TranslatorViewModel: ObservableObject {
                     lastAIEstimatedTokens = nil
                 }
                 log.info("翻译完成（\(cost)ms）")
+                completion?(
+                    .success(
+                        TranslationResult(
+                            translatedText: outputText,
+                            detectedSourceLanguageCode: detectedSourceLanguageCode
+                        )
+                    )
+                )
             } catch {
                 if Task.isCancelled { return }
                 if token != translationToken { return }
                 lastErrorMessage = error.localizedDescription
                 log.error("翻译失败：\(error.localizedDescription)")
-                toast.show(error.localizedDescription, style: .error)
+                if feedbackMode == .standard {
+                    toast.show(error.localizedDescription, style: .error)
+                }
+                completion?(.failure(error))
             }
 
             if token == translationToken {
@@ -215,6 +316,8 @@ final class TranslatorViewModel: ObservableObject {
                 activeAIModelName = nil
                 estimatedAITokenCount = nil
                 aiRequestPhase = nil
+                appleRequestPhase = nil
+                isWaitingForLanguageDownload = false
             }
         }
     }
@@ -250,6 +353,7 @@ final class TranslatorViewModel: ObservableObject {
         debounceTask?.cancel()
         translateTask?.cancel()
         translateTask = nil
+        appleTranslationCoordinator.cancel()
 
         translationTokenCounter += 1
         translationToken = translationTokenCounter
@@ -258,6 +362,8 @@ final class TranslatorViewModel: ObservableObject {
         isUsingAI = false
         activeAIModelName = nil
         aiRequestPhase = nil
+        appleRequestPhase = nil
+        isWaitingForLanguageDownload = false
         lastErrorMessage = nil
         detectedSourceLanguageCode = nil
         lastTranslationDurationMs = nil
@@ -322,5 +428,31 @@ final class TranslatorViewModel: ObservableObject {
         if trimmed.isEmpty { return }
         inputText = trimmed
         scheduleTranslate(settings: settings, log: log, toast: toast)
+    }
+
+    func translateExternalTextNow(
+        _ text: String,
+        settings: AppSettings,
+        log: LogStore,
+        toast: ToastCenter,
+        feedbackMode: TranslationFeedbackMode,
+        completion: TranslationCompletion?
+    ) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        debounceTask?.cancel()
+        inputChangeGuard.markProgrammaticText(trimmed)
+        inputText = trimmed
+
+        Task { @MainActor in
+            await translateNow(
+                settings: settings,
+                log: log,
+                toast: toast,
+                feedbackMode: feedbackMode,
+                completion: completion
+            )
+        }
     }
 }

@@ -8,7 +8,8 @@
 - Cmd+C+C快速翻译
 - 截图 OCR + 翻译（支持框选区域、翻译覆盖层）
 - 钉图（把截图固定在桌面，右键复制/保存/关闭）
-- 支持 Google / OpenAI Compatible（自定义 BaseURL / Model）
+- 应用内自动更新（直接安装并自动重启，无需手动覆盖 App）
+- 默认使用 Apple 本地翻译，也支持 Google / OpenAI Compatible
 
 > 本项目仍在快速迭代中。欢迎 issue / PR。
 ![截图1](https://raw.githubusercontent.com/Achordchan/bagayalu-translate/refs/heads/main/dazuofanyiguan/img/git1.png)
@@ -21,6 +22,7 @@
 - **文本翻译**
   - 自动识别源语言
   - 保留换行（OCR 场景也适用）
+  - Mini 模式：双击 Command+C 后在鼠标附近显示译文，不唤起主窗口
 
 - **截图 OCR 翻译**
   - 全局快捷键唤起
@@ -32,8 +34,15 @@
   - 右键菜单
 
 - **多引擎**
+  - Apple 本地翻译（默认，无需 API Key）
   - Google Translate
   - OpenAI Compatible（可接 OpenAI / 兼容格式的第三方服务）
+
+- **应用内更新**
+  - 每天自动检查 GitHub Release
+  - 也可在“关于应用”或应用菜单中手动检查
+  - 下载完成后直接替换当前版本，并自动重启应用
+  - 该能力从 1.2.0 开始提供，旧版本需要手动安装一次 1.2.0
 
 ---
 
@@ -77,6 +86,12 @@
 - Toast 仅显示服务端返回的 `code + message`
 - 会显示 2 秒倒计时“准备重试中”
 - 倒计时结束后再发起一次重试
+
+## Apple 本地翻译说明
+
+- 需要 macOS 15.1 或更高版本
+- 无需 API Key，翻译由 macOS Translation 框架处理
+- 首次使用某个语言组合时，系统可能提示下载对应语言模型
 
 ---
 

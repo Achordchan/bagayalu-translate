@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct PermissionGuideView: View {
@@ -8,151 +9,296 @@ struct PermissionGuideView: View {
     let onOpenScreenRecording: () -> Void
     let onClose: () -> Void
 
+    @State private var showFallbackExplanation = false
+
+    private var grantedPermissionCount: Int {
+        2 - [needsAccessibility, needsScreenRecording].filter { $0 }.count
+    }
+
+    private var allPermissionsGranted: Bool {
+        !needsAccessibility && !needsScreenRecording
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            welcomeHeader
+        VStack(spacing: 0) {
+            guideHeader
 
-            featureCard
+            Divider()
 
-            permissionCard
+            ScrollView {
+                VStack(spacing: 16) {
+                    permissionOverview
 
-            Text("提示：不授权“辅助功能”也可以使用——在设置中启用“监听剪贴板”模式，双击 Cmd+C 后应用会读取剪贴板并翻译。但遇到无法复制的网页/内容，剪贴板拿不到文字，就无法触发翻译。")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .fixedSize(horizontal: false, vertical: true)
+                    permissionRow(
+                        icon: "accessibility",
+                        title: "辅助功能",
+                        capability: "全局文字快捷键与截图快捷键",
+                        detail: "允许应用在其他软件中响应 Command + C + C 等全局快捷键。",
+                        isGranted: !needsAccessibility,
+                        actionTitle: "打开辅助功能设置",
+                        action: onOpenAccessibility
+                    )
+
+                    permissionRow(
+                        icon: "rectangle.dashed.badge.record",
+                        title: "屏幕录制",
+                        capability: "截图翻译与 OCR 取字",
+                        detail: "允许应用读取你主动框选的屏幕区域，用于文字识别和翻译。",
+                        isGranted: !needsScreenRecording,
+                        actionTitle: "打开屏幕录制设置",
+                        action: onOpenScreenRecording
+                    )
+
+                    fallbackExplanation
+                }
+                .padding(20)
+            }
+
+            Divider()
 
             HStack {
+                Text("权限状态会在你返回应用后自动刷新。")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+
                 Spacer()
-                Button("关闭") {
-                    onClose()
-                }
-            }
-        }
-        .padding(18)
-        .frame(width: 560)
-    }
 
-    private var welcomeHeader: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("欢迎使用 大佐翻译官 v1")
-                    .font(.system(size: 20, weight: .bold))
-                Text("更快、更顺手的翻译小工具")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            Divider().opacity(0.35)
-
-            HStack(spacing: 14) {
-                Text("作者：Achord")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.secondary)
-
-                if let url = URL(string: "mailto:achordchan@gmail.com") {
-                    Link("achordchan@gmail.com", destination: url)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.blue)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+                if allPermissionsGranted {
+                    Button("完成", action: onClose)
+                        .buttonStyle(.borderedProminent)
                 } else {
-                    Text("achordchan@gmail.com")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+                    Button("稍后处理", action: onClose)
+                        .buttonStyle(.bordered)
                 }
-
-                Spacer(minLength: 0)
             }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 14)
         }
-        .padding(14)
-        .frame(maxWidth: .infinity)
-        .dsCard()
+        .frame(width: 620, height: 590)
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 
-    private var featureCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("软件特色")
-                .font(.system(size: 13, weight: .bold))
+    private var guideHeader: some View {
+        HStack(spacing: 14) {
+            Image(nsImage: NSApp.applicationIconImage)
+                .resizable()
+                .scaledToFit()
+                .frame(width: 52, height: 52)
 
-            featureRow(title: "Cmd+C+C 快捷翻译", desc: "推荐授权辅助功能：不依赖剪贴板，更稳定。")
-            featureRow(title: "监听剪贴板翻译", desc: "不授权也能用，但只能翻译“能复制”的文字。")
-            featureRow(title: "截图翻译", desc: "需要屏幕录制权限；识别不准时建议优先复制文字翻译。")
-        }
-        .padding(14)
-        .frame(maxWidth: .infinity)
-        .dsCard()
-    }
+            VStack(alignment: .leading, spacing: 4) {
+                Text(allPermissionsGranted ? "权限已准备完成" : "完善权限以启用全部功能")
+                    .font(.system(size: 20, weight: .semibold))
 
-    private func featureRow(title: String, desc: String) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(title)
-                .font(.system(size: 12, weight: .semibold))
-            Text(desc)
-                .font(.system(size: 11, weight: .medium))
+                Text(
+                    allPermissionsGranted
+                        ? "全局快捷翻译和截图翻译均可正常使用。"
+                        : "仅在使用对应功能时需要这些系统权限。"
+                )
+                .font(.system(size: 12))
                 .foregroundStyle(.secondary)
+            }
+
+            Spacer()
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, 2)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 18)
     }
 
-    private var permissionCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("建议授权")
-                .font(.system(size: 13, weight: .bold))
+    private var permissionOverview: some View {
+        HStack(spacing: 12) {
+            Image(
+                systemName: allPermissionsGranted
+                    ? "checkmark.shield.fill"
+                    : "shield.lefthalf.filled"
+            )
+            .font(.system(size: 20, weight: .semibold))
+            .foregroundStyle(allPermissionsGranted ? Color.green : Color.orange)
+            .frame(width: 32)
 
-            if needsAccessibility {
-                permissionRow(
-                    title: "辅助功能（用于全局快捷键 Cmd+C+C / Cmd+X+X）",
-                    desc: "开启后，应用才能在任何应用里直接响应快捷键（不依赖剪贴板监听）。",
-                    actionTitle: "打开辅助功能设置",
-                    action: onOpenAccessibility
-                )
-            }
-
-            if needsScreenRecording {
-                permissionRow(
-                    title: "屏幕录制（用于截图取字）",
-                    desc: "开启后，应用才能读取屏幕像素并进行 OCR。",
-                    actionTitle: "打开屏幕录制设置",
-                    action: onOpenScreenRecording
-                )
-            }
-
-            if !needsAccessibility && !needsScreenRecording {
-                Text("权限已齐全，可以开始使用快捷键")
+            VStack(alignment: .leading, spacing: 3) {
+                Text("已完成 \(grantedPermissionCount) / 2")
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(Color.green.opacity(0.9))
+                Text("应用只会在你主动使用对应功能时读取所需内容。")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .fill(
+                    (allPermissionsGranted ? Color.green : Color.orange)
+                        .opacity(0.08)
+                )
+        )
+    }
+
+    private var fallbackExplanation: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                showFallbackExplanation.toggle()
+            } label: {
+                HStack(spacing: 9) {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(showFallbackExplanation ? 90 : 0))
+
+                    Text("暂不授权辅助功能还能使用吗？")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.primary)
+
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if showFallbackExplanation {
+                Text("可以。在设置中选择“剪贴板监听”后，连续按两次 Command + C 会读取剪贴板并翻译。无法复制的网页或控件不会产生可翻译内容。")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 10)
+                    .padding(.leading, 19)
             }
         }
         .padding(14)
-        .frame(maxWidth: .infinity)
-        .dsCard()
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.65))
+        )
     }
 
-    @ViewBuilder
     private func permissionRow(
+        icon: String,
         title: String,
-        desc: String,
+        capability: String,
+        detail: String,
+        isGranted: Bool,
         actionTitle: String,
         action: @escaping () -> Void
     ) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title)
-                .font(.system(size: 13, weight: .semibold))
-
-            Text(desc)
-                .font(.system(size: 12, weight: .medium))
+        HStack(alignment: .top, spacing: 14) {
+            Image(systemName: icon)
+                .font(.system(size: 17, weight: .semibold))
                 .foregroundStyle(.secondary)
+                .frame(width: 28, height: 28)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color.primary.opacity(0.05))
+                )
 
-            Button(actionTitle) {
-                action()
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 8) {
+                    Text(title)
+                        .font(.system(size: 14, weight: .semibold))
+
+                    Label(
+                        isGranted ? "已授权" : "未授权",
+                        systemImage: isGranted
+                            ? "checkmark.circle.fill"
+                            : "exclamationmark.circle.fill"
+                    )
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(isGranted ? Color.green : Color.orange)
+                }
+
+                Text(capability)
+                    .font(.system(size: 12, weight: .medium))
+
+                Text(detail)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if !isGranted {
+                    permissionDragGuide(
+                        actionTitle: actionTitle,
+                        action: action
+                    )
+                    .padding(.top, 7)
+                }
             }
-            .padding(.top, 4)
+
+            Spacer(minLength: 0)
         }
+        .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.70))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(Color.secondary.opacity(0.14), lineWidth: 1)
+        )
+    }
+
+    private func permissionDragGuide(
+        actionTitle: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        HStack(spacing: 12) {
+            draggableApplicationIcon
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("拖入权限列表")
+                    .font(.system(size: 11, weight: .semibold))
+                Text("先打开对应系统设置，再把左侧图标拖入应用列表并开启开关。")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 10)
+
+            Button(actionTitle, action: action)
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .tint(.orange)
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color.orange.opacity(0.08))
+        )
+    }
+
+    private var draggableApplicationIcon: some View {
+        VStack(spacing: 4) {
+            ZStack(alignment: .bottomTrailing) {
+                Image(nsImage: NSApp.applicationIconImage)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 42, height: 42)
+
+                Image(systemName: "hand.draw.fill")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 17, height: 17)
+                    .background(Circle().fill(Color.orange))
+                    .overlay(Circle().strokeBorder(Color.white.opacity(0.8), lineWidth: 1))
+            }
+
+            Text("拖动")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.secondary)
+        }
+        .frame(width: 54)
+        .contentShape(Rectangle())
+        .onDrag {
+            PermissionGuideDragItemProvider.make()
+        }
+        .help("将大佐翻译官拖到系统设置的权限列表")
+    }
+}
+
+enum PermissionGuideDragItemProvider {
+    static func make(applicationURL: URL = Bundle.main.bundleURL) -> NSItemProvider {
+        NSItemProvider(object: applicationURL as NSURL)
     }
 }

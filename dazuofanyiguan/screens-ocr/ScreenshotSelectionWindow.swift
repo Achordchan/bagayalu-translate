@@ -19,6 +19,7 @@ final class ScreenshotSelectionWindow: NSWindow {
 
     init(
         session: ScreenshotOCRSession,
+        appleTranslationCoordinator: AppleTranslationCoordinator,
         onCancel: @escaping () -> Void,
         onSelectionConfirmed: @escaping (CGRect) -> Void,
         onTranslateTapped: @escaping () -> Void,
@@ -74,6 +75,7 @@ final class ScreenshotSelectionWindow: NSWindow {
                 self?.onFinishTapped()
             }
         )
+        .appleTranslationSession(using: appleTranslationCoordinator)
 
         contentView = AcceptsFirstMouseHostingView(rootView: root)
         makeFirstResponder(contentView)

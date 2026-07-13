@@ -1,10 +1,23 @@
-name: Build macOS App
+name: Build and Release macOS
 
 on:
-  workflow_dispatch:
   push:
     branches:
       - main
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 要发布的版本号，必须与 Xcode 中的 MARKETING_VERSION 一致
+        required: true
+        default: 1.2.0
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: macos-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build-macos:
@@ -14,17 +27,84 @@ jobs:
     env:
       XCODE_PROJECT: 大佐翻译官v1.xcodeproj
       XCODE_SCHEME: dazuofanyiguan
+      XCODE_TARGET: 大佐翻译官v1
       APP_NAME: 大佐翻译官v1
       DERIVED_DATA_PATH: build
+      RELEASE_VERSION: ${{ inputs.version }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Show Xcode version
         run: xcodebuild -version
 
-      - name: Build Release app
+      - name: Validate release version
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          set -euo pipefail
+
+          PROJECT_VERSION="$(
+            xcodebuild \
+              -project "$XCODE_PROJECT" \
+              -target "$XCODE_TARGET" \
+              -configuration Release \
+              -showBuildSettings |
+            awk '/MARKETING_VERSION =/ { print $3; exit }'
+          )"
+          PROJECT_BUILD="$(
+            xcodebuild \
+              -project "$XCODE_PROJECT" \
+              -target "$XCODE_TARGET" \
+              -configuration Release \
+              -showBuildSettings |
+            awk '/CURRENT_PROJECT_VERSION =/ { print $3; exit }'
+          )"
+
+          if [ -z "$RELEASE_VERSION" ]; then
+            echo "发布版本号不能为空。" >&2
+            exit 1
+          fi
+
+          if ! [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "发布版本号必须使用 x.y.z 格式。" >&2
+            exit 1
+          fi
+
+          if [ "$PROJECT_VERSION" != "$RELEASE_VERSION" ]; then
+            echo "工作流版本 $RELEASE_VERSION 与项目版本 $PROJECT_VERSION 不一致。" >&2
+            exit 1
+          fi
+
+          if ! [[ "$PROJECT_BUILD" =~ ^[0-9]+$ ]] || [ "$PROJECT_BUILD" -le 0 ]; then
+            echo "CURRENT_PROJECT_VERSION 必须是正整数。" >&2
+            exit 1
+          fi
+
+          LATEST_APPCAST="$RUNNER_TEMP/latest-appcast.xml"
+          if curl --fail --location --silent --show-error \
+            "https://github.com/Achordchan/bagayalu-translate/releases/latest/download/appcast.xml" \
+            --output "$LATEST_APPCAST"; then
+            LATEST_BUILD="$(
+              sed -n 's|.*<sparkle:version>\\([^<]*\\)</sparkle:version>.*|\\1|p' \
+                "$LATEST_APPCAST" |
+              head -1
+            )"
+            if [[ "$LATEST_BUILD" =~ ^[0-9]+$ ]] && [ "$PROJECT_BUILD" -le "$LATEST_BUILD" ]; then
+              echo "构建号 $PROJECT_BUILD 必须大于线上构建号 $LATEST_BUILD。" >&2
+              exit 1
+            fi
+          fi
+
+          TAG="v$RELEASE_VERSION"
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG 已存在，请提升版本号后重新发布。" >&2
+            exit 1
+          fi
+
+      - name: Build universal Release app
         run: |
           set -euo pipefail
           xcodebuild \
@@ -33,40 +113,142 @@ jobs:
             -configuration Release \
             -destination "generic/platform=macOS" \
             -derivedDataPath "$DERIVED_DATA_PATH" \
+            ARCHS="arm64 x86_64" \
             ONLY_ACTIVE_ARCH=NO \
-            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY=- \
+            CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO \
+            DEVELOPMENT_TEAM="" \
             build
 
-      - name: Ad-hoc sign app bundle
+      - name: Verify app signature and architectures
         run: |
           set -euo pipefail
           APP_PATH="$DERIVED_DATA_PATH/Build/Products/Release/$APP_NAME.app"
+
           if [ ! -d "$APP_PATH" ]; then
             echo "找不到构建产物：$APP_PATH" >&2
-            find "$DERIVED_DATA_PATH/Build/Products" -maxdepth 3 -print >&2
             exit 1
           fi
-          codesign --force --deep --sign - \
-            --entitlements "dazuofanyiguan/dazuofanyiguan.entitlements" \
-            "$APP_PATH"
+
           codesign --verify --deep --strict --verbose=4 "$APP_PATH"
-          file "$APP_PATH/Contents/MacOS/$APP_NAME"
 
-      - name: Package app
+          ARCHITECTURES="$(lipo -archs "$APP_PATH/Contents/MacOS/$APP_NAME")"
+          echo "构建架构：$ARCHITECTURES"
+          [[ "$ARCHITECTURES" == *arm64* && "$ARCHITECTURES" == *x86_64* ]]
+
+      - name: Package app and DMG
         run: |
           set -euo pipefail
+
           APP_PATH="$DERIVED_DATA_PATH/Build/Products/Release/$APP_NAME.app"
-          if [ ! -d "$APP_PATH" ]; then
-            echo "找不到构建产物：$APP_PATH" >&2
-            find "$DERIVED_DATA_PATH/Build/Products" -maxdepth 3 -print >&2
+          VERSION="$(
+            /usr/libexec/PlistBuddy \
+              -c 'Print :CFBundleShortVersionString' \
+              "$APP_PATH/Contents/Info.plist"
+          )"
+          ARCHIVE_NAME="大佐翻译官-v$VERSION.zip"
+          DMG_NAME="大佐翻译官-v$VERSION.dmg"
+
+          mkdir -p dist/update dist/dmg-root
+          ditto -c -k --sequesterRsrc --keepParent \
+            "$APP_PATH" \
+            "dist/update/$ARCHIVE_NAME"
+
+          ditto "$APP_PATH" "dist/dmg-root/$APP_NAME.app"
+          ln -s /Applications "dist/dmg-root/Applications"
+          hdiutil create \
+            -volname "大佐翻译官 v$VERSION" \
+            -srcfolder "dist/dmg-root" \
+            -ov \
+            -format UDZO \
+            "dist/$DMG_NAME"
+
+          rm -rf dist/dmg-root
+          echo "ARCHIVE_NAME=$ARCHIVE_NAME" >> "$GITHUB_ENV"
+          echo "DMG_NAME=$DMG_NAME" >> "$GITHUB_ENV"
+
+      - name: Generate signed Sparkle appcast
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$SPARKLE_PRIVATE_KEY" ]; then
+            echo "仓库缺少 SPARKLE_PRIVATE_KEY Secret。" >&2
             exit 1
           fi
-          mkdir -p dist
-          ditto -c -k --keepParent "$APP_PATH" "dist/$APP_NAME.app.zip"
 
-      - name: Upload app artifact
+          GENERATE_APPCAST="$(
+            find "$DERIVED_DATA_PATH/SourcePackages/artifacts" \
+              -type f \
+              -path '*/Sparkle/bin/generate_appcast' \
+              -print \
+              -quit
+          )"
+
+          if [ -z "$GENERATE_APPCAST" ]; then
+            echo "找不到 Sparkle generate_appcast 工具。" >&2
+            exit 1
+          fi
+
+          cat > "dist/update/${ARCHIVE_NAME%.zip}.md" <<EOF
+          # 大佐翻译官 v$RELEASE_VERSION
+
+          - 新增 Mini 模式，在当前工作区直接展示翻译结果。
+          - 新增 Apple 系统翻译引擎并设为默认模型。
+          - 重构首页、设置页和权限引导。
+          - 新增应用内自动更新，后续版本可直接安装并自动重启。
+          EOF
+
+          printf '%s' "$SPARKLE_PRIVATE_KEY" |
+            "$GENERATE_APPCAST" \
+              --ed-key-file - \
+              --download-url-prefix \
+              "https://github.com/Achordchan/bagayalu-translate/releases/download/v$RELEASE_VERSION/" \
+              --link \
+              "https://github.com/Achordchan/bagayalu-translate" \
+              --embed-release-notes \
+              --maximum-deltas 0 \
+              dist/update
+
+          test -f dist/update/appcast.xml
+          xmllint --noout dist/update/appcast.xml
+          grep -q 'sparkle:edSignature' dist/update/appcast.xml
+
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: 大佐翻译官v1-macOS-app
-          path: dist/大佐翻译官v1.app.zip
+          name: 大佐翻译官-macOS
+          path: |
+            dist/*.dmg
+            dist/update/*.zip
           if-no-files-found: error
+
+      - name: Create Tag and GitHub Release
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          RELEASE_NOTES="dist/release-notes.md"
+          cat > "$RELEASE_NOTES" <<EOF
+          ## 大佐翻译官 v$RELEASE_VERSION
+
+          - 新增 Mini 模式，在当前工作区直接展示翻译结果。
+          - 新增 Apple 系统翻译引擎并设为默认模型。
+          - 重构首页、设置页和权限引导。
+          - 新增应用内自动更新；从本版本开始，后续更新可在应用内直接完成并自动重启。
+
+          > 当前发布使用 ad-hoc 签名，首次安装仍可能需要在系统设置中手动放行。
+          EOF
+
+          gh release create "v$RELEASE_VERSION" \
+            --target "$GITHUB_SHA" \
+            --title "大佐翻译官 v$RELEASE_VERSION" \
+            --notes-file "$RELEASE_NOTES" \
+            "dist/$DMG_NAME" \
+            "dist/update/$ARCHIVE_NAME" \
+            "dist/update/appcast.xml"

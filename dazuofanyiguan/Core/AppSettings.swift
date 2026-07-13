@@ -3,7 +3,7 @@ import SwiftUI
 
 @MainActor
 final class AppSettings: ObservableObject {
-    @AppStorage("engineType") var engineTypeRawValue: String = TranslationEngineType.google.rawValue
+    @AppStorage("engineType") var engineTypeRawValue: String = TranslationEngineType.apple.rawValue
 
     @AppStorage("sourceLanguageCode") var sourceLanguageCode: String = LanguagePreset.auto.code
     @AppStorage("targetLanguageCode") var targetLanguageCode: String = "zh-CN"
@@ -18,6 +18,7 @@ final class AppSettings: ObservableObject {
     @AppStorage("doubleCopyWindowMs") var doubleCopyWindowMs: Int = 550
 
     @AppStorage("globalHotkeyEnabled") var globalHotkeyEnabled: Bool = false
+    @AppStorage("miniModeEnabled") var miniModeEnabled: Bool = false
 
     @AppStorage("screenshotHotkeyEnabled") var screenshotHotkeyEnabled: Bool = true
 
@@ -26,17 +27,28 @@ final class AppSettings: ObservableObject {
     @AppStorage("screenshotFreezeBackgroundEnabled") var screenshotFreezeBackgroundEnabled: Bool = true
 
     init() {
-        let key = "didMigrateOpenAIModelDefaultV1"
-        if !UserDefaults.standard.bool(forKey: key) {
+        let modelMigrationKey = "didMigrateOpenAIModelDefaultV1"
+        if !UserDefaults.standard.bool(forKey: modelMigrationKey) {
             if openAIBaseURL == "https://api.openai.com/v1", openAIModel == "gpt-4o-mini" {
                 openAIModel = ""
             }
-            UserDefaults.standard.set(true, forKey: key)
+            UserDefaults.standard.set(true, forKey: modelMigrationKey)
+        }
+
+        let engineMigrationKey = "didMigrateAppleTranslationDefaultV2"
+        let defaults = UserDefaults.standard
+        if !defaults.bool(forKey: engineMigrationKey) {
+            let storedEngine = defaults.string(forKey: "engineType")
+            if storedEngine == nil || storedEngine == TranslationEngineType.google.rawValue {
+                engineTypeRawValue = TranslationEngineType.apple.rawValue
+                defaults.set(TranslationEngineType.apple.rawValue, forKey: "engineType")
+            }
+            defaults.set(true, forKey: engineMigrationKey)
         }
     }
 
     var engineType: TranslationEngineType {
-        get { TranslationEngineType(rawValue: engineTypeRawValue) ?? .google }
+        get { TranslationEngineType(rawValue: engineTypeRawValue) ?? .apple }
         set { engineTypeRawValue = newValue.rawValue }
     }
 

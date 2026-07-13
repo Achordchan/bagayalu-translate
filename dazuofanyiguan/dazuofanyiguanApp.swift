@@ -13,17 +13,38 @@ struct dazuofanyiguanApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     @StateObject private var settings = AppSettings()
+    @StateObject private var updater = AppUpdaterController()
     @StateObject private var toast = ToastCenter()
     @StateObject private var log = LogStore()
     @StateObject private var windowController = AppWindowController()
     @StateObject private var clipboardMonitor = ClipboardDoubleCopyMonitor()
     @StateObject private var hotkeyMonitor = GlobalHotkeyMonitor()
-    @StateObject private var translatorVM = TranslatorViewModel()
-    @StateObject private var screenshotOCR = ScreenshotOCRCoordinator()
+    @StateObject private var miniTranslationController = MiniTranslationController()
+    @StateObject private var appleTranslationCoordinator: AppleTranslationCoordinator
+    @StateObject private var translatorVM: TranslatorViewModel
+    @StateObject private var screenshotOCR: ScreenshotOCRCoordinator
+
+    init() {
+        let mainAppleTranslationCoordinator = AppleTranslationCoordinator()
+        let screenshotAppleTranslationCoordinator = AppleTranslationCoordinator()
+
+        _appleTranslationCoordinator = StateObject(wrappedValue: mainAppleTranslationCoordinator)
+        _translatorVM = StateObject(
+            wrappedValue: TranslatorViewModel(
+                appleTranslationCoordinator: mainAppleTranslationCoordinator
+            )
+        )
+        _screenshotOCR = StateObject(
+            wrappedValue: ScreenshotOCRCoordinator(
+                appleTranslationCoordinator: screenshotAppleTranslationCoordinator
+            )
+        )
+    }
 
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .appleTranslationSession(using: appleTranslationCoordinator)
                 .preferredColorScheme(settings.appearance.colorScheme)
                 .toastHost()
                 .environmentObject(settings)
@@ -32,11 +53,13 @@ struct dazuofanyiguanApp: App {
                 .environmentObject(windowController)
                 .environmentObject(clipboardMonitor)
                 .environmentObject(hotkeyMonitor)
+                .environmentObject(miniTranslationController)
+                .environmentObject(appleTranslationCoordinator)
                 .environmentObject(translatorVM)
                 .environmentObject(screenshotOCR)
         }
         .commands {
-            AppCommands()
+            AppCommands(updater: updater)
         }
 
         Settings {
@@ -45,6 +68,7 @@ struct dazuofanyiguanApp: App {
                 .environmentObject(settings)
                 .environmentObject(log)
                 .environmentObject(hotkeyMonitor)
+                .environmentObject(updater)
         }
 
         Window("控制台", id: "console") {
@@ -52,15 +76,38 @@ struct dazuofanyiguanApp: App {
                 .environmentObject(log)
                 .preferredColorScheme(settings.appearance.colorScheme)
         }
+
+        MenuBarExtra("大佐翻译官", systemImage: "character.bubble") {
+            Toggle("Mini 模式", isOn: $settings.miniModeEnabled)
+
+            Divider()
+
+            Button("显示主窗口") {
+                windowController.showAndActivate()
+            }
+
+            Button("退出大佐翻译官") {
+                NSApp.terminate(nil)
+            }
+            .keyboardShortcut("q")
+        }
+        .menuBarExtraStyle(.menu)
     }
 }
 
 struct AppCommands: Commands {
+    @ObservedObject var updater: AppUpdaterController
+
     var body: some Commands {
         CommandGroup(replacing: .appInfo) {
             Button("关于大佐翻译官") {
                 NSApp.orderFrontStandardAboutPanel(nil)
             }
+
+            Button("检查更新…") {
+                updater.checkForUpdates()
+            }
+            .disabled(!updater.canCheckForUpdates)
         }
 
         CommandGroup(replacing: .appTermination) {
@@ -132,37 +179,7 @@ extension Notification.Name {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private var statusItem: NSStatusItem?
-
-    func applicationDidFinishLaunching(_ notification: Notification) {
-        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.image = NSImage(systemSymbolName: "character.bubble", accessibilityDescription: "大佐翻译官")
-
-        let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "显示主窗口", action: #selector(showMainWindow), keyEquivalent: ""))
-        menu.addItem(NSMenuItem.separator())
-        menu.addItem(NSMenuItem(title: "退出大佐翻译官", action: #selector(quitApp), keyEquivalent: "q"))
-        menu.items.forEach { $0.target = self }
-
-        item.menu = menu
-        statusItem = item
-    }
-
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         return false
-    }
-
-    @objc
-    private func showMainWindow() {
-        NSApp.activate(ignoringOtherApps: true)
-        if let window = NSApp.windows.first(where: { $0.identifier == AppWindowController.mainWindowIdentifier }) ?? NSApp.windows.first {
-            window.deminiaturize(nil)
-            window.makeKeyAndOrderFront(nil)
-        }
-    }
-
-    @objc
-    private func quitApp() {
-        NSApp.terminate(nil)
     }
 }

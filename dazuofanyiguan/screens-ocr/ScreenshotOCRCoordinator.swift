@@ -1,10 +1,11 @@
 import AppKit
 import Foundation
-import NaturalLanguage
 
 @MainActor
 final class ScreenshotOCRCoordinator: ObservableObject {
     @Published private(set) var isRunning: Bool = false
+
+    private let appleTranslationCoordinator: AppleTranslationCoordinator
 
     private var session: ScreenshotOCRSession?
     private var selectionWindow: ScreenshotSelectionWindow?
@@ -16,6 +17,10 @@ final class ScreenshotOCRCoordinator: ObservableObject {
     private var globalKeyMonitor: Any?
 
     private var previousFrontmostAppPID: pid_t?
+
+    init(appleTranslationCoordinator: AppleTranslationCoordinator) {
+        self.appleTranslationCoordinator = appleTranslationCoordinator
+    }
 
     func start(settings: AppSettings, log: LogStore, toast: ToastCenter) {
         if isRunning {
@@ -58,6 +63,7 @@ final class ScreenshotOCRCoordinator: ObservableObject {
     }
 
     func cancelAll() {
+        appleTranslationCoordinator.cancel()
         session = nil
         selectionWindow?.close()
         selectionWindow = nil
@@ -108,6 +114,7 @@ final class ScreenshotOCRCoordinator: ObservableObject {
 
         let window = ScreenshotSelectionWindow(
             session: session,
+            appleTranslationCoordinator: appleTranslationCoordinator,
             onCancel: { [weak self] in
                 Task { @MainActor in
                     self?.cancelAll()
@@ -448,75 +455,6 @@ final class ScreenshotOCRCoordinator: ObservableObject {
         return items
     }
 
-    private func detectLanguageCode(from text: String) -> String? {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty { return nil }
-
-        let recognizer = NLLanguageRecognizer()
-        recognizer.processString(trimmed)
-
-        guard let lang = recognizer.dominantLanguage else { return nil }
-
-        // 兜底：俄语 OCR 有时会把西里尔字母识别成拉丁字母/数字，导致系统误判成葡语/英语等。
-        // 这里用一个轻量规则：如果文本明显像俄语“伪拉丁”，则强制当作俄语。
-        if looksLikeRussianOCRArtifacts(trimmed) {
-            return "ru"
-        }
-
-        switch lang {
-        case .simplifiedChinese:
-            return "zh-CN"
-        case .traditionalChinese:
-            return "zh-TW"
-        case .english:
-            return "en"
-        case .japanese:
-            return "ja"
-        case .korean:
-            return "ko"
-        case .russian:
-            return "ru"
-        case .vietnamese:
-            return "vi"
-        case .french:
-            return "fr"
-        case .german:
-            return "de"
-        case .spanish:
-            return "es"
-        case .portuguese:
-            return "pt"
-        case .italian:
-            return "it"
-        default:
-            return nil
-        }
-    }
-
-    private func looksLikeRussianOCRArtifacts(_ text: String) -> Bool {
-        let t = text
-        if t.range(of: "\\bnpnBeT\\b", options: [.regularExpression, .caseInsensitive]) != nil { return true }
-        if t.range(of: "\\b3TO\\b", options: [.regularExpression, .caseInsensitive]) != nil { return true }
-
-        // 统计一段样本里“像西里尔被错成拉丁”的字符占比。
-        let sample = String(t.prefix(220))
-        let mappable: Set<Character> = [
-            "A", "B", "C", "E", "H", "K", "M", "O", "P", "T", "X", "Y",
-            "N", "U", "L", "I",
-            "a", "c", "e", "o", "p", "x", "y", "k", "m", "t",
-            "n", "u", "l", "i",
-            "3", "0"
-        ]
-        let lettersDigits = sample.filter {
-            guard let u = $0.unicodeScalars.first else { return false }
-            return CharacterSet.letters.contains(u) || CharacterSet.decimalDigits.contains(u)
-        }
-        if lettersDigits.count < 24 { return false }
-
-        let hits = lettersDigits.filter { mappable.contains($0) }.count
-        return Double(hits) / Double(lettersDigits.count) >= 0.62
-    }
-
     private func runTranslateIfPossible(settings: AppSettings, log: LogStore, toast: ToastCenter) async {
         guard let session else { return }
         let sourceLines = session.ocrLines
@@ -528,6 +466,8 @@ final class ScreenshotOCRCoordinator: ObservableObject {
         session.stage = .translating
 
         switch settings.engineType {
+        case .apple:
+            log.info("截图翻译引擎：Apple 本地翻译")
         case .google:
             log.info("截图翻译引擎：Google")
         case .openAICompatible:
@@ -712,8 +652,10 @@ final class ScreenshotOCRCoordinator: ObservableObject {
         toast: ToastCenter,
         onPhaseChange: ((String) -> Void)?
     ) async -> Result<String, Error> {
-        let engine: TranslationEngine
+        let engine: TranslationEngine?
         switch settings.engineType {
+        case .apple:
+            engine = nil
         case .google:
             engine = GoogleTranslateEngine()
         case .openAICompatible:
@@ -733,14 +675,31 @@ final class ScreenshotOCRCoordinator: ObservableObject {
         }
 
         do {
-            let result = try await engine.translate(
-                text: text,
-                sourceLanguageCode: sourceLanguageCode,
-                targetLanguageCode: targetLanguageCode
-            )
+            let result: TranslationResult
+            if settings.engineType == .apple {
+                result = try await appleTranslationCoordinator.translate(
+                    text: text,
+                    sourceLanguageCode: sourceLanguageCode,
+                    targetLanguageCode: targetLanguageCode,
+                    onPhaseChange: onPhaseChange
+                )
+            } else if let engine {
+                result = try await engine.translate(
+                    text: text,
+                    sourceLanguageCode: sourceLanguageCode,
+                    targetLanguageCode: targetLanguageCode
+                )
+            } else {
+                return .failure(NSError(
+                    domain: "AppleTranslation",
+                    code: -1,
+                    userInfo: [NSLocalizedDescriptionKey: "翻译引擎未正确初始化"]
+                ))
+            }
             return .success(result.translatedText)
         } catch {
-            if let rl = error as? OpenAICompatibleEngine.RateLimitError {
+            if let rl = error as? OpenAICompatibleEngine.RateLimitError,
+               let engine {
                 let base = "请求过多（\(rl.apiCode)）：\(rl.apiMessage)"
                 toast.show(base, style: .warning, duration: 1.0)
                 toast.show("准备重试中（2秒）", style: .info, duration: 1.0)
