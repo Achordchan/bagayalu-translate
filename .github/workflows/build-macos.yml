@@ -147,8 +147,10 @@ jobs:
               -c 'Print :CFBundleShortVersionString' \
               "$APP_PATH/Contents/Info.plist"
           )"
-          ARCHIVE_NAME="大佐翻译官-v$VERSION.zip"
-          DMG_NAME="大佐翻译官-v$VERSION.dmg"
+          # GitHub CLI 在 Release 上传阶段可能截断非 ASCII 文件名，
+          # 更新包必须使用稳定文件名，确保 appcast 下载地址与实际资产一致。
+          ARCHIVE_NAME="bagayalu-translate-v$VERSION.zip"
+          DMG_NAME="bagayalu-translate-v$VERSION.dmg"
 
           mkdir -p dist/update dist/dmg-root
           ditto -c -k --sequesterRsrc --keepParent \
