@@ -57,11 +57,11 @@ final class AppSettings: ObservableObject {
             UserDefaults.standard.set(true, forKey: modelMigrationKey)
         }
 
-        let engineMigrationKey = "didMigrateAppleTranslationDefaultV2"
+        // 仅在用户从未选择过引擎时写入默认值；不能覆盖已有 Google 等选择。
+        let engineMigrationKey = "didMigrateAppleTranslationDefaultV3"
         let defaults = UserDefaults.standard
         if !defaults.bool(forKey: engineMigrationKey) {
-            let storedEngine = defaults.string(forKey: "engineType")
-            if storedEngine == nil || storedEngine == TranslationEngineType.google.rawValue {
+            if defaults.object(forKey: "engineType") == nil {
                 engineTypeRawValue = TranslationEngineType.apple.rawValue
                 defaults.set(TranslationEngineType.apple.rawValue, forKey: "engineType")
             }

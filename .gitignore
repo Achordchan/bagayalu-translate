@@ -25,3 +25,7 @@ playground.xcworkspace
 # Distribution artifacts
 dist/
 *.dmg
+
+# LLVM/Xcode coverage raw profiles
+*.profraw
+default.profraw

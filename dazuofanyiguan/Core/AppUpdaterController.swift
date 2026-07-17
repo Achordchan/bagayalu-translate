@@ -39,6 +39,14 @@ final class AppUpdaterController: NSObject, ObservableObject {
     }
 
     private static var isRunningTests: Bool {
-        ProcessInfo.processInfo.environment["XCTestBundlePath"] != nil
+        let env = ProcessInfo.processInfo.environment
+        if env["XCTestConfigurationFilePath"] != nil { return true }
+        if env["XCTestBundlePath"] != nil { return true }
+        if env["XCTestSessionIdentifier"] != nil { return true }
+        if env["SWIFTPM_TEST"] != nil { return true }
+        // xctest / swift-testing 宿主进程名兜底
+        let processName = ProcessInfo.processInfo.processName.lowercased()
+        if processName.contains("xctest") { return true }
+        return false
     }
 }

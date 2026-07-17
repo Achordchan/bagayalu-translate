@@ -67,7 +67,6 @@ final class MiniTranslationController: ObservableObject {
     private var remainingDismissDuration: TimeInterval?
     private var isHovering = false
     private var anchorPoint = CGPoint.zero
-    private weak var activeViewModel: TranslatorViewModel?
 
     func translate(
         text: String,
@@ -99,10 +98,8 @@ final class MiniTranslationController: ObservableObject {
 
         requestTask?.cancel()
         autoDismissTask?.cancel()
-        activeViewModel?.cancelTranslation(clearInput: false)
 
         let requestID = requestTracker.begin()
-        activeViewModel = viewModel
         anchorPoint = NSEvent.mouseLocation
         show(.translating)
 
@@ -134,7 +131,7 @@ final class MiniTranslationController: ObservableObject {
                     requestID: requestID,
                     languagePair: languagePair,
                     settings: settings,
-                    viewModel: viewModel,
+                    appleTranslationCoordinator: appleTranslationCoordinator,
                     windowController: windowController,
                     toast: toast,
                     log: log
@@ -181,10 +178,7 @@ final class MiniTranslationController: ObservableObject {
         remainingDismissDuration = nil
         requestTracker.invalidate()
 
-        if cancelTranslation, case .translating = bubbleModel.state {
-            activeViewModel?.cancelTranslation(clearInput: false)
-        }
-        activeViewModel = nil
+        // requestTask 已取消；独立翻译任务会随 Task 取消结束，不触碰主窗口 ViewModel。
         panel.orderOut(nil)
     }
 
@@ -193,34 +187,36 @@ final class MiniTranslationController: ObservableObject {
         requestID: UUID,
         languagePair: TranslationLanguagePair,
         settings: AppSettings,
-        viewModel: TranslatorViewModel,
+        appleTranslationCoordinator: AppleTranslationCoordinator,
         windowController: AppWindowController,
         toast: ToastCenter,
         log: LogStore
     ) {
-        viewModel.translateExternalTextNow(
-            text,
-            settings: settings,
-            log: log,
-            toast: toast,
-            feedbackMode: .external,
-            languagePair: languagePair
-        ) { [weak self, weak viewModel] result in
-            guard let self, requestTracker.accepts(requestID) else {
-                return
-            }
-
-            switch result {
-            case .success(let translation):
+        requestTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let translation = try await StandaloneTranslationRunner.translate(
+                    text: text,
+                    settings: settings,
+                    log: log,
+                    languagePair: languagePair,
+                    appleTranslationCoordinator: appleTranslationCoordinator
+                )
+                guard !Task.isCancelled, requestTracker.accepts(requestID) else {
+                    return
+                }
                 show(.result(translation.translatedText))
-            case .failure(let error):
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !Task.isCancelled, requestTracker.accepts(requestID) else {
+                    return
+                }
                 if requiresMainWindow(for: error) {
                     panel.orderOut(nil)
                     requestTracker.invalidate()
-                    activeViewModel = nil
                     windowController.showAndActivate()
                     toast.show(error.localizedDescription, style: .error)
-                    viewModel?.lastErrorMessage = error.localizedDescription
                 } else {
                     show(.error(error.localizedDescription))
                 }
@@ -238,7 +234,6 @@ final class MiniTranslationController: ObservableObject {
         log: LogStore
     ) {
         requestTracker.invalidate()
-        activeViewModel = nil
         panel.orderOut(nil)
         windowController.showAndActivate()
         viewModel.translateExternalTextNow(
@@ -258,7 +253,7 @@ final class MiniTranslationController: ObservableObject {
         }
 
         switch engineError {
-        case .missingAPIKey, .missingModel, .invalidBaseURL:
+        case .missingAPIKey, .missingModel, .invalidBaseURL(_):
             return true
         case .emptyResponse:
             return false
@@ -267,9 +262,7 @@ final class MiniTranslationController: ObservableObject {
 
     private func showStandaloneError(_ message: String) {
         requestTask?.cancel()
-        activeViewModel?.cancelTranslation(clearInput: false)
         requestTracker.invalidate()
-        activeViewModel = nil
         bubbleModel.showsSmartDirectionNotice = false
         anchorPoint = NSEvent.mouseLocation
         show(.error(message))

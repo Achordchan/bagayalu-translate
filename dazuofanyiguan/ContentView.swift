@@ -65,32 +65,12 @@ struct ContentView: View {
         .background(Color(nsColor: .windowBackgroundColor).ignoresSafeArea())
         .background(
             WindowAccessor { window in
-                guard let window else { return }
-
-                window.title = "大佐翻译官 v\(appVersion)"
-                windowController.window = window
-                window.identifier = AppWindowController.mainWindowIdentifier
-                window.isReleasedWhenClosed = false
-                window.delegate = windowController
-
-                windowController.applyAppearance(settings.appearance, to: window)
-
-                if window.minSize.width != 980 || window.minSize.height != 640 {
-                    window.minSize = NSSize(width: 980, height: 640)
-                }
-                if window.frame.size.width != 980 || window.frame.size.height != 640 {
-                    window.setContentSize(NSSize(width: 980, height: 640))
-                }
-
-                window.titleVisibility = .visible
-                window.titlebarAppearsTransparent = false
-                window.isMovableByWindowBackground = false
-                window.styleMask.remove(.borderless)
-                window.styleMask.insert([.titled, .closable, .miniaturizable, .resizable])
-                if #available(macOS 11.0, *) {
-                    window.titlebarSeparatorStyle = .none
-                }
-                windowController.configureChrome(window)
+                // 布局回调中只绑定窗口身份与外观，避免 setContentSize 触发 AppKit 递归布局。
+                windowController.bindMainWindow(
+                    window,
+                    title: "大佐翻译官 v\(appVersion)",
+                    appearance: settings.appearance
+                )
             }
             .frame(width: 0, height: 0)
         )
@@ -263,7 +243,7 @@ struct ContentView: View {
     }
 
     private var appVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.2.1"
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.2.2"
     }
 
     private var miniPresentationConfiguration: MiniPresentationConfiguration {
@@ -286,120 +266,6 @@ struct ContentView: View {
             globalMonitorFailed: settings.globalHotkeyEnabled
                 && hotkeyMonitor.lastStartFailureMessage != nil
         )
-    }
-
-    private struct TranslationTimeoutBanner: View {
-        let onCancel: () -> Void
-
-        let waitedSeconds: Int
-
-        var body: some View {
-            HStack(spacing: 12) {
-                Image(systemName: "hourglass")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.secondary)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("翻译耗时较长")
-                        .font(.system(size: 13, weight: .semibold))
-                    Text("这段内容较长，翻译可能需要更久。")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                }
-
-                Spacer(minLength: 0)
-
-                Text("当前已等待\(waitedSeconds)秒")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
-
-                Button("取消翻译") {
-                    onCancel()
-                }
-                .buttonStyle(.bordered)
-                .tint(.red)
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .background(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(Color(nsColor: .windowBackgroundColor))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
-            )
-            .shadow(color: .black.opacity(0.12), radius: 18, x: 0, y: 8)
-            .frame(maxWidth: 720)
-            .padding(.horizontal, 12)
-        }
-    }
-
-    private struct AICompletedInfoButton: View {
-        let model: String
-        let durationMs: Int?
-        let estimatedTokens: Int?
-
-        @State private var showInfo: Bool = false
-
-        var body: some View {
-            Button {
-                showInfo.toggle()
-            } label: {
-                Image(systemName: "info.circle")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .padding(10)
-            }
-            .buttonStyle(.plain)
-            .popover(isPresented: $showInfo) {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(spacing: 8) {
-                        Image(systemName: "checkmark.seal.fill")
-                            .foregroundStyle(.green)
-                        Text("AI 请求已完成")
-                            .font(.system(size: 13, weight: .semibold))
-                        Spacer(minLength: 0)
-                    }
-
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("模型")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                        Text(model)
-                            .font(.system(size: 12))
-                    }
-
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("运行时间")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                        if let durationMs {
-                            Text("\(durationMs) ms")
-                                .font(.system(size: 12))
-                        } else {
-                            Text("未知")
-                                .font(.system(size: 12))
-                        }
-                    }
-
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("预计消耗")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                        if let estimatedTokens {
-                            Text("Token 数：\(estimatedTokens)")
-                                .font(.system(size: 12))
-                        } else {
-                            Text("Token 数：未知")
-                                .font(.system(size: 12))
-                        }
-                    }
-                }
-                .padding(14)
-                .frame(width: 260)
-            }
-        }
     }
 
     private var header: some View {
@@ -523,149 +389,6 @@ struct ContentView: View {
 
     private func aiTranslatingStatusBar(model: String, estimatedTokens: Int?, phaseText: String?) -> some View {
         AITranslatingStatusBar(model: model, estimatedTokens: estimatedTokens, phaseText: phaseText)
-    }
-
-    private struct AITranslatingStatusBar: View {
-        let model: String
-        let estimatedTokens: Int?
-        let phaseText: String?
-
-        @State private var showInfo: Bool = false
-
-        var body: some View {
-            TimelineView(.periodic(from: .now, by: 0.55)) { context in
-                let step = Int(context.date.timeIntervalSinceReferenceDate / 0.55) % 4
-                let dots = String(repeating: "。", count: step)
-                HStack(spacing: 8) {
-                    Button {
-                        showInfo.toggle()
-                    } label: {
-                        Image(systemName: "info.circle")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                    .popover(isPresented: $showInfo) {
-                        VStack(alignment: .leading, spacing: 10) {
-                            HStack(spacing: 8) {
-                                Image(systemName: "sparkles")
-                                    .foregroundStyle(.secondary)
-                                Text("AI 翻译详情")
-                                    .font(.system(size: 13, weight: .semibold))
-                                Spacer(minLength: 0)
-                            }
-
-                            VStack(alignment: .leading, spacing: 6) {
-                                Text("当前状态")
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .foregroundStyle(.secondary)
-                                Text(phaseText ?? "正在等待服务端响应")
-                                    .font(.system(size: 12))
-                            }
-
-                            VStack(alignment: .leading, spacing: 6) {
-                                Text("预计消耗")
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .foregroundStyle(.secondary)
-                                if let estimatedTokens {
-                                    Text("Token 数：\(estimatedTokens)")
-                                        .font(.system(size: 12))
-                                } else {
-                                    Text("Token 数：未知")
-                                        .font(.system(size: 12))
-                                }
-                            }
-                        }
-                        .padding(14)
-                        .frame(width: 260)
-                    }
-
-                    Image(systemName: "sparkles")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                    Text("正在调用AI模型-\(model)翻译，请稍候\(dots)")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.secondary)
-
-                    Spacer(minLength: 0)
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 8)
-                .overlay(
-                    Divider(),
-                    alignment: .top
-                )
-            }
-        }
-    }
-
-    private struct OutputTextView: NSViewRepresentable {
-        @Binding var text: String
-        let fontSize: Double
-
-        func makeNSView(context: Context) -> NSScrollView {
-            let scrollView = NSScrollView()
-            scrollView.hasVerticalScroller = true
-            scrollView.hasHorizontalScroller = false
-            scrollView.drawsBackground = false
-            scrollView.borderType = .noBorder
-            scrollView.scrollerStyle = .overlay
-            scrollView.autohidesScrollers = true
-            scrollView.scrollerKnobStyle = .default
-
-            let textView = NSTextView()
-            textView.minSize = NSSize(width: 0, height: 0)
-            textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-            textView.isVerticallyResizable = true
-            textView.isHorizontallyResizable = false
-            textView.autoresizingMask = [.width]
-            textView.isRichText = false
-            textView.isEditable = false
-            textView.isSelectable = true
-            textView.drawsBackground = false
-            textView.font = NSFont.systemFont(ofSize: CGFloat(fontSize))
-            textView.textColor = NSColor.labelColor
-            let paragraphStyle = NSMutableParagraphStyle()
-            paragraphStyle.lineSpacing = 4
-            textView.defaultParagraphStyle = paragraphStyle
-            textView.typingAttributes[.paragraphStyle] = paragraphStyle
-            textView.textContainerInset = NSSize(width: 8, height: 10)
-            textView.string = text
-            if !text.isEmpty {
-                textView.textStorage?.addAttribute(.paragraphStyle, value: paragraphStyle, range: NSRange(location: 0, length: (text as NSString).length))
-            }
-            textView.textContainer?.widthTracksTextView = true
-            textView.textContainer?.heightTracksTextView = false
-            textView.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-
-            scrollView.documentView = textView
-            scrollView.verticalScroller?.controlSize = .mini
-            return scrollView
-        }
-
-        func updateNSView(_ nsView: NSScrollView, context: Context) {
-            guard let textView = nsView.documentView as? NSTextView else { return }
-            let size = CGFloat(fontSize)
-            if abs((textView.font?.pointSize ?? 0) - size) > 0.01 {
-                let font = NSFont.systemFont(ofSize: size)
-                textView.font = font
-                textView.typingAttributes[.font] = font
-                let length = textView.textStorage?.length ?? 0
-                if length > 0 {
-                    textView.textStorage?.addAttribute(
-                        .font,
-                        value: font,
-                        range: NSRange(location: 0, length: length)
-                    )
-                }
-            }
-            if textView.string != text {
-                textView.string = text
-                if let paragraphStyle = textView.defaultParagraphStyle, !text.isEmpty {
-                    textView.textStorage?.addAttribute(.paragraphStyle, value: paragraphStyle, range: NSRange(location: 0, length: (text as NSString).length))
-                }
-            }
-        }
     }
 
     private var detectedSourceDescription: String? {
@@ -792,7 +515,12 @@ struct ContentView: View {
         vm.applyExternalText(text, settings: settings, log: log, toast: toast)
 
         if showClipboardToast {
-            toast.show("已获取剪贴板文字并开始翻译", style: .success)
+            switch settings.engineType {
+            case .google, .openAICompatible:
+                toast.show("已从剪贴板读取文字，将发送到在线翻译服务", style: .info)
+            case .apple:
+                toast.show("已获取剪贴板文字并开始翻译", style: .success)
+            }
         }
     }
 
@@ -870,10 +598,7 @@ struct ContentView: View {
             && !didDismissPermissionBannerThisSession
 
         if !trusted {
-            if settings.globalHotkeyEnabled {
-                settings.globalHotkeyEnabled = false
-                settings.doubleCopyEnabled = true
-            }
+            // 权限暂不可用时只做运行时回退，不永久改写用户偏好。
             if hotkeyMonitor.isRunning || hotkeyMonitor.isStarting {
                 hotkeyMonitor.stop()
             }

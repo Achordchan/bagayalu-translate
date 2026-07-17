@@ -57,10 +57,8 @@ final class TranslatorViewModel: ObservableObject {
 
     private var translationTokenCounter: Int = 0
 
-    private let http = HTTPClient()
     private let appleTranslationCoordinator: AppleTranslationCoordinator
 
-    private let newlineMarker: String = "[[DAZUO_NL]]"
 
     init(appleTranslationCoordinator: AppleTranslationCoordinator) {
         self.appleTranslationCoordinator = appleTranslationCoordinator
@@ -87,52 +85,30 @@ final class TranslatorViewModel: ObservableObject {
         }
     }
 
-    private func translateWithRateLimitRetry(
-        engine: TranslationEngine,
-        text: String,
-        sourceLanguageCode: String,
-        targetLanguageCode: String,
-        settings: AppSettings,
+    private func handleRateLimit(
+        _ rateLimit: OpenAICompatibleEngine.RateLimitError,
         log: LogStore,
         toast: ToastCenter,
         feedbackMode: TranslationFeedbackMode
-    ) async throws -> TranslationResult {
-        do {
-            return try await engine.translate(
-                text: text,
-                sourceLanguageCode: sourceLanguageCode,
-                targetLanguageCode: targetLanguageCode
-            )
-        } catch {
-            guard let rl = error as? OpenAICompatibleEngine.RateLimitError else {
-                throw error
-            }
+    ) async throws {
+        let base = "请求过多（\(rateLimit.apiCode)）：\(rateLimit.apiMessage)"
+        lastErrorMessage = base
+        log.warn("翻译遇到限流：\(base)，2秒后重试")
 
-            let base = "请求过多（\(rl.apiCode)）：\(rl.apiMessage)"
-            lastErrorMessage = base
-            log.warn("翻译遇到限流：\(base)，2秒后重试")
-
-            if feedbackMode == .standard {
-                toast.show(base, style: .warning, duration: 1.0)
-                toast.show("准备重试中（2秒）", style: .info, duration: 1.0)
-            }
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
-            if Task.isCancelled { throw error }
-
-            if feedbackMode == .standard {
-                toast.show("准备重试中（1秒）", style: .info, duration: 1.0)
-            }
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
-            if Task.isCancelled { throw error }
-
-            // 真正开始重试（仅一次）。
-            log.info("限流倒计时结束，开始重试")
-            return try await engine.translate(
-                text: text,
-                sourceLanguageCode: sourceLanguageCode,
-                targetLanguageCode: targetLanguageCode
-            )
+        if feedbackMode == .standard {
+            toast.show(base, style: .warning, duration: 1.0)
+            toast.show("准备重试中（2秒）", style: .info, duration: 1.0)
         }
+        try await Task.sleep(nanoseconds: 1_000_000_000)
+        if Task.isCancelled { throw CancellationError() }
+
+        if feedbackMode == .standard {
+            toast.show("准备重试中（1秒）", style: .info, duration: 1.0)
+        }
+        try await Task.sleep(nanoseconds: 1_000_000_000)
+        if Task.isCancelled { throw CancellationError() }
+
+        log.info("限流倒计时结束，开始重试")
     }
 
     func translateNow(
@@ -163,14 +139,22 @@ final class TranslatorViewModel: ObservableObject {
             isWaitingForLanguageDownload = false
             return
         }
-        let text = settings.engineType == .apple
-            ? normalizedText
-            : normalizedText.replacingOccurrences(of: "\n", with: " \(newlineMarker) ")
+
+        // 请求开始时冻结引擎/语言配置，避免异步期间用户切换设置导致状态错配。
+        let engineType = settings.engineType
         let sl = languagePair?.sourceLanguageCode ?? settings.sourceLanguageCode
         let tl = languagePair?.targetLanguageCode ?? settings.targetLanguageCode
         languagePairOverride = languagePair
 
-        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        guard let request = TranslationRequestContext.make(
+            text: rawText,
+            engineType: engineType,
+            sourceLanguageCode: sl,
+            targetLanguageCode: tl,
+            openAIBaseURL: settings.openAIBaseURL,
+            openAIModel: settings.openAIModel,
+            openAIEndpointMode: settings.openAIEndpointMode
+        ) else {
             outputText = ""
             detectedSourceLanguageCode = nil
             estimatedAITokenCount = nil
@@ -190,104 +174,85 @@ final class TranslatorViewModel: ObservableObject {
         detectedSourceLanguageCode = nil
         isTranslating = true
         lastErrorMessage = nil
-        isUsingAI = settings.engineType == .openAICompatible
-        let modelName = settings.openAIModel.trimmingCharacters(in: .whitespacesAndNewlines)
-        activeAIModelName = settings.engineType == .openAICompatible ? (modelName.isEmpty ? nil : modelName) : nil
-        appleRequestPhase = settings.engineType == .apple ? "正在准备 Apple 本地翻译" : nil
+        isUsingAI = request.isUsingAI
+        let modelName = request.openAIModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        activeAIModelName = request.isUsingAI ? (modelName.isEmpty ? nil : modelName) : nil
+        appleRequestPhase = request.engineType == .apple ? "正在准备 Apple 本地翻译" : nil
         isWaitingForLanguageDownload = false
 
-        if isUsingAI {
-            estimatedAITokenCount = estimateTotalTokensForAI(text: text, targetLanguageCode: tl, model: modelName)
+        if request.isUsingAI {
+            estimatedAITokenCount = estimateTotalTokensForAI(
+                text: request.preparedText,
+                targetLanguageCode: request.targetLanguageCode,
+                model: modelName
+            )
             aiRequestPhase = "正在准备请求"
         } else {
             estimatedAITokenCount = nil
             aiRequestPhase = nil
         }
 
-        let engine: TranslationEngine?
-        let engineTitle: String
-        switch settings.engineType {
-        case .apple:
-            engine = nil
-            engineTitle = settings.engineType.title
-        case .google:
-            engine = GoogleTranslateEngine()
-            engineTitle = settings.engineType.title
-        case .openAICompatible:
-            let key: String?
+        let apiKey: String?
+        if request.engineType == .openAICompatible {
             do {
-                key = try KeychainStore.getString(for: "openAIAPIKey")
+                apiKey = try KeychainStore.getString(for: "openAIAPIKey")
             } catch {
                 log.error("读取 Keychain 失败：\(error.localizedDescription)")
-                key = nil
+                apiKey = nil
             }
-            engine = OpenAICompatibleEngine(
-                baseURL: settings.openAIBaseURL,
-                apiKey: key,
-                model: settings.openAIModel,
-                endpointMode: settings.openAIEndpointMode,
-                onPhaseChange: { [weak self] phase in
-                    Task { @MainActor in
-                        self?.aiRequestPhase = phase
-                    }
-                }
-            )
-            engineTitle = settings.engineType.title
+        } else {
+            apiKey = nil
         }
 
         if let estimated = estimatedAITokenCount {
-            log.info("开始翻译（引擎：\(engineTitle) sl=\(sl) tl=\(tl) 字数=\(rawText.count) 预计Token=\(estimated)）")
+            log.info("开始翻译（引擎：\(request.engineTitle) sl=\(request.sourceLanguageCode) tl=\(request.targetLanguageCode) 字数=\(request.rawText.count) 预计Token=\(estimated)）")
         } else {
-            log.info("开始翻译（引擎：\(engineTitle) sl=\(sl) tl=\(tl) 字数=\(rawText.count)）")
+            log.info("开始翻译（引擎：\(request.engineTitle) sl=\(request.sourceLanguageCode) tl=\(request.targetLanguageCode) 字数=\(request.rawText.count)）")
         }
         let start = Date()
 
         translateTask = Task { @MainActor in
             do {
-                if self.isUsingAI {
+                if request.isUsingAI {
                     self.aiRequestPhase = "正在等待服务端响应"
                 }
-                let result: TranslationResult
-                if settings.engineType == .apple {
-                    result = try await appleTranslationCoordinator.translate(
-                        text: text,
-                        sourceLanguageCode: sl,
-                        targetLanguageCode: tl,
-                        onPhaseChange: { [weak self] phase in
-                            Task { @MainActor in
-                                self?.appleRequestPhase = phase
-                            }
-                        },
-                        onLanguageDownloadStateChange: { [weak self] isWaiting in
-                            Task { @MainActor in
-                                self?.isWaitingForLanguageDownload = isWaiting
-                            }
+                let result = try await FrozenTranslationExecutor.execute(
+                    request: request,
+                    apiKey: apiKey,
+                    appleTranslationCoordinator: appleTranslationCoordinator,
+                    onAIPhaseChange: { [weak self] phase in
+                        Task { @MainActor in
+                            self?.aiRequestPhase = phase
                         }
-                    )
-                } else if let engine {
-                    result = try await translateWithRateLimitRetry(
-                        engine: engine,
-                        text: text,
-                        sourceLanguageCode: sl,
-                        targetLanguageCode: tl,
-                        settings: settings,
-                        log: log,
-                        toast: toast,
-                        feedbackMode: feedbackMode
-                    )
-                } else {
-                    return
-                }
+                    },
+                    onApplePhaseChange: { [weak self] phase in
+                        Task { @MainActor in
+                            self?.appleRequestPhase = phase
+                        }
+                    },
+                    onLanguageDownloadStateChange: { [weak self] isWaiting in
+                        Task { @MainActor in
+                            self?.isWaitingForLanguageDownload = isWaiting
+                        }
+                    },
+                    onRateLimit: { [weak self] rateLimit in
+                        guard let self else { return }
+                        try await self.handleRateLimit(
+                            rateLimit,
+                            log: log,
+                            toast: toast,
+                            feedbackMode: feedbackMode
+                        )
+                    }
+                )
                 if Task.isCancelled { return }
                 if token != translationToken { return }
-                outputText = settings.engineType == .apple
-                    ? result.translatedText
-                    : restoreNewlines(from: result.translatedText)
+                outputText = result.translatedText
                 detectedSourceLanguageCode = result.detectedSourceLanguageCode
                 lastErrorMessage = nil
                 let cost = Int(Date().timeIntervalSince(start) * 1000)
                 lastTranslationDurationMs = cost
-                if self.isUsingAI {
+                if request.isUsingAI {
                     lastAIModelName = self.activeAIModelName
                     lastAIEstimatedTokens = self.estimatedAITokenCount
                 } else {
@@ -324,12 +289,6 @@ final class TranslatorViewModel: ObservableObject {
                 isWaitingForLanguageDownload = false
             }
         }
-    }
-
-    private func restoreNewlines(from text: String) -> String {
-        text
-            .replacingOccurrences(of: " \(newlineMarker) ", with: "\n")
-            .replacingOccurrences(of: newlineMarker, with: "\n")
     }
 
     private func estimateTotalTokensForAI(text: String, targetLanguageCode: String, model: String) -> Int {

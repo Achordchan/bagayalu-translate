@@ -226,7 +226,7 @@ struct SettingsView: View {
     }
 
     private var appVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.2.1"
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.2.2"
     }
 
     private func loadSettings() {
@@ -243,9 +243,11 @@ struct SettingsView: View {
             log.error("读取 Keychain 失败：\(error.localizedDescription)")
         }
 
+        // 权限暂不可用时不永久改写用户偏好，只停止运行中的全局热键。
         if settings.globalHotkeyEnabled, !hotkeyMonitor.isTrusted {
-            settings.globalHotkeyEnabled = false
-            settings.doubleCopyEnabled = true
+            if hotkeyMonitor.isRunning || hotkeyMonitor.isStarting {
+                hotkeyMonitor.stop()
+            }
         }
 
     }
@@ -257,10 +259,6 @@ struct SettingsView: View {
         hasLoadedPermissionStatus = true
 
         if !hasAccessibilityPermission {
-            if settings.globalHotkeyEnabled {
-                settings.globalHotkeyEnabled = false
-                settings.doubleCopyEnabled = true
-            }
             if hotkeyMonitor.isRunning || hotkeyMonitor.isStarting {
                 hotkeyMonitor.stop()
             }
@@ -287,10 +285,12 @@ struct SettingsView: View {
             settings.doubleCopyEnabled = false
             hasAccessibilityPermission = true
         } else {
-            settings.globalHotkeyEnabled = false
-            settings.doubleCopyEnabled = true
+            // 保留用户偏好为全局快捷键；运行时回退到剪贴板监听，并引导授权。
+            if hotkeyMonitor.isRunning || hotkeyMonitor.isStarting {
+                hotkeyMonitor.stop()
+            }
             alertTitle = "需要辅助功能权限"
-            alertMessage = "已切换到剪贴板监听模式。授权辅助功能后，可使用更稳定的全局快捷键。"
+            alertMessage = "已临时使用剪贴板监听。授权辅助功能后，会按你的偏好恢复全局快捷键。"
             openPermissionGuideAfterAlert = true
             showAlert = true
         }
@@ -339,6 +339,13 @@ struct SettingsView: View {
                 title: "无法保存",
                 message: "Base URL、模型和 API Key 均不能为空。"
             )
+            return
+        }
+
+        do {
+            _ = try OpenAIEndpointValidator.validatedBaseURL(from: baseURL)
+        } catch {
+            presentAlert(title: "无法保存", message: error.localizedDescription)
             return
         }
 

@@ -6,7 +6,7 @@ struct OpenAICompatibleEngine: TranslationEngine {
     enum EngineError: LocalizedError {
         case missingAPIKey
         case missingModel
-        case invalidBaseURL
+        case invalidBaseURL(String = "Base URL 无效")
         case emptyResponse
 
         var errorDescription: String? {
@@ -15,8 +15,8 @@ struct OpenAICompatibleEngine: TranslationEngine {
                 return "请先在设置里填写 API Key"
             case .missingModel:
                 return "请先在设置里填写 Model"
-            case .invalidBaseURL:
-                return "Base URL 无效"
+            case .invalidBaseURL(let message):
+                return message
             case .emptyResponse:
                 return "模型没有返回内容"
             }
@@ -244,8 +244,11 @@ struct OpenAICompatibleEngine: TranslationEngine {
             throw EngineError.missingModel
         }
 
-        guard let url = URL(string: baseURL.trimmingCharacters(in: .whitespacesAndNewlines)) else {
-            throw EngineError.invalidBaseURL
+        let url: URL
+        do {
+            url = try OpenAIEndpointValidator.validatedBaseURL(from: baseURL)
+        } catch {
+            throw EngineError.invalidBaseURL(error.localizedDescription)
         }
 
         let endpoint: URL
@@ -294,7 +297,8 @@ struct OpenAICompatibleEngine: TranslationEngine {
             body = [
                 "model": model,
                 "temperature": 0.2,
-                "input": "\(systemPrompt)\n\n\(userPrompt)"
+                "instructions": systemPrompt,
+                "input": userPrompt
             ]
         }
 
@@ -308,135 +312,12 @@ struct OpenAICompatibleEngine: TranslationEngine {
         let data = try await dataHandlingRateLimit(for: request)
         onPhaseChange?("正在解析响应")
 
-        let decoder = JSONDecoder()
-
-        struct ChatCompletionsResponse: Decodable {
-            struct Choice: Decodable {
-                struct Message: Decodable {
-                    let content: String?
-                }
-                let message: Message?
-            }
-            let choices: [Choice]?
-        }
-
-        struct ResponsesResponse: Decodable {
-            struct Output: Decodable {
-                struct Content: Decodable {
-                    let text: String?
-                    let type: String?
-                }
-                let content: [Content]?
-            }
-
-            let output_text: String?
-            let output: [Output]?
-        }
-
-        let content: String
-        switch endpointMode {
-        case .chatCompletions:
-            let decoded = try decoder.decode(ChatCompletionsResponse.self, from: data)
-            content = decoded.choices?.first?.message?.content?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        case .responses:
-            let decoded = try decoder.decode(ResponsesResponse.self, from: data)
-            if let text = decoded.output_text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
-                content = text
-            } else {
-                content = decoded.output?.first?.content?.first?.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            }
-        }
-
+        let content = try OpenAIResponseParser.contentText(from: data, endpointMode: endpointMode)
         if content.isEmpty { throw EngineError.emptyResponse }
 
         if isAutoDetect {
-            func extractJSONObjectString(from raw: String) -> String {
-                let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-                if trimmed.hasPrefix("```") {
-                    let lines = trimmed
-                        .split(separator: "\n", omittingEmptySubsequences: false)
-                        .map(String.init)
-                    if lines.count >= 2 {
-                        let withoutFirst = lines.dropFirst().joined(separator: "\n")
-                        if let lastFence = withoutFirst.range(of: "```", options: .backwards) {
-                            return String(withoutFirst[..<lastFence.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
-                        }
-                    }
-                }
-
-                if let start = trimmed.firstIndex(of: "{"), let end = trimmed.lastIndex(of: "}") {
-                    if start <= end {
-                        return String(trimmed[start...end])
-                    }
-                }
-                return trimmed
-            }
-
-            struct AutoDetectPayload {
-                let detectedSourceLanguageCode: String?
-                let translatedText: String?
-            }
-
-            func decodeAutoDetectPayload(from jsonString: String) -> AutoDetectPayload? {
-                guard let data = jsonString.data(using: .utf8) else { return nil }
-                do {
-                    let container = try JSONDecoder().decode([String: String?].self, from: data)
-                    let detected = container["detectedSourceLanguageCode"] ?? container["detected_source_language_code"] ?? container["detected_source"] ?? nil
-                    let translated = container["translatedText"] ?? container["translated_text"] ?? container["translation"] ?? nil
-                    return AutoDetectPayload(detectedSourceLanguageCode: detected ?? nil, translatedText: translated ?? nil)
-                } catch {
-                    do {
-                        let decoder = JSONDecoder()
-                        let keyed = try decoder.decode([String: String].self, from: data)
-                        let detected = keyed["detectedSourceLanguageCode"] ?? keyed["detected_source_language_code"] ?? keyed["detected_source"]
-                        let translated = keyed["translatedText"] ?? keyed["translated_text"] ?? keyed["translation"]
-                        return AutoDetectPayload(detectedSourceLanguageCode: detected, translatedText: translated)
-                    } catch {
-                        do {
-                            let decoder = JSONDecoder()
-                            let root = try decoder.decode([String: AnyDecodable].self, from: data)
-                            let detected = root["detectedSourceLanguageCode"]?.stringValue ?? root["detected_source_language_code"]?.stringValue ?? root["detected_source"]?.stringValue
-                            let translated = root["translatedText"]?.stringValue ?? root["translated_text"]?.stringValue ?? root["translation"]?.stringValue
-                            return AutoDetectPayload(detectedSourceLanguageCode: detected, translatedText: translated)
-                        } catch {
-                            return nil
-                        }
-                    }
-                }
-            }
-
-            struct AnyDecodable: Decodable {
-                let stringValue: String?
-
-                init(from decoder: Decoder) throws {
-                    if let c = try? decoder.singleValueContainer() {
-                        if let s = try? c.decode(String.self) {
-                            stringValue = s
-                            return
-                        }
-                        if let i = try? c.decode(Int.self) {
-                            stringValue = String(i)
-                            return
-                        }
-                        if let d = try? c.decode(Double.self) {
-                            stringValue = String(d)
-                            return
-                        }
-                        if let b = try? c.decode(Bool.self) {
-                            stringValue = b ? "true" : "false"
-                            return
-                        }
-                    }
-                    stringValue = nil
-                }
-            }
-
-            let jsonString = extractJSONObjectString(from: content)
-            if let payload = decodeAutoDetectPayload(from: jsonString),
-               let translated = payload.translatedText?.trimmingCharacters(in: .whitespacesAndNewlines),
-               !translated.isEmpty {
-                let detected = payload.detectedSourceLanguageCode?.trimmingCharacters(in: .whitespacesAndNewlines)
-                return .init(translatedText: translated, detectedSourceLanguageCode: detected)
+            if let result = OpenAIResponseParser.parseAutoDetectResult(from: content) {
+                return result
             }
         }
 
@@ -460,7 +341,8 @@ struct OpenAICompatibleEngine: TranslationEngine {
                 retryBody = [
                     "model": model,
                     "temperature": 0.0,
-                    "input": "\(strongerSystemPrompt)\n\n\(strongerUserPrompt)"
+                    "instructions": strongerSystemPrompt,
+                    "input": strongerUserPrompt
                 ]
             }
 
@@ -473,19 +355,10 @@ struct OpenAICompatibleEngine: TranslationEngine {
             onPhaseChange?("正在重试翻译")
             let retryData = try await dataHandlingRateLimit(for: retryRequest)
 
-            let retryContent: String
-            switch endpointMode {
-            case .chatCompletions:
-                let decoded = try decoder.decode(ChatCompletionsResponse.self, from: retryData)
-                retryContent = decoded.choices?.first?.message?.content?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            case .responses:
-                let decoded = try decoder.decode(ResponsesResponse.self, from: retryData)
-                if let text = decoded.output_text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
-                    retryContent = text
-                } else {
-                    retryContent = decoded.output?.first?.content?.first?.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                }
-            }
+            let retryContent = try OpenAIResponseParser.contentText(
+                from: retryData,
+                endpointMode: endpointMode
+            )
 
             let retryTrimmed = retryContent.trimmingCharacters(in: .whitespacesAndNewlines)
             if !retryTrimmed.isEmpty, !looksLikeNoOpTranslation(input: text, output: retryTrimmed, targetLanguageCode: targetLanguageCode) {

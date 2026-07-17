@@ -388,17 +388,48 @@ enum VisionOCRService {
         }
     }
 
+    private static let sharedCIContext = CIContext(options: [.useSoftwareRenderer: false])
+    // 高分屏物理像素截图再无上限 2x 会爆内存；只对小图放大，大图保持或下采样。
+    private static let maxUpscaleLongestEdge: CGFloat = 1800
+    private static let maxProcessedLongestEdge: CGFloat = 3600
+    private static let maxProcessedPixelCount: CGFloat = 12_000_000
+
     private static func preprocess(cgImage: CGImage) -> CGImage? {
         let input = CIImage(cgImage: cgImage)
+        let width = CGFloat(cgImage.width)
+        let height = CGFloat(cgImage.height)
+        guard width > 0, height > 0 else { return nil }
 
-        // 对小字效果明显：先 2x 放大再做对比度/锐化。
-        let scale = CIFilter.lanczosScaleTransform()
-        scale.inputImage = input
-        scale.scale = 2.0
-        scale.aspectRatio = 1.0
+        let longestEdge = max(width, height)
+        let pixelCount = width * height
+
+        let scaleFactor: CGFloat
+        if longestEdge <= maxUpscaleLongestEdge,
+           pixelCount * 4 <= maxProcessedPixelCount,
+           longestEdge * 2 <= maxProcessedLongestEdge {
+            scaleFactor = 2.0
+        } else if longestEdge > maxProcessedLongestEdge || pixelCount > maxProcessedPixelCount {
+            let edgeScale = maxProcessedLongestEdge / longestEdge
+            let pixelScale = sqrt(maxProcessedPixelCount / pixelCount)
+            scaleFactor = min(1.0, edgeScale, pixelScale)
+        } else {
+            scaleFactor = 1.0
+        }
+
+        let workingImage: CIImage
+        if abs(scaleFactor - 1.0) < 0.001 {
+            workingImage = input
+        } else {
+            let scale = CIFilter.lanczosScaleTransform()
+            scale.inputImage = input
+            scale.scale = Float(scaleFactor)
+            scale.aspectRatio = 1.0
+            guard let scaled = scale.outputImage else { return nil }
+            workingImage = scaled
+        }
 
         let controls = CIFilter.colorControls()
-        controls.inputImage = scale.outputImage
+        controls.inputImage = workingImage
         controls.saturation = 0.0
         controls.contrast = 1.25
         controls.brightness = 0.02
@@ -407,8 +438,7 @@ enum VisionOCRService {
         sharpen.inputImage = controls.outputImage
         sharpen.sharpness = 0.4
 
-        let context = CIContext(options: [.useSoftwareRenderer: false])
         guard let out = sharpen.outputImage else { return nil }
-        return context.createCGImage(out, from: out.extent)
+        return sharedCIContext.createCGImage(out, from: out.extent)
     }
 }

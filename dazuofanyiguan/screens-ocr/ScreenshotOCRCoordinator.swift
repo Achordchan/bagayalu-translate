@@ -9,8 +9,6 @@ final class ScreenshotOCRCoordinator: ObservableObject {
 
     private var session: ScreenshotOCRSession?
     private var selectionWindow: ScreenshotSelectionWindow?
-    private var panelWindow: ScreenshotTranslatePanelWindow?
-    private var overlayWindow: TranslationOverlayWindow?
 
     private var pinnedWindows: [PinnedScreenshotWindow] = []
 
@@ -68,12 +66,6 @@ final class ScreenshotOCRCoordinator: ObservableObject {
         selectionWindow?.close()
         selectionWindow = nil
 
-        panelWindow?.close()
-        panelWindow = nil
-
-        overlayWindow?.close()
-        overlayWindow = nil
-
         if let globalKeyMonitor {
             NSEvent.removeMonitor(globalKeyMonitor)
             self.globalKeyMonitor = nil
@@ -90,9 +82,6 @@ final class ScreenshotOCRCoordinator: ObservableObject {
     }
 
     private func presentSelection(settings: AppSettings, log: LogStore, toast: ToastCenter, frozenBackgrounds: [ScreenshotOCRSession.FrozenBackground]) {
-        panelWindow?.close()
-        panelWindow = nil
-
         if let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier,
            pid != NSRunningApplication.current.processIdentifier {
             previousFrontmostAppPID = pid
@@ -172,14 +161,6 @@ final class ScreenshotOCRCoordinator: ObservableObject {
         }
     }
 
-    private func presentOverlay(text: String, rect: CGRect) {
-        overlayWindow?.close()
-        overlayWindow = nil
-
-        let window = TranslationOverlayWindow(rect: rect, text: text)
-        overlayWindow = window
-        window.orderFrontRegardless()
-    }
 
     private func captureSelectionIfPossible(settings: AppSettings, log: LogStore, toast: ToastCenter) async {
         guard let session else { return }
@@ -623,25 +604,6 @@ final class ScreenshotOCRCoordinator: ObservableObject {
         }
     }
 
-    private func finishOverlayIfPossible(toast: ToastCenter) {
-        guard let session else { return }
-        guard let selectionWindow else { return }
-
-        if session.translatedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            toast.show("还没有译文，无法完成", style: .warning)
-            return
-        }
-
-        let rectInScreen = selectionWindow.selectionRectInScreen().integral
-        if !session.translatedLines.isEmpty {
-            let window = TranslationOverlayWindow(rect: rectInScreen, text: session.translatedText, lines: session.translatedLines)
-            overlayWindow = window
-            window.orderFrontRegardless()
-        } else {
-            presentOverlay(text: session.translatedText, rect: rectInScreen)
-        }
-        cancelAll()
-    }
 
     private func translate(
         text: String,
@@ -652,76 +614,16 @@ final class ScreenshotOCRCoordinator: ObservableObject {
         toast: ToastCenter,
         onPhaseChange: ((String) -> Void)?
     ) async -> Result<String, Error> {
-        let engine: TranslationEngine?
-        switch settings.engineType {
-        case .apple:
-            engine = nil
-        case .google:
-            engine = GoogleTranslateEngine()
-        case .openAICompatible:
-            let key: String?
-            do {
-                key = try KeychainStore.getString(for: "openAIAPIKey")
-            } catch {
-                return .failure(error)
-            }
-            engine = OpenAICompatibleEngine(
-                baseURL: settings.openAIBaseURL,
-                apiKey: key,
-                model: settings.openAIModel,
-                endpointMode: settings.openAIEndpointMode,
-                onPhaseChange: onPhaseChange
-            )
-        }
-
-        do {
-            let result: TranslationResult
-            if settings.engineType == .apple {
-                result = try await appleTranslationCoordinator.translate(
-                    text: text,
-                    sourceLanguageCode: sourceLanguageCode,
-                    targetLanguageCode: targetLanguageCode,
-                    onPhaseChange: onPhaseChange
-                )
-            } else if let engine {
-                result = try await engine.translate(
-                    text: text,
-                    sourceLanguageCode: sourceLanguageCode,
-                    targetLanguageCode: targetLanguageCode
-                )
-            } else {
-                return .failure(NSError(
-                    domain: "AppleTranslation",
-                    code: -1,
-                    userInfo: [NSLocalizedDescriptionKey: "翻译引擎未正确初始化"]
-                ))
-            }
-            return .success(result.translatedText)
-        } catch {
-            if let rl = error as? OpenAICompatibleEngine.RateLimitError,
-               let engine {
-                let base = "请求过多（\(rl.apiCode)）：\(rl.apiMessage)"
-                toast.show(base, style: .warning, duration: 1.0)
-                toast.show("准备重试中（2秒）", style: .info, duration: 1.0)
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
-                toast.show("准备重试中（1秒）", style: .info, duration: 1.0)
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
-
-                do {
-                    let retry = try await engine.translate(
-                        text: text,
-                        sourceLanguageCode: sourceLanguageCode,
-                        targetLanguageCode: targetLanguageCode
-                    )
-                    return .success(retry.translatedText)
-                } catch {
-                    log.error("截图翻译重试失败：\(error.localizedDescription)")
-                    return .failure(error)
-                }
-            }
-
-            log.error("截图翻译失败：\(error.localizedDescription)")
-            return .failure(error)
-        }
+        await ScreenshotTranslationService.translate(
+            text: text,
+            sourceLanguageCode: sourceLanguageCode,
+            targetLanguageCode: targetLanguageCode,
+            settings: settings,
+            log: log,
+            toast: toast,
+            appleTranslationCoordinator: appleTranslationCoordinator,
+            onPhaseChange: onPhaseChange
+        )
     }
+
 }

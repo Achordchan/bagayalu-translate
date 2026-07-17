@@ -11,6 +11,7 @@ struct PermissionGuideView: View {
     let onClose: () -> Void
 
     @State private var showFallbackExplanation = false
+    @State private var showPermissionMigrationExplanation = false
 
     private var requiredPermissionCount: Int {
         showsScreenRecordingPermission ? 2 : 1
@@ -177,6 +178,39 @@ struct PermissionGuideView: View {
 
             if showFallbackExplanation {
                 Text("可以。在设置中选择“剪贴板监听”后，连续按两次 Command + C 会读取剪贴板并翻译。无法复制的网页或控件不会产生可翻译内容。")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 10)
+                    .padding(.leading, 19)
+            }
+
+            Divider()
+                .padding(.vertical, 12)
+
+            Button {
+                showPermissionMigrationExplanation.toggle()
+            } label: {
+                HStack(spacing: 9) {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .rotationEffect(
+                            .degrees(showPermissionMigrationExplanation ? 90 : 0)
+                        )
+
+                    Text("系统设置已开启，为什么仍提示未授权？")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.primary)
+
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if showPermissionMigrationExplanation {
+                Text("1.2.1 及更早版本使用临时签名，首次升级到正式签名版本时，macOS 可能仍保留无法匹配的旧权限记录。请在系统设置中删除旧条目，再把上方应用图标拖入权限列表并开启；完成这一次迁移后，后续更新会保持同一权限身份。")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

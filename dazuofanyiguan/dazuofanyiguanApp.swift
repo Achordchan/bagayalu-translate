@@ -58,6 +58,10 @@ struct dazuofanyiguanApp: App {
                 .environmentObject(translatorVM)
                 .environmentObject(screenshotOCR)
         }
+        .defaultSize(
+            width: AppWindowController.preferredContentSize.width,
+            height: AppWindowController.preferredContentSize.height
+        )
         .commands {
             AppCommands(updater: updater)
         }
