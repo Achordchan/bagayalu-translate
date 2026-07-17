@@ -112,9 +112,8 @@ jobs:
           set -euo pipefail
 
           SIGNING_ARGUMENTS=(
-            "CODE_SIGN_STYLE=Manual"
-            "CODE_SIGN_IDENTITY=-"
-            "DEVELOPMENT_TEAM="
+            "CODE_SIGNING_ALLOWED=NO"
+            "CODE_SIGNING_REQUIRED=NO"
           )
 
           for ARCH in arm64 x86_64; do
@@ -128,12 +127,11 @@ jobs:
               ARCHS="$ARCH" \
               ONLY_ACTIVE_ARCH=YES \
               CONFIGURATION_BUILD_DIR="$OUTPUT_PATH" \
-              CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO \
               "${SIGNING_ARGUMENTS[@]}" \
               build
           done
 
-      - name: Verify app signatures and architectures
+      - name: Verify update configuration, signatures, and architectures
         run: |
           set -euo pipefail
 
@@ -145,15 +143,50 @@ jobs:
               exit 1
             fi
 
-            codesign --verify --deep --strict --verbose=4 "$APP_PATH"
-
             ARCHITECTURES="$(lipo -archs "$APP_PATH/Contents/MacOS/$APP_NAME")"
             echo "$ARCH 构建架构：$ARCHITECTURES"
             [ "$ARCHITECTURES" = "$ARCH" ]
 
-            SIGNATURE_INFO="$(codesign -dv --verbose=4 "$APP_PATH" 2>&1)"
-            printf '%s\n' "$SIGNATURE_INFO"
-            grep -q 'Signature=adhoc' <<< "$SIGNATURE_INFO"
+            if [ "$ARCH" = "arm64" ]; then
+              # Apple Silicon 可执行文件由链接器生成最小 ad-hoc 签名；
+              # 这不是 Developer ID 分发签名，也不应封装 App 资源或权限。
+              SIGNATURE_INFO="$(codesign -dv --verbose=4 "$APP_PATH" 2>&1)"
+              printf '%s\n' "$SIGNATURE_INFO"
+              grep -q 'flags=.*adhoc,linker-signed' <<< "$SIGNATURE_INFO"
+              grep -q 'Signature=adhoc' <<< "$SIGNATURE_INFO"
+              grep -q 'Info.plist=not bound' <<< "$SIGNATURE_INFO"
+              grep -q 'TeamIdentifier=not set' <<< "$SIGNATURE_INFO"
+              grep -q 'Internal requirements=none' <<< "$SIGNATURE_INFO"
+            elif codesign -dv --verbose=4 "$APP_PATH" >/dev/null 2>&1; then
+              echo "$ARCH 主程序不应包含分发签名。" >&2
+              exit 1
+            fi
+
+            if /usr/libexec/PlistBuddy \
+              -c 'Print :SUEnableInstallerLauncherService' \
+              "$APP_PATH/Contents/Info.plist" >/dev/null 2>&1; then
+              echo "$ARCH 主程序不应启用 sandbox InstallerLauncher XPC。" >&2
+              exit 1
+            fi
+
+            ENTITLEMENTS="$(codesign -d --entitlements :- "$APP_PATH" 2>/dev/null || true)"
+            if grep -q 'com.apple.security.app-sandbox' <<< "$ENTITLEMENTS"; then
+              echo "$ARCH 主程序不应包含 App Sandbox 权限。" >&2
+              exit 1
+            fi
+
+            # Xcode 复制 XCFramework 时会去掉开发头文件，因此框架主体忽略资源封装检查；
+            # 主二进制和所有实际执行的 Sparkle 辅助组件仍必须通过代码签名校验。
+            codesign --verify --strict --ignore-resources --verbose=4 \
+              "$APP_PATH/Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle"
+
+            for COMPONENT in \
+              "$APP_PATH/Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app" \
+              "$APP_PATH/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate" \
+              "$APP_PATH/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc" \
+              "$APP_PATH/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc"; do
+              codesign --verify --strict --verbose=4 "$COMPONENT"
+            done
           done
 
       - name: Package app and DMG
@@ -344,7 +377,7 @@ jobs:
           - 主界面可直接切换翻译服务，设置页接口配置更清晰。
           - Mini 智能方向介入时会在结果底部显示状态提示。
           - 分别提供 Apple Silicon（arm64）和 Intel（x86_64）安装包。
-          - 当前版本使用 ad-hoc 临时签名且未经过 Apple 公证，首次启动或更新后可能需要重新确认系统权限。
+          - 主程序不使用 Developer ID 分发签名，更新包继续通过 Sparkle EdDSA 签名验证；未经过 Apple 公证。
           EOF
 
           # appcast 仅在 workflow_dispatch 的 build job 生成；push 构建不进入此 job。

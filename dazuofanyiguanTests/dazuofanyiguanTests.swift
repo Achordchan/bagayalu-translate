@@ -12,6 +12,73 @@ import UniformTypeIdentifiers
 
 struct dazuofanyiguanTests {
 
+    @Test func legacySandboxPreferencesMigrateOnceUsingSandboxValues() throws {
+        let suiteName = "achord.dazuofanyiguan.tests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        defaults.set("google", forKey: "engineType")
+
+        let sourceURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dazuo-sandbox-preferences-\(UUID().uuidString).plist")
+        defer { try? FileManager.default.removeItem(at: sourceURL) }
+
+        let source: [String: Any] = [
+            "engineType": "apple",
+            "sourceLanguageCode": "en",
+            "targetLanguageCode": "zh-CN",
+            "miniTextFontSize": 18.0,
+            "unrelatedKey": "ignored"
+        ]
+        let data = try PropertyListSerialization.data(
+            fromPropertyList: source,
+            format: .binary,
+            options: 0
+        )
+        try data.write(to: sourceURL)
+
+        let migratedCount = LegacySandboxPreferencesMigration.migrateIfNeeded(
+            defaults: defaults,
+            sourceURL: sourceURL
+        )
+
+        #expect(migratedCount == 4)
+        #expect(defaults.string(forKey: "engineType") == "apple")
+        #expect(defaults.string(forKey: "sourceLanguageCode") == "en")
+        #expect(defaults.string(forKey: "targetLanguageCode") == "zh-CN")
+        #expect(defaults.double(forKey: "miniTextFontSize") == 18)
+        #expect(defaults.object(forKey: "unrelatedKey") == nil)
+        #expect(defaults.bool(forKey: LegacySandboxPreferencesMigration.markerKey))
+
+        defaults.set("google", forKey: "engineType")
+        #expect(
+            LegacySandboxPreferencesMigration.migrateIfNeeded(
+                defaults: defaults,
+                sourceURL: sourceURL
+            ) == 0
+        )
+        #expect(defaults.string(forKey: "engineType") == "google")
+    }
+
+    @Test func legacySandboxPreferencesRetryAfterMalformedSource() throws {
+        let suiteName = "achord.dazuofanyiguan.tests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let sourceURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dazuo-malformed-preferences-\(UUID().uuidString).plist")
+        defer { try? FileManager.default.removeItem(at: sourceURL) }
+        try Data("not a property list".utf8).write(to: sourceURL)
+
+        #expect(
+            LegacySandboxPreferencesMigration.migrateIfNeeded(
+                defaults: defaults,
+                sourceURL: sourceURL
+            ) == 0
+        )
+        #expect(!defaults.bool(forKey: LegacySandboxPreferencesMigration.markerKey))
+    }
+
     @Test func permissionGuideProvidesDraggableApplicationFileURL() {
         let applicationURL = URL(fileURLWithPath: "/Applications/大佐翻译官v1.app")
         let provider = PermissionGuideDragItemProvider.make(

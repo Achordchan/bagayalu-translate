@@ -42,7 +42,7 @@
   - 每天自动检查 GitHub Release
   - 也可在“关于应用”或应用菜单中手动检查
   - 下载完成后直接替换当前版本，并自动重启应用
-  - 正式版本使用固定 Developer ID 身份签名并通过 Apple 公证，避免更新后重复申请系统权限
+  - 更新 ZIP 使用 Sparkle EdDSA 签名校验；当前主程序未使用 Developer ID 分发签名，也未经过 Apple 公证
   - 该能力从 1.2.0 开始提供，旧版本需要手动安装一次 1.2.0
 
 ---
@@ -73,21 +73,11 @@
 1. 用 Xcode 打开项目
 2. 选择 scheme 并运行
 
-### 正式发布签名
+### 发布与更新签名
 
-普通 `push` 只生成用于持续集成验证的临时签名产物；通过 `workflow_dispatch` 发布 GitHub Release 时，工作流会强制使用 Developer ID 签名并完成 Apple 公证，不再允许发布 ad-hoc 签名版本。
+当前 GitHub Release 不使用 Developer ID 分发签名，也不进行 Apple 公证。arm64 可执行文件保留 macOS 要求的链接器级 ad-hoc 签名，x86_64 主程序不签名。工作流会通过 `SPARKLE_PRIVATE_KEY` 对更新 ZIP 生成 EdDSA 签名；客户端使用内置 `SUPublicEDKey` 验证下载内容。
 
-仓库需要配置以下 GitHub Actions Secrets：
-
-- `DEVELOPER_ID_APPLICATION_P12_BASE64`：Developer ID Application 证书及私钥导出的 P12，再进行 Base64 编码
-- `DEVELOPER_ID_APPLICATION_PASSWORD`：P12 导出密码
-- `APPLE_TEAM_ID`：Apple Developer Team ID
-- `APPLE_NOTARY_KEY_P8_BASE64`：App Store Connect API Key 的 P8 文件，再进行 Base64 编码
-- `APPLE_NOTARY_KEY_ID`：API Key ID
-- `APPLE_NOTARY_ISSUER_ID`：Issuer ID
-- `SPARKLE_PRIVATE_KEY`：Sparkle 更新包签名私钥
-
-工作流会同时验证 arm64 与 x86_64 应用的签名证书、Team ID、指定要求、公证票据和 Gatekeeper 状态。由于 1.2.1 及之前使用的是每次构建都会变化的 ad-hoc 身份，首次迁移到 Developer ID 正式版本时，已有用户可能仍需重新授权一次；完成迁移后，后续版本将保持相同的系统权限身份。
+主程序不再启用 App Sandbox 的 InstallerLauncher XPC，避免无 Developer ID 时辅助进程连接不稳定。首次从旧沙盒版本迁移时会复制已有设置，但 macOS 辅助功能、屏幕录制等权限仍可能需要重新确认。
 
 ---
 

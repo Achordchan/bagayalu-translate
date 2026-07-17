@@ -12,7 +12,7 @@ import SwiftUI
 struct dazuofanyiguanApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
-    @StateObject private var settings = AppSettings()
+    @StateObject private var settings: AppSettings
     @StateObject private var updater = AppUpdaterController()
     @StateObject private var toast = ToastCenter()
     @StateObject private var log = LogStore()
@@ -25,9 +25,12 @@ struct dazuofanyiguanApp: App {
     @StateObject private var screenshotOCR: ScreenshotOCRCoordinator
 
     init() {
+        LegacySandboxPreferencesMigration.migrateIfNeeded()
+
         let mainAppleTranslationCoordinator = AppleTranslationCoordinator()
         let screenshotAppleTranslationCoordinator = AppleTranslationCoordinator()
 
+        _settings = StateObject(wrappedValue: AppSettings())
         _appleTranslationCoordinator = StateObject(wrappedValue: mainAppleTranslationCoordinator)
         _translatorVM = StateObject(
             wrappedValue: TranslatorViewModel(
