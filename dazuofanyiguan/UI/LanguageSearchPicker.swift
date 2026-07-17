@@ -56,34 +56,7 @@ struct LanguageSearchPicker: View {
                     .fixedSize(horizontal: true, vertical: false)
                 }
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .background(
-                RoundedRectangle(cornerRadius: DS.pillCornerRadius, style: .continuous)
-                    .fill(
-                        isHovering
-                        ? DS.cardBackground(scheme).opacity(1.25)
-                        : DS.cardBackground(scheme)
-                    )
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: DS.pillCornerRadius, style: .continuous)
-                    .strokeBorder(
-                        LinearGradient(
-                            colors: [
-                                DS.strokeColor(scheme).opacity(1.0),
-                                Color.accentColor.opacity(scheme == .dark ? 0.22 : 0.12)
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        lineWidth: 1
-                    )
-            )
-            .contentShape(RoundedRectangle(cornerRadius: DS.pillCornerRadius, style: .continuous))
-            .onHover { hovering in
-                isHovering = hovering
-            }
+            .homeToolbarPickerChrome(isHovering: $isHovering)
         }
         .buttonStyle(.plain)
         .frame(width: fixedWidth, alignment: .leading)
@@ -152,5 +125,48 @@ struct LanguageSearchPicker: View {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
         if q.isEmpty { return list }
         return list.filter { $0.name.localizedCaseInsensitiveContains(q) || $0.code.localizedCaseInsensitiveContains(q) }
+    }
+}
+
+struct HomeToolbarPickerChrome: ViewModifier {
+    @Binding var isHovering: Bool
+    @Environment(\.colorScheme) private var scheme
+
+    func body(content: Content) -> some View {
+        content
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(
+                RoundedRectangle(cornerRadius: DS.pillCornerRadius, style: .continuous)
+                    .fill(
+                        isHovering
+                            ? DS.cardBackground(scheme).opacity(1.25)
+                            : DS.cardBackground(scheme)
+                    )
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: DS.pillCornerRadius, style: .continuous)
+                    .strokeBorder(
+                        LinearGradient(
+                            colors: [
+                                DS.strokeColor(scheme).opacity(1.0),
+                                Color.accentColor.opacity(scheme == .dark ? 0.22 : 0.12)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        lineWidth: 1
+                    )
+            )
+            .contentShape(RoundedRectangle(cornerRadius: DS.pillCornerRadius, style: .continuous))
+            .onHover { hovering in
+                isHovering = hovering
+            }
+    }
+}
+
+extension View {
+    func homeToolbarPickerChrome(isHovering: Binding<Bool>) -> some View {
+        modifier(HomeToolbarPickerChrome(isHovering: isHovering))
     }
 }

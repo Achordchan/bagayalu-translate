@@ -22,6 +22,7 @@ struct SettingsView: View {
     @State private var openPermissionGuideAfterAlert = false
     @State private var hasAccessibilityPermission = false
     @State private var hasScreenRecordingPermission = false
+    @State private var hasLoadedPermissionStatus = false
 
     var body: some View {
         HStack(spacing: 0) {
@@ -132,6 +133,9 @@ struct SettingsView: View {
             GeneralSettingsPane(
                 engineTypeRawValue: $settings.engineTypeRawValue,
                 appearanceRawValue: $settings.appearanceRawValue,
+                sourceTextFontSize: $settings.sourceTextFontSize,
+                translatedTextFontSize: $settings.translatedTextFontSize,
+                miniTextFontSize: $settings.miniTextFontSize,
                 draftBaseURL: $draftBaseURL,
                 draftModel: $draftModel,
                 draftAPIKey: $draftAPIKey,
@@ -222,7 +226,7 @@ struct SettingsView: View {
     }
 
     private var appVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.2.0"
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.2.1"
     }
 
     private func loadSettings() {
@@ -244,17 +248,37 @@ struct SettingsView: View {
             settings.doubleCopyEnabled = true
         }
 
-        let screenshotMigrationKey = "didAutoEnableScreenshotHotkeyV1"
-        if hasScreenRecordingPermission,
-           !UserDefaults.standard.bool(forKey: screenshotMigrationKey) {
-            settings.screenshotHotkeyEnabled = true
-            UserDefaults.standard.set(true, forKey: screenshotMigrationKey)
-        }
     }
 
     private func refreshPermissionStatus() {
+        let permissionWasMissing = hasLoadedPermissionStatus && !hasAccessibilityPermission
         hasAccessibilityPermission = AXIsProcessTrusted()
         hasScreenRecordingPermission = ScreenCapturePermission.hasPermission()
+        hasLoadedPermissionStatus = true
+
+        if !hasAccessibilityPermission {
+            if settings.globalHotkeyEnabled {
+                settings.globalHotkeyEnabled = false
+                settings.doubleCopyEnabled = true
+            }
+            if hotkeyMonitor.isRunning || hotkeyMonitor.isStarting {
+                hotkeyMonitor.stop()
+            }
+        }
+
+        let didPreferGlobal = settings.preferGlobalHotkeyWhenAvailable(
+            isAccessibilityTrusted: hasAccessibilityPermission,
+            permissionWasMissing: permissionWasMissing
+        )
+        if (didPreferGlobal || settings.globalHotkeyEnabled || settings.screenshotHotkeyEnabled),
+           hasAccessibilityPermission,
+           !hotkeyMonitor.isRunning,
+           !hotkeyMonitor.isStarting {
+            hotkeyMonitor.start(
+                windowMs: settings.doubleCopyWindowMs,
+                doubleCutKeyCode: settings.screenshotHotkeyKeyCode
+            )
+        }
     }
 
     private func handleGlobalHotkeyChange(_ oldValue: Bool, _ enabled: Bool) {

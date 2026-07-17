@@ -17,23 +17,12 @@ struct HomePermissionBanner: View {
     }
 
     var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "lock.open.trianglebadge.exclamationmark")
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(.orange)
-                .frame(width: 24)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text("完善系统权限")
-                    .font(.system(size: 12, weight: .semibold))
-                Text(summary)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-
-            Spacer(minLength: 12)
-
+        HomeFeatureBanner(
+            icon: "lock.open.trianglebadge.exclamationmark",
+            tint: .orange,
+            title: "完善系统权限",
+            message: summary
+        ) {
             Button("稍后", action: onIgnore)
                 .buttonStyle(.bordered)
                 .controlSize(.small)
@@ -43,6 +32,66 @@ struct HomePermissionBanner: View {
                 .tint(.orange)
                 .controlSize(.small)
         }
+    }
+}
+
+struct GlobalHotkeyRecommendationBanner: View {
+    let isRetry: Bool
+    let onEnable: () -> Void
+    let onIgnore: () -> Void
+    let onNeverRemind: () -> Void
+
+    var body: some View {
+        HomeFeatureBanner(
+            icon: "command.circle",
+            tint: .blue,
+            title: isRetry ? "全局快捷键未成功启动" : "使用全局快捷键模式",
+            message: isRetry
+                ? "当前已回退到剪贴板监听，可重新启用。"
+                : "触发更准确，也不会持续监听剪贴板变化。"
+        ) {
+            Button("永不提醒", action: onNeverRemind)
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .controlSize(.small)
+
+            Button("忽略", action: onIgnore)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+            Button("启用", action: onEnable)
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+        }
+    }
+}
+
+private struct HomeFeatureBanner<Actions: View>: View {
+    let icon: String
+    let tint: Color
+    let title: String
+    let message: String
+    @ViewBuilder let actions: Actions
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(tint)
+                .frame(width: 24)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 12, weight: .semibold))
+                Text(message)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 12)
+            actions
+        }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
         .background(
@@ -51,7 +100,7 @@ struct HomePermissionBanner: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: 13, style: .continuous)
-                .strokeBorder(Color.orange.opacity(0.26), lineWidth: 1)
+                .strokeBorder(tint.opacity(0.26), lineWidth: 1)
         )
         .shadow(color: .black.opacity(0.10), radius: 16, x: 0, y: 7)
         .frame(maxWidth: 680)

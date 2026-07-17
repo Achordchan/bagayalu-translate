@@ -4,6 +4,7 @@ import SwiftUI
 struct PermissionGuideView: View {
     let needsAccessibility: Bool
     let needsScreenRecording: Bool
+    let showsScreenRecordingPermission: Bool
 
     let onOpenAccessibility: () -> Void
     let onOpenScreenRecording: () -> Void
@@ -11,12 +12,20 @@ struct PermissionGuideView: View {
 
     @State private var showFallbackExplanation = false
 
+    private var requiredPermissionCount: Int {
+        showsScreenRecordingPermission ? 2 : 1
+    }
+
     private var grantedPermissionCount: Int {
-        2 - [needsAccessibility, needsScreenRecording].filter { $0 }.count
+        requiredPermissionCount
+            - [needsAccessibility, showsScreenRecordingPermission && needsScreenRecording]
+                .filter { $0 }
+                .count
     }
 
     private var allPermissionsGranted: Bool {
-        !needsAccessibility && !needsScreenRecording
+        !needsAccessibility
+            && (!showsScreenRecordingPermission || !needsScreenRecording)
     }
 
     var body: some View {
@@ -32,22 +41,26 @@ struct PermissionGuideView: View {
                     permissionRow(
                         icon: "accessibility",
                         title: "辅助功能",
-                        capability: "全局文字快捷键与截图快捷键",
+                        capability: showsScreenRecordingPermission
+                            ? "全局文字快捷键与截图快捷键"
+                            : "全局文字快捷键",
                         detail: "允许应用在其他软件中响应 Command + C + C 等全局快捷键。",
                         isGranted: !needsAccessibility,
                         actionTitle: "打开辅助功能设置",
                         action: onOpenAccessibility
                     )
 
-                    permissionRow(
-                        icon: "rectangle.dashed.badge.record",
-                        title: "屏幕录制",
-                        capability: "截图翻译与 OCR 取字",
-                        detail: "允许应用读取你主动框选的屏幕区域，用于文字识别和翻译。",
-                        isGranted: !needsScreenRecording,
-                        actionTitle: "打开屏幕录制设置",
-                        action: onOpenScreenRecording
-                    )
+                    if showsScreenRecordingPermission {
+                        permissionRow(
+                            icon: "rectangle.dashed.badge.record",
+                            title: "屏幕录制",
+                            capability: "截图翻译与 OCR 取字",
+                            detail: "允许应用读取你主动框选的屏幕区域，用于文字识别和翻译。",
+                            isGranted: !needsScreenRecording,
+                            actionTitle: "打开屏幕录制设置",
+                            action: onOpenScreenRecording
+                        )
+                    }
 
                     fallbackExplanation
                 }
@@ -91,7 +104,7 @@ struct PermissionGuideView: View {
 
                 Text(
                     allPermissionsGranted
-                        ? "全局快捷翻译和截图翻译均可正常使用。"
+                        ? completedPermissionDescription
                         : "仅在使用对应功能时需要这些系统权限。"
                 )
                 .font(.system(size: 12))
@@ -116,7 +129,7 @@ struct PermissionGuideView: View {
             .frame(width: 32)
 
             VStack(alignment: .leading, spacing: 3) {
-                Text("已完成 \(grantedPermissionCount) / 2")
+                Text("已完成 \(grantedPermissionCount) / \(requiredPermissionCount)")
                     .font(.system(size: 13, weight: .semibold))
                 Text("应用只会在你主动使用对应功能时读取所需内容。")
                     .font(.system(size: 11))
@@ -133,6 +146,12 @@ struct PermissionGuideView: View {
                         .opacity(0.08)
                 )
         )
+    }
+
+    private var completedPermissionDescription: String {
+        showsScreenRecordingPermission
+            ? "全局快捷翻译和截图翻译均可正常使用。"
+            : "全局快捷翻译已可正常使用。"
     }
 
     private var fallbackExplanation: some View {

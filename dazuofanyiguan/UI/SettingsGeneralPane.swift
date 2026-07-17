@@ -39,6 +39,9 @@ enum SettingsSection: String, CaseIterable, Identifiable {
 struct GeneralSettingsPane: View {
     @Binding var engineTypeRawValue: String
     @Binding var appearanceRawValue: String
+    @Binding var sourceTextFontSize: Double
+    @Binding var translatedTextFontSize: Double
+    @Binding var miniTextFontSize: Double
     @Binding var draftBaseURL: String
     @Binding var draftModel: String
     @Binding var draftAPIKey: String
@@ -47,6 +50,14 @@ struct GeneralSettingsPane: View {
     let isSaving: Bool
     let onValidateAndSave: () -> Void
     let onClearKey: () -> Void
+
+    @State private var fontPreview: FontPreview?
+    @State private var fontPreviewTask: Task<Void, Never>?
+
+    private struct FontPreview: Equatable {
+        let title: String
+        let size: Double
+    }
 
     private var selectedEngine: TranslationEngineType {
         TranslationEngineType(rawValue: engineTypeRawValue) ?? .apple
@@ -83,6 +94,57 @@ struct GeneralSettingsPane: View {
                     .frame(width: 150)
                 }
             }
+
+            SettingsGroup(
+                title: "文字大小",
+                subtitle: "分别设置原文、译文和 Mini 正文字号。"
+            ) {
+                SettingsControlRow(
+                    icon: "textformat.size",
+                    title: "原文",
+                    subtitle: "默认 15 pt"
+                ) {
+                    SettingsFontSizePicker(value: $sourceTextFontSize) {
+                        showFontPreview(title: "原文", size: $0)
+                    }
+                }
+
+                Divider()
+
+                SettingsControlRow(
+                    icon: "character.cursor.ibeam",
+                    title: "译文",
+                    subtitle: "默认 15 pt"
+                ) {
+                    SettingsFontSizePicker(value: $translatedTextFontSize) {
+                        showFontPreview(title: "译文", size: $0)
+                    }
+                }
+
+                Divider()
+
+                SettingsControlRow(
+                    icon: "rectangle.on.rectangle",
+                    title: "Mini 窗口",
+                    subtitle: "默认 15 pt"
+                ) {
+                    SettingsFontSizePicker(value: $miniTextFontSize) {
+                        showFontPreview(title: "Mini", size: $0)
+                    }
+                }
+            }
+            .overlay(alignment: .topTrailing) {
+                if let fontPreview {
+                    FontSizePreview(title: fontPreview.title, size: fontPreview.size)
+                        .padding(.top, 10)
+                        .padding(.trailing, 12)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                }
+            }
+            .animation(.easeOut(duration: 0.18), value: fontPreview)
+        }
+        .onDisappear {
+            fontPreviewTask?.cancel()
         }
     }
 
@@ -161,50 +223,58 @@ struct GeneralSettingsPane: View {
     }
 
     private var openAIConfiguration: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 16) {
             Divider()
 
-            Text("接口配置")
-                .font(.system(size: 13, weight: .semibold))
-
-            SettingsFieldRow(
-                title: "Base URL",
-                help: "OpenAI 风格接口地址，通常以 /v1 结尾。"
-            ) {
-                TextField("https://api.openai.com/v1", text: $draftBaseURL)
-                    .textFieldStyle(.roundedBorder)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("接口配置")
+                    .font(.system(size: 13, weight: .semibold))
+                Text("填写服务地址、接口类型、模型和密钥。")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
             }
 
-            SettingsFieldRow(
-                title: "接口类型",
-                help: "根据服务商支持的接口格式选择。"
-            ) {
-                Picker("接口类型", selection: $draftEndpointModeRawValue) {
-                    ForEach(OpenAIEndpointMode.allCases) { mode in
-                        Text(mode.title).tag(mode.rawValue)
+            VStack(spacing: 14) {
+                SettingsInputField(title: "服务地址", hint: "通常以 /v1 结尾") {
+                    TextField("https://api.openai.com/v1", text: $draftBaseURL)
+                        .settingsTextFieldChrome()
+                }
+
+                HStack(alignment: .top, spacing: 14) {
+                    SettingsInputField(title: "接口类型") {
+                        Picker("接口类型", selection: $draftEndpointModeRawValue) {
+                            ForEach(OpenAIEndpointMode.allCases) { mode in
+                                Text(mode.title).tag(mode.rawValue)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.segmented)
+                    }
+                    .frame(width: 240)
+
+                    SettingsInputField(title: "模型") {
+                        TextField("例如 gpt-4.1-mini", text: $draftModel)
+                            .settingsTextFieldChrome()
                     }
                 }
-                .labelsHidden()
-            }
 
-            SettingsFieldRow(
-                title: "模型",
-                help: "填写服务商提供的准确模型名称。"
-            ) {
-                TextField("例如 gpt-4.1-mini", text: $draftModel)
-                    .textFieldStyle(.roundedBorder)
+                SettingsInputField(title: "API Key", hint: "仅保存在系统钥匙串") {
+                    SecureField("输入 API Key", text: $draftAPIKey)
+                        .settingsTextFieldChrome()
+                }
             }
-
-            SettingsFieldRow(
-                title: "API Key",
-                help: "仅保存在 macOS 系统钥匙串中。"
-            ) {
-                SecureField("输入 API Key", text: $draftAPIKey)
-                    .textFieldStyle(.roundedBorder)
-            }
+            .padding(14)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color(nsColor: .windowBackgroundColor).opacity(0.55))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(Color.secondary.opacity(0.12), lineWidth: 1)
+            )
 
             HStack {
-                Text("保存前会发送一条测试请求验证配置。")
+                Text("保存时会先验证连接。")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
 
@@ -220,12 +290,86 @@ struct GeneralSettingsPane: View {
         }
     }
 
+    private func showFontPreview(title: String, size: Double) {
+        fontPreviewTask?.cancel()
+        fontPreview = FontPreview(title: title, size: size)
+        fontPreviewTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            guard !Task.isCancelled else { return }
+            fontPreview = nil
+        }
+    }
+
     private func engineSummary(_ engine: TranslationEngineType) -> String {
         switch engine {
         case .apple: return "本地 · 默认"
         case .google: return "在线 · 免配置"
         case .openAICompatible: return "在线 · 自定义"
         }
+    }
+}
+
+private struct SettingsFontSizePicker: View {
+    @Binding var value: Double
+    let onChange: (Double) -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            VStack(spacing: 3) {
+                Slider(
+                    value: $value,
+                    in: AppTextFontSize.allowedRange,
+                    step: 1
+                )
+
+                HStack {
+                    ForEach(AppTextFontSize.tickValues, id: \.self) { size in
+                        Text("\(Int(size))")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.tertiary)
+                        if size != AppTextFontSize.tickValues.last {
+                            Spacer(minLength: 0)
+                        }
+                    }
+                }
+            }
+
+            Text("\(Int(value)) pt")
+                .font(.system(size: 11, weight: .semibold))
+                .monospacedDigit()
+                .frame(width: 38, alignment: .trailing)
+        }
+        .frame(width: 280)
+        .onChange(of: value) { _, newValue in
+            onChange(newValue)
+        }
+    }
+}
+
+private struct FontSizePreview: View {
+    let title: String
+    let size: Double
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text("预览")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.secondary)
+            Text("\(title)文字")
+                .font(.system(size: CGFloat(size), weight: .medium))
+                .lineLimit(1)
+            Text("\(Int(size)) pt")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 11)
+        .frame(height: 36)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .strokeBorder(Color.accentColor.opacity(0.22), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.10), radius: 8, y: 3)
     }
 }
 
@@ -316,25 +460,63 @@ struct SettingsControlRow<Control: View>: View {
     }
 }
 
-struct SettingsFieldRow<Control: View>: View {
+private struct SettingsInputField<Control: View>: View {
     let title: String
-    let help: String
+    var hint: String?
     @ViewBuilder let control: Control
 
+    init(
+        title: String,
+        hint: String? = nil,
+        @ViewBuilder control: () -> Control
+    ) {
+        self.title = title
+        self.hint = hint
+        self.control = control()
+    }
+
     var body: some View {
-        HStack(alignment: .center, spacing: 14) {
-            VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 6) {
                 Text(title)
-                    .font(.system(size: 12, weight: .medium))
-                Text(help)
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 11, weight: .semibold))
+
+                if let hint {
+                    Text(hint)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                }
             }
-            .frame(width: 150, alignment: .leading)
 
             control
-                .frame(maxWidth: .infinity)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct SettingsTextFieldChrome: ViewModifier {
+    @Environment(\.colorScheme) private var scheme
+
+    func body(content: Content) -> some View {
+        content
+            .textFieldStyle(.plain)
+            .font(.system(size: 12))
+            .padding(.horizontal, 10)
+            .frame(height: 32)
+            .background(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(Color(nsColor: .textBackgroundColor).opacity(scheme == .dark ? 0.72 : 0.92))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .strokeBorder(Color.secondary.opacity(0.20), lineWidth: 1)
+            )
+    }
+}
+
+private extension View {
+    func settingsTextFieldChrome() -> some View {
+        modifier(SettingsTextFieldChrome())
     }
 }
 

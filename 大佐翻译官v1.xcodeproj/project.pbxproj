@@ -404,7 +404,7 @@
 				CODE_SIGN_ENTITLEMENTS = dazuofanyiguan/dazuofanyiguan.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 120;
+				CURRENT_PROJECT_VERSION = 121;
 				DEVELOPMENT_ASSET_PATHS = "\"dazuofanyiguan/Preview Content\"";
 				DEVELOPMENT_TEAM = S336CKXSUQ;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -418,7 +418,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 1.2.0;
+				MARKETING_VERSION = 1.2.1;
 				PRODUCT_BUNDLE_IDENTIFIER = achord.dazuofanyiguan;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -434,7 +434,7 @@
 				CODE_SIGN_ENTITLEMENTS = dazuofanyiguan/dazuofanyiguan.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 120;
+				CURRENT_PROJECT_VERSION = 121;
 				DEVELOPMENT_ASSET_PATHS = "\"dazuofanyiguan/Preview Content\"";
 				DEVELOPMENT_TEAM = S336CKXSUQ;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -448,7 +448,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 1.2.0;
+				MARKETING_VERSION = 1.2.1;
 				PRODUCT_BUNDLE_IDENTIFIER = achord.dazuofanyiguan;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;

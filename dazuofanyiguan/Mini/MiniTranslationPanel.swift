@@ -15,22 +15,50 @@ enum MiniTranslationIcon {
 @MainActor
 final class MiniTranslationBubbleModel: ObservableObject {
     @Published var state: MiniTranslationBubbleState = .translating
+    @Published var fontSize: Double = 15
+    @Published var showsSmartDirectionNotice = false
 
     var onDismiss: (() -> Void)?
     var onHoverChange: ((Bool) -> Void)?
 }
 
 struct MiniTranslationLayout {
-    static func contentSize(for state: MiniTranslationBubbleState) -> NSSize {
+    static func contentSize(
+        for state: MiniTranslationBubbleState,
+        fontSize: Double = 15,
+        showsSmartDirectionNotice: Bool = false
+    ) -> NSSize {
+        let scale = AppTextFontSize.sanitized(fontSize) / AppTextFontSize.defaultValue
+
         switch state {
         case .translating:
             return NSSize(width: 300, height: 78)
         case .error(let message):
-            let lines = estimatedLineCount(for: message, charactersPerLine: 30, maximum: 5)
-            return NSSize(width: 420, height: max(130, CGFloat(110 + lines * 19)))
+            let charactersPerLine = max(18, Int(30 / scale))
+            let lines = estimatedLineCount(
+                for: message,
+                charactersPerLine: charactersPerLine,
+                maximum: 5
+            )
+            return NSSize(
+                width: 420,
+                height: max(130, CGFloat(110 + Double(lines) * 19 * scale))
+            )
         case .result(let text):
-            let lines = estimatedLineCount(for: text, charactersPerLine: 34, maximum: 11)
-            return NSSize(width: 460, height: min(340, max(160, CGFloat(118 + lines * 20))))
+            let charactersPerLine = max(20, Int(34 / scale))
+            let lines = estimatedLineCount(
+                for: text,
+                charactersPerLine: charactersPerLine,
+                maximum: 11
+            )
+            return NSSize(
+                width: 460,
+                height: min(
+                    420,
+                    max(160, CGFloat(118 + Double(lines) * 20 * scale))
+                        + (showsSmartDirectionNotice ? 24 : 0)
+                )
+            )
         }
     }
 
@@ -159,6 +187,34 @@ final class MiniTranslationPanel: NSPanel {
         startOutsideClickMonitoring()
     }
 
+    func resizeKeepingCurrentPosition(contentSize: NSSize) {
+        guard isVisible else { return }
+
+        let topLeft = CGPoint(x: frame.minX, y: frame.maxY)
+        let screen = NSScreen.screens.first(where: { $0.frame.intersects(frame) }) ?? NSScreen.main
+        guard let visibleFrame = screen?.visibleFrame else {
+            setContentSize(contentSize)
+            return
+        }
+
+        let margin: CGFloat = 12
+        let proposedOrigin = CGPoint(
+            x: topLeft.x,
+            y: topLeft.y - contentSize.height
+        )
+        let origin = CGPoint(
+            x: min(
+                max(proposedOrigin.x, visibleFrame.minX + margin),
+                visibleFrame.maxX - contentSize.width - margin
+            ),
+            y: min(
+                max(proposedOrigin.y, visibleFrame.minY + margin),
+                visibleFrame.maxY - contentSize.height - margin
+            )
+        )
+        setFrame(NSRect(origin: origin, size: contentSize), display: true)
+    }
+
     private func startOutsideClickMonitoring() {
         stopOutsideClickMonitoring()
 
@@ -202,7 +258,7 @@ private struct MiniTranslationBubbleView: View {
     @Environment(\.colorScheme) private var colorScheme
 
     private var appVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.2.0"
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.2.1"
     }
 
     var body: some View {
@@ -301,8 +357,21 @@ private struct MiniTranslationBubbleView: View {
         case .translating:
             EmptyView()
         case .result(let text):
-            MiniTranslationResultView(text: text)
-                .help("拖动选择文字后按 Command+C 复制")
+            VStack(alignment: .leading, spacing: 8) {
+                MiniTranslationResultView(text: text, fontSize: model.fontSize)
+                    .help("拖动选择文字后按 Command+C 复制")
+
+                if model.showsSmartDirectionNotice {
+                    HStack(spacing: 5) {
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 9, weight: .medium))
+                        Text("智能翻译识别已介入")
+                            .font(.system(size: 10, weight: .medium))
+                    }
+                    .foregroundStyle(.tertiary)
+                    .accessibilityElement(children: .combine)
+                }
+            }
         case .error(let message):
             Text(message)
                 .font(.system(size: 13))
@@ -344,6 +413,7 @@ private struct MiniTranslationScrollMetrics: Equatable {
 private struct MiniTranslationResultView: View {
 
     let text: String
+    let fontSize: Double
 
     @State private var scrollMetrics = MiniTranslationScrollMetrics()
     @State private var isHovering = false
@@ -351,6 +421,7 @@ private struct MiniTranslationResultView: View {
     var body: some View {
         MiniSelectableTranslationTextView(
             text: text,
+            fontSize: fontSize,
             metrics: $scrollMetrics
         )
         .padding(.trailing, showsScrollIndicator ? 10 : 0)
@@ -399,6 +470,7 @@ private struct MiniTranslationResultView: View {
 
 private struct MiniSelectableTranslationTextView: NSViewRepresentable {
     let text: String
+    let fontSize: Double
     @Binding var metrics: MiniTranslationScrollMetrics
 
     func makeNSView(context: Context) -> ScrollContainer {
@@ -408,7 +480,7 @@ private struct MiniSelectableTranslationTextView: NSViewRepresentable {
                 metrics = newMetrics
             }
         }
-        container.setText(text)
+        container.setText(text, fontSize: fontSize)
         return container
     }
 
@@ -418,7 +490,7 @@ private struct MiniSelectableTranslationTextView: NSViewRepresentable {
                 metrics = newMetrics
             }
         }
-        nsView.setText(text)
+        nsView.setText(text, fontSize: fontSize)
     }
 
     final class ScrollContainer: NSView {
@@ -427,6 +499,7 @@ private struct MiniSelectableTranslationTextView: NSViewRepresentable {
         var onMetricsChange: ((MiniTranslationScrollMetrics) -> Void)?
 
         private var currentText = ""
+        private var currentFontSize: Double = 0
         private var boundsObserver: NSObjectProtocol?
 
         override init(frame frameRect: NSRect) {
@@ -450,16 +523,17 @@ private struct MiniSelectableTranslationTextView: NSViewRepresentable {
             updateDocumentLayout()
         }
 
-        func setText(_ text: String) {
-            guard currentText != text else {
+        func setText(_ text: String, fontSize: Double) {
+            guard currentText != text || currentFontSize != fontSize else {
                 return
             }
 
             currentText = text
+            currentFontSize = fontSize
             textView.textStorage?.setAttributedString(
                 NSAttributedString(
                     string: text,
-                    attributes: Self.textAttributes
+                    attributes: Self.textAttributes(fontSize: fontSize)
                 )
             )
             needsLayout = true
@@ -541,12 +615,14 @@ private struct MiniSelectableTranslationTextView: NSViewRepresentable {
             )
         }
 
-        private static var textAttributes: [NSAttributedString.Key: Any] {
+        private static func textAttributes(
+            fontSize: Double
+        ) -> [NSAttributedString.Key: Any] {
             let paragraphStyle = NSMutableParagraphStyle()
             paragraphStyle.lineSpacing = 4
 
             return [
-                .font: NSFont.systemFont(ofSize: 15),
+                .font: NSFont.systemFont(ofSize: CGFloat(fontSize)),
                 .foregroundColor: NSColor.labelColor,
                 .paragraphStyle: paragraphStyle
             ]

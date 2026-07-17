@@ -34,6 +34,25 @@ struct ContentView: View {
     @State private var didDismissPermissionBannerThisSession: Bool = false
     @State private var needsAccessibilityPermission: Bool = false
     @State private var needsScreenRecordingPermission: Bool = false
+    @State private var hasRefreshedPermissionStatus: Bool = false
+
+    private struct ShortcutRuntimeConfiguration: Equatable {
+        let doubleCopyEnabled: Bool
+        let doubleCopyWindowMs: Int
+        let globalHotkeyEnabled: Bool
+        let screenshotHotkeyEnabled: Bool
+        let screenshotHotkeyKeyCode: Int
+    }
+
+    private struct MiniPresentationConfiguration: Equatable {
+        let isEnabled: Bool
+        let fontSize: Double
+    }
+
+    private struct HotkeyRuntimeState: Equatable {
+        let isRunning: Bool
+        let failureMessage: String?
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -48,7 +67,7 @@ struct ContentView: View {
             WindowAccessor { window in
                 guard let window else { return }
 
-                window.title = "大佐翻译官"
+                window.title = "大佐翻译官 v\(appVersion)"
                 windowController.window = window
                 window.identifier = AppWindowController.mainWindowIdentifier
                 window.isReleasedWhenClosed = false
@@ -77,6 +96,23 @@ struct ContentView: View {
         )
         .overlay(alignment: .bottom) {
             VStack(spacing: 10) {
+                if shouldShowGlobalHotkeyRecommendation {
+                    GlobalHotkeyRecommendationBanner(
+                        isRetry: hotkeyMonitor.lastStartFailureMessage != nil,
+                        onEnable: enableRecommendedGlobalHotkey,
+                        onIgnore: {
+                            settings.snoozeGlobalHotkeyRecommendation()
+                            toast.show("已忽略，本周不再提醒", style: .success)
+                        },
+                        onNeverRemind: {
+                            settings.neverRecommendGlobalHotkey = true
+                            toast.show("已关闭全局快捷键推荐", style: .success)
+                        }
+                    )
+                    .padding(.horizontal, 18)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+
                 if showPermissionBanner {
                     HomePermissionBanner(
                         needsAccessibility: needsAccessibilityPermission,
@@ -110,19 +146,20 @@ struct ContentView: View {
             .padding(.bottom, 14)
         }
         .onAppear {
-            if settings.globalHotkeyEnabled, !hotkeyMonitor.isTrusted {
-                settings.globalHotkeyEnabled = false
-                settings.doubleCopyEnabled = true
-            }
-
+            refreshPermissionStatus()
             setupHotkeyMonitorIfNeeded()
             setupClipboardMonitorIfNeeded()
+            miniTranslationController.applyFontSize(settings.miniTextFontSize)
 
-            refreshPermissionStatus()
             showPermissionGuide = false
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             refreshPermissionStatus()
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 400_000_000)
+                if Task.isCancelled { return }
+                refreshPermissionStatus()
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: .dazuofanyiguanOpenPermissionGuide)) { _ in
             refreshPermissionStatus()
@@ -130,11 +167,14 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showPermissionGuide) {
             let needsAccessibility = !AXIsProcessTrusted()
-            let needsScreenRecording = !ScreenCapturePermission.hasPermission()
+            let showsScreenRecording = settings.screenshotHotkeyEnabled
+            let needsScreenRecording = showsScreenRecording
+                && !ScreenCapturePermission.hasPermission()
 
             PermissionGuideView(
                 needsAccessibility: needsAccessibility,
                 needsScreenRecording: needsScreenRecording,
+                showsScreenRecordingPermission: showsScreenRecording,
                 onOpenAccessibility: {
                     GlobalHotkeyMonitor.openAccessibilitySettings()
                 },
@@ -164,24 +204,30 @@ struct ContentView: View {
         .onChange(of: settings.targetLanguageCode) { _, _ in
             vm.scheduleTranslate(settings: settings, log: log, toast: toast)
         }
-        .onChange(of: settings.doubleCopyEnabled) { _, _ in
-            setupClipboardMonitorIfNeeded()
-        }
-        .onChange(of: settings.doubleCopyWindowMs) { _, _ in
+        .onChange(of: shortcutRuntimeConfiguration) { oldValue, newValue in
+            if oldValue.screenshotHotkeyKeyCode != newValue.screenshotHotkeyKeyCode {
+                hotkeyMonitor.stop()
+            }
             setupHotkeyMonitorIfNeeded()
             setupClipboardMonitorIfNeeded()
-        }
-        .onChange(of: settings.globalHotkeyEnabled) { _, _ in
-            setupHotkeyMonitorIfNeeded()
-            setupClipboardMonitorIfNeeded()
-        }
-        .onChange(of: settings.miniModeEnabled) { _, enabled in
-            if !enabled {
-                miniTranslationController.dismiss(cancelTranslation: true)
+            if oldValue.screenshotHotkeyEnabled != newValue.screenshotHotkeyEnabled {
+                refreshPermissionStatus()
             }
         }
-        .onChange(of: hotkeyMonitor.isRunning) { _, _ in
+        .onChange(of: miniPresentationConfiguration) { oldValue, newValue in
+            if oldValue.isEnabled, !newValue.isEnabled {
+                miniTranslationController.dismiss(cancelTranslation: true)
+            }
+            if oldValue.fontSize != newValue.fontSize {
+                miniTranslationController.applyFontSize(newValue.fontSize)
+            }
+        }
+        .onChange(of: hotkeyRuntimeState) { oldValue, newValue in
             setupClipboardMonitorIfNeeded()
+            if oldValue.failureMessage != newValue.failureMessage,
+               let message = newValue.failureMessage {
+                log.warn("\(message)，已使用剪贴板监听回退")
+            }
         }
         .onChange(of: screenshotOCR.isRunning) { _, _ in
             setupClipboardMonitorIfNeeded()
@@ -204,6 +250,42 @@ struct ContentView: View {
                 startTranslationTimeoutMonitoring(token: vm.translationToken)
             }
         }
+    }
+
+    private var shortcutRuntimeConfiguration: ShortcutRuntimeConfiguration {
+        ShortcutRuntimeConfiguration(
+            doubleCopyEnabled: settings.doubleCopyEnabled,
+            doubleCopyWindowMs: settings.doubleCopyWindowMs,
+            globalHotkeyEnabled: settings.globalHotkeyEnabled,
+            screenshotHotkeyEnabled: settings.screenshotHotkeyEnabled,
+            screenshotHotkeyKeyCode: settings.screenshotHotkeyKeyCode
+        )
+    }
+
+    private var appVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.2.1"
+    }
+
+    private var miniPresentationConfiguration: MiniPresentationConfiguration {
+        MiniPresentationConfiguration(
+            isEnabled: settings.miniModeEnabled,
+            fontSize: settings.miniTextFontSize
+        )
+    }
+
+    private var hotkeyRuntimeState: HotkeyRuntimeState {
+        HotkeyRuntimeState(
+            isRunning: hotkeyMonitor.isRunning,
+            failureMessage: hotkeyMonitor.lastStartFailureMessage
+        )
+    }
+
+    private var shouldShowGlobalHotkeyRecommendation: Bool {
+        hasRefreshedPermissionStatus && settings.shouldRecommendGlobalHotkey(
+            isAccessibilityTrusted: !needsAccessibilityPermission,
+            globalMonitorFailed: settings.globalHotkeyEnabled
+                && hotkeyMonitor.lastStartFailureMessage != nil
+        )
     }
 
     private struct TranslationTimeoutBanner: View {
@@ -325,7 +407,7 @@ struct ContentView: View {
             sourceLanguageCode: $settings.sourceLanguageCode,
             targetLanguageCode: $settings.targetLanguageCode,
             miniModeEnabled: $settings.miniModeEnabled,
-            engineType: settings.engineType,
+            engineTypeRawValue: $settings.engineTypeRawValue,
             appearance: settings.appearance,
             statusColor: statusColor,
             onSwapLanguages: {
@@ -356,7 +438,11 @@ struct ContentView: View {
                     }
                 }
             ) {
-                PlaceholderTextEditor(text: $vm.inputText, placeholder: "在这里输入或粘贴要翻译的文字…")
+                PlaceholderTextEditor(
+                    text: $vm.inputText,
+                    placeholder: "在这里输入或粘贴要翻译的文字…",
+                    fontSize: AppTextFontSize.sanitized(settings.sourceTextFontSize)
+                )
                     .onChange(of: vm.inputText) { _, _ in
                         if vm.shouldScheduleTranslationForCurrentInputChange() {
                             vm.scheduleTranslate(settings: settings, log: log, toast: toast)
@@ -368,6 +454,7 @@ struct ContentView: View {
             HomeTranslationPanel(
                 icon: "character.bubble",
                 title: "译文",
+                subtitle: miniTranslationDirectionDescription,
                 actions: {
                     if let model = vm.lastAIModelName,
                        vm.lastTranslationDurationMs != nil,
@@ -391,7 +478,10 @@ struct ContentView: View {
             ) {
                 VStack(spacing: 0) {
                     ZStack {
-                        OutputTextView(text: $vm.outputText)
+                        OutputTextView(
+                            text: $vm.outputText,
+                            fontSize: AppTextFontSize.sanitized(settings.translatedTextFontSize)
+                        )
 
                         if vm.outputText.isEmpty {
                             TranslationOutputEmptyState(isTranslating: vm.isTranslating)
@@ -511,6 +601,7 @@ struct ContentView: View {
 
     private struct OutputTextView: NSViewRepresentable {
         @Binding var text: String
+        let fontSize: Double
 
         func makeNSView(context: Context) -> NSScrollView {
             let scrollView = NSScrollView()
@@ -532,7 +623,7 @@ struct ContentView: View {
             textView.isEditable = false
             textView.isSelectable = true
             textView.drawsBackground = false
-            textView.font = NSFont.systemFont(ofSize: 15)
+            textView.font = NSFont.systemFont(ofSize: CGFloat(fontSize))
             textView.textColor = NSColor.labelColor
             let paragraphStyle = NSMutableParagraphStyle()
             paragraphStyle.lineSpacing = 4
@@ -554,6 +645,20 @@ struct ContentView: View {
 
         func updateNSView(_ nsView: NSScrollView, context: Context) {
             guard let textView = nsView.documentView as? NSTextView else { return }
+            let size = CGFloat(fontSize)
+            if abs((textView.font?.pointSize ?? 0) - size) > 0.01 {
+                let font = NSFont.systemFont(ofSize: size)
+                textView.font = font
+                textView.typingAttributes[.font] = font
+                let length = textView.textStorage?.length ?? 0
+                if length > 0 {
+                    textView.textStorage?.addAttribute(
+                        .font,
+                        value: font,
+                        range: NSRange(location: 0, length: length)
+                    )
+                }
+            }
             if textView.string != text {
                 textView.string = text
                 if let paragraphStyle = textView.defaultParagraphStyle, !text.isEmpty {
@@ -572,6 +677,14 @@ struct ContentView: View {
         return "检测为\(LanguagePreset.displayName(for: detected))"
     }
 
+    private var miniTranslationDirectionDescription: String? {
+        guard let pair = vm.languagePairOverride else { return nil }
+        let sourceCode = pair.sourceLanguageCode == LanguagePreset.auto.code
+            ? (vm.detectedSourceLanguageCode ?? pair.sourceLanguageCode)
+            : pair.sourceLanguageCode
+        return "Mini 智能方向：\(LanguagePreset.displayName(for: sourceCode)) → \(LanguagePreset.displayName(for: pair.targetLanguageCode))"
+    }
+
     private func toggleAppearance() {
         switch settings.appearance {
         case .dark:
@@ -588,11 +701,16 @@ struct ContentView: View {
                 if screenshotOCR.isRunning {
                     return
                 }
-                handleTextShortcut(text, showClipboardToast: !settings.globalHotkeyEnabled)
+                handleTextShortcut(
+                    text,
+                    showClipboardToast: !settings.globalHotkeyEnabled || !hotkeyMonitor.isRunning
+                )
             }
         }
 
-        let shouldRun = settings.doubleCopyEnabled && !settings.globalHotkeyEnabled && !screenshotOCR.isRunning
+        let needsRuntimeFallback = settings.globalHotkeyEnabled && !hotkeyMonitor.isRunning
+        let shouldRun = !screenshotOCR.isRunning
+            && ((settings.doubleCopyEnabled && !settings.globalHotkeyEnabled) || needsRuntimeFallback)
         if shouldRun {
             if !clipboardMonitor.isRunning || clipboardMonitor.runningWindowMs != settings.doubleCopyWindowMs {
                 clipboardMonitor.start(windowMs: settings.doubleCopyWindowMs, log: log)
@@ -607,10 +725,13 @@ struct ContentView: View {
 
     private func setupHotkeyMonitorIfNeeded() {
         if settings.globalHotkeyEnabled {
-            hotkeyMonitor.onDoubleCopy = {
-                let text = NSPasteboard.general.string(forType: .string) ?? ""
+            hotkeyMonitor.onDoubleCopy = { previousChangeCount in
                 Task { @MainActor in
                     if screenshotOCR.isRunning {
+                        return
+                    }
+                    guard let text = await clipboardText(after: previousChangeCount) else {
+                        log.warn("未读取到本次复制的文字，已忽略快捷翻译")
                         return
                     }
                     handleTextShortcut(text, showClipboardToast: false)
@@ -642,6 +763,17 @@ struct ContentView: View {
         }
     }
 
+    private func enableRecommendedGlobalHotkey() {
+        if hotkeyMonitor.isRunning || hotkeyMonitor.isStarting
+            || hotkeyMonitor.lastStartFailureMessage != nil {
+            hotkeyMonitor.stop()
+        }
+        settings.globalHotkeyEnabled = true
+        settings.doubleCopyEnabled = false
+        setupHotkeyMonitorIfNeeded()
+        setupClipboardMonitorIfNeeded()
+    }
+
     private func handleTextShortcut(_ text: String, showClipboardToast: Bool) {
         if settings.miniModeEnabled {
             miniTranslationController.translate(
@@ -662,6 +794,21 @@ struct ContentView: View {
         if showClipboardToast {
             toast.show("已获取剪贴板文字并开始翻译", style: .success)
         }
+    }
+
+    private func clipboardText(after previousChangeCount: Int) async -> String? {
+        let pasteboard = NSPasteboard.general
+        for _ in 0..<8 {
+            if pasteboard.changeCount != previousChangeCount {
+                let text = pasteboard.string(forType: .string) ?? ""
+                return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? nil
+                    : text
+            }
+            try? await Task.sleep(nanoseconds: 30_000_000)
+            if Task.isCancelled { return nil }
+        }
+        return nil
     }
 
     private var statusColor: Color {
@@ -712,19 +859,38 @@ struct ContentView: View {
     }
 
     private func refreshPermissionStatus() {
+        let permissionWasMissing = needsAccessibilityPermission
         let trusted = AXIsProcessTrusted()
         let screenOK = ScreenCapturePermission.hasPermission()
 
         needsAccessibilityPermission = !trusted
-        needsScreenRecordingPermission = !screenOK
-        showPermissionBanner = (!trusted || !screenOK) && !didDismissPermissionBannerThisSession
+        needsScreenRecordingPermission = settings.screenshotHotkeyEnabled && !screenOK
+        hasRefreshedPermissionStatus = true
+        showPermissionBanner = (needsAccessibilityPermission || needsScreenRecordingPermission)
+            && !didDismissPermissionBannerThisSession
 
-        // 权限放行后，自动切换到“更好的默认体验”（只自动执行一次）。
-        let gKey = "didAutoEnableGlobalHotkeyV1"
-        if trusted, !UserDefaults.standard.bool(forKey: gKey) {
-            settings.globalHotkeyEnabled = true
-            settings.doubleCopyEnabled = false
-            UserDefaults.standard.set(true, forKey: gKey)
+        if !trusted {
+            if settings.globalHotkeyEnabled {
+                settings.globalHotkeyEnabled = false
+                settings.doubleCopyEnabled = true
+            }
+            if hotkeyMonitor.isRunning || hotkeyMonitor.isStarting {
+                hotkeyMonitor.stop()
+            }
+            setupClipboardMonitorIfNeeded()
+        }
+
+        let didPreferGlobal = settings.preferGlobalHotkeyWhenAvailable(
+            isAccessibilityTrusted: trusted,
+            permissionWasMissing: permissionWasMissing
+        )
+        let shouldRetryHotkey = trusted
+            && (settings.globalHotkeyEnabled || settings.screenshotHotkeyEnabled)
+            && !hotkeyMonitor.isRunning
+            && !hotkeyMonitor.isStarting
+        if didPreferGlobal || shouldRetryHotkey {
+            setupHotkeyMonitorIfNeeded()
+            setupClipboardMonitorIfNeeded()
         }
 
         // 截图翻译快捷键由全局热键触发：需要“辅助功能 + 屏幕录制”都已放行。

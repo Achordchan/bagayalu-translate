@@ -4,15 +4,17 @@ import SwiftUI
 struct PlaceholderTextEditor: View {
     @Binding var text: String
     let placeholder: String
+    var fontSize: Double = 15
 
     var body: some View {
-        InsetTextView(text: $text, placeholder: placeholder)
+        InsetTextView(text: $text, placeholder: placeholder, fontSize: fontSize)
     }
 }
 
 private struct InsetTextView: NSViewRepresentable {
     @Binding var text: String
     let placeholder: String
+    let fontSize: Double
 
     private final class InterceptingTextView: NSTextView {
         var onMarkedTextStateChanged: ((Bool) -> Void)?
@@ -55,13 +57,15 @@ private struct InsetTextView: NSViewRepresentable {
         textView.isSelectable = true
         textView.allowsUndo = true
         textView.drawsBackground = false
-        textView.font = NSFont.systemFont(ofSize: 15)
+        let contentFont = NSFont.systemFont(ofSize: CGFloat(fontSize))
+        textView.font = contentFont
         textView.textColor = NSColor.labelColor
         textView.insertionPointColor = NSColor.labelColor
         let paragraphStyle = NSMutableParagraphStyle()
         paragraphStyle.lineSpacing = 4
         textView.defaultParagraphStyle = paragraphStyle
         textView.typingAttributes[.paragraphStyle] = paragraphStyle
+        textView.typingAttributes[.font] = contentFont
         textView.textContainerInset = NSSize(width: 8, height: 10)
         textView.delegate = context.coordinator
         textView.string = text
@@ -89,7 +93,7 @@ private struct InsetTextView: NSViewRepresentable {
 
         let placeholderLabel = NSTextField(labelWithString: placeholder)
         placeholderLabel.translatesAutoresizingMaskIntoConstraints = false
-        placeholderLabel.font = NSFont.systemFont(ofSize: 15)
+        placeholderLabel.font = contentFont
         placeholderLabel.textColor = NSColor.secondaryLabelColor
         placeholderLabel.lineBreakMode = .byTruncatingTail
         placeholderLabel.maximumNumberOfLines = 1
@@ -122,6 +126,7 @@ private struct InsetTextView: NSViewRepresentable {
         textView.insertionPointColor = NSColor.labelColor
 
         context.coordinator.placeholderLabel?.stringValue = placeholder
+        applyFont(to: textView, placeholderLabel: context.coordinator.placeholderLabel)
 
         if textView.hasMarkedText() {
             context.coordinator.updatePlaceholderVisibility(text: textView.string, textView: textView)
@@ -137,6 +142,27 @@ private struct InsetTextView: NSViewRepresentable {
             context.coordinator.isProgrammaticUpdate = false
         }
         context.coordinator.updatePlaceholderVisibility(text: text, textView: textView)
+    }
+
+    private func applyFont(to textView: NSTextView, placeholderLabel: NSTextField?) {
+        let size = CGFloat(fontSize)
+        let font = NSFont.systemFont(ofSize: size)
+        placeholderLabel?.font = font
+
+        guard abs((textView.font?.pointSize ?? 0) - size) > 0.01 else {
+            return
+        }
+
+        textView.font = font
+        textView.typingAttributes[.font] = font
+        let length = textView.textStorage?.length ?? 0
+        if length > 0 {
+            textView.textStorage?.addAttribute(
+                .font,
+                value: font,
+                range: NSRange(location: 0, length: length)
+            )
+        }
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {

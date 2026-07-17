@@ -4,8 +4,8 @@ struct HomeToolbarView: View {
     @Binding var sourceLanguageCode: String
     @Binding var targetLanguageCode: String
     @Binding var miniModeEnabled: Bool
+    @Binding var engineTypeRawValue: String
 
-    let engineType: TranslationEngineType
     let appearance: AppAppearance
     let statusColor: Color
     let onSwapLanguages: () -> Void
@@ -38,7 +38,10 @@ struct HomeToolbarView: View {
 
             Spacer(minLength: 8)
 
-            engineBadge
+            TranslationEnginePicker(
+                selection: $engineTypeRawValue,
+                statusColor: statusColor
+            )
 
             Divider()
                 .frame(height: 24)
@@ -86,28 +89,6 @@ struct HomeToolbarView: View {
         )
     }
 
-    private var engineBadge: some View {
-        HStack(spacing: 8) {
-            Image(systemName: engineType.systemImageName)
-                .font(.system(size: 13, weight: .semibold))
-
-            Text(engineType.title)
-                .font(.system(size: 12, weight: .semibold))
-                .lineLimit(1)
-
-            Circle()
-                .fill(statusColor)
-                .frame(width: 7, height: 7)
-        }
-        .foregroundStyle(.primary)
-        .padding(.horizontal, 10)
-        .frame(height: 34)
-        .background(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .fill(Color(nsColor: .windowBackgroundColor).opacity(0.70))
-        )
-        .help("当前翻译服务：\(engineType.title)")
-    }
 }
 
 private struct HomeToolbarIconButtonStyle: ButtonStyle {

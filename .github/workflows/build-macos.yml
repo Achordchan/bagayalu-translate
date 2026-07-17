@@ -9,7 +9,7 @@ on:
       version:
         description: 要发布的版本号，必须与 Xcode 中的 MARKETING_VERSION 一致
         required: true
-        default: 1.2.0
+        default: 1.2.1
         type: string
 
 permissions:
@@ -30,6 +30,7 @@ jobs:
       XCODE_TARGET: 大佐翻译官v1
       APP_NAME: 大佐翻译官v1
       DERIVED_DATA_PATH: build
+      BUILD_PRODUCTS_PATH: build-products
       RELEASE_VERSION: ${{ inputs.version }}
 
     steps:
@@ -104,71 +105,82 @@ jobs:
             exit 1
           fi
 
-      - name: Build universal Release app
+      - name: Build architecture-specific Release apps
         run: |
           set -euo pipefail
-          xcodebuild \
-            -project "$XCODE_PROJECT" \
-            -scheme "$XCODE_SCHEME" \
-            -configuration Release \
-            -destination "generic/platform=macOS" \
-            -derivedDataPath "$DERIVED_DATA_PATH" \
-            ARCHS="arm64 x86_64" \
-            ONLY_ACTIVE_ARCH=NO \
-            CODE_SIGN_STYLE=Manual \
-            CODE_SIGN_IDENTITY=- \
-            CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO \
-            DEVELOPMENT_TEAM="" \
-            build
 
-      - name: Verify app signature and architectures
+          for ARCH in arm64 x86_64; do
+            OUTPUT_PATH="$GITHUB_WORKSPACE/$BUILD_PRODUCTS_PATH/$ARCH"
+            xcodebuild \
+              -project "$XCODE_PROJECT" \
+              -scheme "$XCODE_SCHEME" \
+              -configuration Release \
+              -destination "generic/platform=macOS" \
+              -derivedDataPath "$DERIVED_DATA_PATH" \
+              ARCHS="$ARCH" \
+              ONLY_ACTIVE_ARCH=YES \
+              CONFIGURATION_BUILD_DIR="$OUTPUT_PATH" \
+              CODE_SIGN_STYLE=Manual \
+              CODE_SIGN_IDENTITY=- \
+              CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO \
+              DEVELOPMENT_TEAM="" \
+              build
+          done
+
+      - name: Verify app signatures and architectures
         run: |
           set -euo pipefail
-          APP_PATH="$DERIVED_DATA_PATH/Build/Products/Release/$APP_NAME.app"
 
-          if [ ! -d "$APP_PATH" ]; then
-            echo "找不到构建产物：$APP_PATH" >&2
-            exit 1
-          fi
+          for ARCH in arm64 x86_64; do
+            APP_PATH="$BUILD_PRODUCTS_PATH/$ARCH/$APP_NAME.app"
 
-          codesign --verify --deep --strict --verbose=4 "$APP_PATH"
+            if [ ! -d "$APP_PATH" ]; then
+              echo "找不到 $ARCH 构建产物：$APP_PATH" >&2
+              exit 1
+            fi
 
-          ARCHITECTURES="$(lipo -archs "$APP_PATH/Contents/MacOS/$APP_NAME")"
-          echo "构建架构：$ARCHITECTURES"
-          [[ "$ARCHITECTURES" == *arm64* && "$ARCHITECTURES" == *x86_64* ]]
+            codesign --verify --deep --strict --verbose=4 "$APP_PATH"
+
+            ARCHITECTURES="$(lipo -archs "$APP_PATH/Contents/MacOS/$APP_NAME")"
+            echo "$ARCH 构建架构：$ARCHITECTURES"
+            [ "$ARCHITECTURES" = "$ARCH" ]
+          done
 
       - name: Package app and DMG
         run: |
           set -euo pipefail
 
-          APP_PATH="$DERIVED_DATA_PATH/Build/Products/Release/$APP_NAME.app"
+          ARM64_APP_PATH="$BUILD_PRODUCTS_PATH/arm64/$APP_NAME.app"
           VERSION="$(
             /usr/libexec/PlistBuddy \
               -c 'Print :CFBundleShortVersionString' \
-              "$APP_PATH/Contents/Info.plist"
+              "$ARM64_APP_PATH/Contents/Info.plist"
           )"
-          # GitHub CLI 在 Release 上传阶段可能截断非 ASCII 文件名，
-          # 更新包必须使用稳定文件名，确保 appcast 下载地址与实际资产一致。
-          ARCHIVE_NAME="bagayalu-translate-v$VERSION.zip"
-          DMG_NAME="bagayalu-translate-v$VERSION.dmg"
 
-          mkdir -p dist/update dist/dmg-root
-          ditto -c -k --sequesterRsrc --keepParent \
-            "$APP_PATH" \
-            "dist/update/$ARCHIVE_NAME"
+          mkdir -p dist/update
 
-          ditto "$APP_PATH" "dist/dmg-root/$APP_NAME.app"
-          ln -s /Applications "dist/dmg-root/Applications"
-          hdiutil create \
-            -volname "大佐翻译官 v$VERSION" \
-            -srcfolder "dist/dmg-root" \
-            -ov \
-            -format UDZO \
-            "dist/$DMG_NAME"
+          for ARCH in arm64 x86_64; do
+            APP_PATH="$BUILD_PRODUCTS_PATH/$ARCH/$APP_NAME.app"
+            ARCHIVE_NAME="bagayalu-translate-v$VERSION-$ARCH.zip"
+            DMG_NAME="bagayalu-translate-v$VERSION-$ARCH.dmg"
+            DMG_ROOT="dist/dmg-root-$ARCH"
 
-          rm -rf dist/dmg-root
-          echo "ARCHIVE_NAME=$ARCHIVE_NAME" >> "$GITHUB_ENV"
-          echo "DMG_NAME=$DMG_NAME" >> "$GITHUB_ENV"
+            ditto -c -k --sequesterRsrc --keepParent \
+              "$APP_PATH" \
+              "dist/update/$ARCHIVE_NAME"
+
+            mkdir -p "$DMG_ROOT"
+            ditto "$APP_PATH" "$DMG_ROOT/$APP_NAME.app"
+            ln -s /Applications "$DMG_ROOT/Applications"
+            hdiutil create \
+              -volname "大佐翻译官 v$VERSION $ARCH" \
+              -srcfolder "$DMG_ROOT" \
+              -ov \
+              -format UDZO \
+              "dist/$DMG_NAME"
+
+            rm -rf "$DMG_ROOT"
+          done
 
       - name: Generate signed Sparkle appcast
         if: github.event_name == 'workflow_dispatch'
@@ -195,14 +207,17 @@ jobs:
             exit 1
           fi
 
-          cat > "dist/update/${ARCHIVE_NAME%.zip}.md" <<EOF
+          for ARCH in arm64 x86_64; do
+            cat > "dist/update/bagayalu-translate-v$RELEASE_VERSION-$ARCH.md" <<EOF
           # 大佐翻译官 v$RELEASE_VERSION
 
-          - 新增 Mini 模式，在当前工作区直接展示翻译结果。
-          - 新增 Apple 系统翻译引擎并设为默认模型。
-          - 重构首页、设置页和权限引导。
-          - 新增应用内自动更新，后续版本可直接安装并自动重启。
+          - Mini 模式会自动识别中外文并选择更合适的翻译方向。
+          - 新增原文、译文和 Mini 窗口独立字号滑块及实时预览。
+          - 优先启用全局快捷键，并增强授权刷新、失败回退和模式提醒。
+          - 主界面可直接切换翻译服务，设置页接口配置更清晰。
+          - Mini 智能方向介入时会在结果底部显示状态提示。
           EOF
+          done
 
           printf '%s' "$SPARKLE_PRIVATE_KEY" |
             "$GENERATE_APPCAST" \
@@ -218,6 +233,9 @@ jobs:
           test -f dist/update/appcast.xml
           xmllint --noout dist/update/appcast.xml
           grep -q 'sparkle:edSignature' dist/update/appcast.xml
+          grep -q "bagayalu-translate-v$RELEASE_VERSION-arm64.zip" dist/update/appcast.xml
+          grep -q "bagayalu-translate-v$RELEASE_VERSION-x86_64.zip" dist/update/appcast.xml
+          grep -q '<sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>' dist/update/appcast.xml
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
@@ -239,10 +257,12 @@ jobs:
           cat > "$RELEASE_NOTES" <<EOF
           ## 大佐翻译官 v$RELEASE_VERSION
 
-          - 新增 Mini 模式，在当前工作区直接展示翻译结果。
-          - 新增 Apple 系统翻译引擎并设为默认模型。
-          - 重构首页、设置页和权限引导。
-          - 新增应用内自动更新；从本版本开始，后续更新可在应用内直接完成并自动重启。
+          - Mini 模式会自动识别中外文并选择更合适的翻译方向。
+          - 新增原文、译文和 Mini 窗口独立字号滑块及实时预览。
+          - 优先启用全局快捷键，并增强授权刷新、失败回退和模式提醒。
+          - 主界面可直接切换翻译服务，设置页接口配置更清晰。
+          - Mini 智能方向介入时会在结果底部显示状态提示。
+          - 分别提供 Apple Silicon（arm64）和 Intel（x86_64）安装包。
 
           > 当前发布使用 ad-hoc 签名，首次安装仍可能需要在系统设置中手动放行。
           EOF
@@ -251,6 +271,6 @@ jobs:
             --target "$GITHUB_SHA" \
             --title "大佐翻译官 v$RELEASE_VERSION" \
             --notes-file "$RELEASE_NOTES" \
-            "dist/$DMG_NAME" \
-            "dist/update/$ARCHIVE_NAME" \
+            dist/*.dmg \
+            dist/update/*.zip \
             "dist/update/appcast.xml"

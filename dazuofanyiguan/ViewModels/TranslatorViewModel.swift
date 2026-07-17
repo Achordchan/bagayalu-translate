@@ -38,6 +38,7 @@ final class TranslatorViewModel: ObservableObject {
     @Published private(set) var translationToken: Int = 0
     @Published var lastErrorMessage: String?
     @Published var detectedSourceLanguageCode: String?
+    @Published private(set) var languagePairOverride: TranslationLanguagePair?
 
     @Published private(set) var isUsingAI: Bool = false
     @Published private(set) var activeAIModelName: String?
@@ -139,6 +140,7 @@ final class TranslatorViewModel: ObservableObject {
         log: LogStore,
         toast: ToastCenter,
         feedbackMode: TranslationFeedbackMode = .standard,
+        languagePair: TranslationLanguagePair? = nil,
         completion: TranslationCompletion? = nil
     ) async {
         translateTask?.cancel()
@@ -150,6 +152,7 @@ final class TranslatorViewModel: ObservableObject {
         if normalizedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             outputText = ""
             detectedSourceLanguageCode = nil
+            languagePairOverride = nil
             lastErrorMessage = nil
             isTranslating = false
             isUsingAI = false
@@ -163,8 +166,9 @@ final class TranslatorViewModel: ObservableObject {
         let text = settings.engineType == .apple
             ? normalizedText
             : normalizedText.replacingOccurrences(of: "\n", with: " \(newlineMarker) ")
-        let sl = settings.sourceLanguageCode
-        let tl = settings.targetLanguageCode
+        let sl = languagePair?.sourceLanguageCode ?? settings.sourceLanguageCode
+        let tl = languagePair?.targetLanguageCode ?? settings.targetLanguageCode
+        languagePairOverride = languagePair
 
         if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             outputText = ""
@@ -366,6 +370,7 @@ final class TranslatorViewModel: ObservableObject {
         isWaitingForLanguageDownload = false
         lastErrorMessage = nil
         detectedSourceLanguageCode = nil
+        languagePairOverride = nil
         lastTranslationDurationMs = nil
         lastAIModelName = nil
         lastAIEstimatedTokens = nil
@@ -377,9 +382,15 @@ final class TranslatorViewModel: ObservableObject {
     }
 
     func retryTranslateNow(settings: AppSettings, log: LogStore, toast: ToastCenter) {
+        let languagePair = languagePairOverride
         cancelTranslation(clearInput: false)
         Task { @MainActor in
-            await translateNow(settings: settings, log: log, toast: toast)
+            await translateNow(
+                settings: settings,
+                log: log,
+                toast: toast,
+                languagePair: languagePair
+            )
         }
     }
 
@@ -436,6 +447,7 @@ final class TranslatorViewModel: ObservableObject {
         log: LogStore,
         toast: ToastCenter,
         feedbackMode: TranslationFeedbackMode,
+        languagePair: TranslationLanguagePair? = nil,
         completion: TranslationCompletion?
     ) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -451,6 +463,7 @@ final class TranslatorViewModel: ObservableObject {
                 log: log,
                 toast: toast,
                 feedbackMode: feedbackMode,
+                languagePair: languagePair,
                 completion: completion
             )
         }

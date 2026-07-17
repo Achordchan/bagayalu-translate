@@ -79,12 +79,23 @@ final class MiniTranslationController: ObservableObject {
         log: LogStore
     ) {
         panel.applyAppearance(settings.appearance)
+        bubbleModel.fontSize = AppTextFontSize.sanitized(settings.miniTextFontSize)
 
         let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedText.isEmpty else {
             showStandaloneError("剪贴板中没有可翻译的文字")
             return
         }
+        let languagePair = MiniTranslationDirectionResolver.resolve(
+            text: trimmedText,
+            sourceLanguageCode: settings.sourceLanguageCode,
+            targetLanguageCode: settings.targetLanguageCode
+        )
+        let configuredPair = TranslationLanguagePair(
+            sourceLanguageCode: settings.sourceLanguageCode,
+            targetLanguageCode: settings.targetLanguageCode
+        )
+        bubbleModel.showsSmartDirectionNotice = languagePair != configuredPair
 
         requestTask?.cancel()
         autoDismissTask?.cancel()
@@ -102,8 +113,8 @@ final class MiniTranslationController: ObservableObject {
             if settings.engineType == .apple {
                 appleStatus = await appleTranslationCoordinator.preparationStatus(
                     text: trimmedText,
-                    sourceLanguageCode: settings.sourceLanguageCode,
-                    targetLanguageCode: settings.targetLanguageCode
+                    sourceLanguageCode: languagePair.sourceLanguageCode,
+                    targetLanguageCode: languagePair.targetLanguageCode
                 )
             } else {
                 appleStatus = nil
@@ -121,6 +132,7 @@ final class MiniTranslationController: ObservableObject {
                 startTranslation(
                     text: trimmedText,
                     requestID: requestID,
+                    languagePair: languagePair,
                     settings: settings,
                     viewModel: viewModel,
                     windowController: windowController,
@@ -130,6 +142,7 @@ final class MiniTranslationController: ObservableObject {
             case .openMainWindow:
                 restoreMainWindow(
                     text: trimmedText,
+                    languagePair: languagePair,
                     viewModel: viewModel,
                     settings: settings,
                     windowController: windowController,
@@ -144,6 +157,19 @@ final class MiniTranslationController: ObservableObject {
 
     func applyAppearance(_ appearance: AppAppearance) {
         panel.applyAppearance(appearance)
+    }
+
+    func applyFontSize(_ fontSize: Double) {
+        let fontSize = AppTextFontSize.sanitized(fontSize)
+        bubbleModel.fontSize = fontSize
+        guard panel.isVisible else { return }
+        panel.resizeKeepingCurrentPosition(
+            contentSize: MiniTranslationLayout.contentSize(
+                for: bubbleModel.state,
+                fontSize: fontSize,
+                showsSmartDirectionNotice: bubbleModel.showsSmartDirectionNotice
+            )
+        )
     }
 
     func dismiss(cancelTranslation: Bool) {
@@ -165,6 +191,7 @@ final class MiniTranslationController: ObservableObject {
     private func startTranslation(
         text: String,
         requestID: UUID,
+        languagePair: TranslationLanguagePair,
         settings: AppSettings,
         viewModel: TranslatorViewModel,
         windowController: AppWindowController,
@@ -176,7 +203,8 @@ final class MiniTranslationController: ObservableObject {
             settings: settings,
             log: log,
             toast: toast,
-            feedbackMode: .external
+            feedbackMode: .external,
+            languagePair: languagePair
         ) { [weak self, weak viewModel] result in
             guard let self, requestTracker.accepts(requestID) else {
                 return
@@ -202,6 +230,7 @@ final class MiniTranslationController: ObservableObject {
 
     private func restoreMainWindow(
         text: String,
+        languagePair: TranslationLanguagePair,
         viewModel: TranslatorViewModel,
         settings: AppSettings,
         windowController: AppWindowController,
@@ -212,7 +241,15 @@ final class MiniTranslationController: ObservableObject {
         activeViewModel = nil
         panel.orderOut(nil)
         windowController.showAndActivate()
-        viewModel.applyExternalText(text, settings: settings, log: log, toast: toast)
+        viewModel.translateExternalTextNow(
+            text,
+            settings: settings,
+            log: log,
+            toast: toast,
+            feedbackMode: .standard,
+            languagePair: languagePair,
+            completion: nil
+        )
     }
 
     private func requiresMainWindow(for error: Error) -> Bool {
@@ -233,6 +270,7 @@ final class MiniTranslationController: ObservableObject {
         activeViewModel?.cancelTranslation(clearInput: false)
         requestTracker.invalidate()
         activeViewModel = nil
+        bubbleModel.showsSmartDirectionNotice = false
         anchorPoint = NSEvent.mouseLocation
         show(.error(message))
     }
@@ -241,7 +279,11 @@ final class MiniTranslationController: ObservableObject {
         bubbleModel.state = state
         panel.present(
             near: anchorPoint,
-            contentSize: MiniTranslationLayout.contentSize(for: state)
+            contentSize: MiniTranslationLayout.contentSize(
+                for: state,
+                fontSize: bubbleModel.fontSize,
+                showsSmartDirectionNotice: bubbleModel.showsSmartDirectionNotice
+            )
         )
 
         switch state {

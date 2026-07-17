@@ -115,7 +115,7 @@ struct ShortcutSettingsPane: View {
                 SettingsInlineNotice(
                     icon: "checkmark.circle",
                     title: "辅助功能已授权",
-                    message: "可直接读取当前选中的文字，不依赖目标应用是否能复制内容。",
+                    message: "直接监听 Command + C，触发判定更准确；翻译内容仍来自目标应用复制到剪贴板的文字。",
                     tint: .green
                 )
             } else {
