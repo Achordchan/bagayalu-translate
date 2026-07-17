@@ -208,7 +208,13 @@ jobs:
           fi
 
           for ARCH in arm64 x86_64; do
-            cat > "dist/update/bagayalu-translate-v$RELEASE_VERSION-$ARCH.md" <<EOF
+            APPCAST_INPUT="$RUNNER_TEMP/appcast-$ARCH"
+            mkdir -p "$APPCAST_INPUT"
+            cp \
+              "dist/update/bagayalu-translate-v$RELEASE_VERSION-$ARCH.zip" \
+              "$APPCAST_INPUT/"
+
+            cat > "$APPCAST_INPUT/bagayalu-translate-v$RELEASE_VERSION-$ARCH.md" <<EOF
           # 大佐翻译官 v$RELEASE_VERSION
 
           - Mini 模式会自动识别中外文并选择更合适的翻译方向。
@@ -217,25 +223,62 @@ jobs:
           - 主界面可直接切换翻译服务，设置页接口配置更清晰。
           - Mini 智能方向介入时会在结果底部显示状态提示。
           EOF
+
+            printf '%s' "$SPARKLE_PRIVATE_KEY" |
+              "$GENERATE_APPCAST" \
+                --ed-key-file - \
+                --download-url-prefix \
+                "https://github.com/Achordchan/bagayalu-translate/releases/download/v$RELEASE_VERSION/" \
+                --link \
+                "https://github.com/Achordchan/bagayalu-translate" \
+                --embed-release-notes \
+                --maximum-deltas 0 \
+                "$APPCAST_INPUT"
+
+            test -f "$APPCAST_INPUT/appcast.xml"
           done
 
-          printf '%s' "$SPARKLE_PRIVATE_KEY" |
-            "$GENERATE_APPCAST" \
-              --ed-key-file - \
-              --download-url-prefix \
-              "https://github.com/Achordchan/bagayalu-translate/releases/download/v$RELEASE_VERSION/" \
-              --link \
-              "https://github.com/Achordchan/bagayalu-translate" \
-              --embed-release-notes \
-              --maximum-deltas 0 \
-              dist/update
+          python3 - \
+            "$RUNNER_TEMP/appcast-arm64/appcast.xml" \
+            "$RUNNER_TEMP/appcast-x86_64/appcast.xml" \
+            "dist/update/appcast.xml" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          arm_appcast = Path(sys.argv[1]).read_text(encoding="utf-8")
+          x86_appcast = Path(sys.argv[2]).read_text(encoding="utf-8")
+          output_path = Path(sys.argv[3])
+
+          x86_item = re.search(r"<item>.*?</item>", x86_appcast, re.DOTALL)
+          if x86_item is None:
+              raise SystemExit("x86_64 appcast 中找不到更新项。")
+
+          channel_end = "</channel>"
+          if arm_appcast.count(channel_end) != 1:
+              raise SystemExit("arm64 appcast 的 channel 结构异常。")
+
+          merged = arm_appcast.replace(
+              channel_end,
+              f"{x86_item.group(0)}\n    {channel_end}",
+          )
+          output_path.write_text(merged, encoding="utf-8")
+          PY
 
           test -f dist/update/appcast.xml
           xmllint --noout dist/update/appcast.xml
-          grep -q 'sparkle:edSignature' dist/update/appcast.xml
-          grep -q "bagayalu-translate-v$RELEASE_VERSION-arm64.zip" dist/update/appcast.xml
-          grep -q "bagayalu-translate-v$RELEASE_VERSION-x86_64.zip" dist/update/appcast.xml
-          grep -q '<sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>' dist/update/appcast.xml
+
+          ITEM_COUNT="$(xmllint --xpath 'count(/rss/channel/item)' dist/update/appcast.xml)"
+          SIGNATURE_COUNT="$(grep -o 'sparkle:edSignature=' dist/update/appcast.xml | wc -l | tr -d ' ')"
+          FIRST_URL="$(xmllint --xpath 'string(/rss/channel/item[1]/enclosure/@url)' dist/update/appcast.xml)"
+          SECOND_URL="$(xmllint --xpath 'string(/rss/channel/item[2]/enclosure/@url)' dist/update/appcast.xml)"
+          ARM_REQUIREMENT="$(xmllint --xpath 'string(/rss/channel/item[1]/*[local-name()="hardwareRequirements"])' dist/update/appcast.xml)"
+
+          [ "$ITEM_COUNT" = "2" ]
+          [ "$SIGNATURE_COUNT" = "2" ]
+          [[ "$FIRST_URL" == *"bagayalu-translate-v$RELEASE_VERSION-arm64.zip" ]]
+          [[ "$SECOND_URL" == *"bagayalu-translate-v$RELEASE_VERSION-x86_64.zip" ]]
+          [ "$ARM_REQUIREMENT" = "arm64" ]
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
