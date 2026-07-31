@@ -9,7 +9,7 @@ on:
       version:
         description: 要发布的版本号，必须与 Xcode 中的 MARKETING_VERSION 一致
         required: true
-        default: 1.2.3
+        default: 1.2.4
         type: string
 
 permissions:
@@ -141,7 +141,6 @@ jobs:
               --force \
               --deep \
               --sign - \
-              --options runtime \
               --timestamp=none \
               "$APP_PATH"
           done
@@ -166,7 +165,11 @@ jobs:
 
             SIGNATURE_INFO="$(codesign -dv --verbose=4 "$APP_PATH" 2>&1)"
             printf '%s\n' "$SIGNATURE_INFO"
-            grep -q 'flags=.*adhoc,runtime' <<< "$SIGNATURE_INFO"
+            grep -q 'flags=.*adhoc' <<< "$SIGNATURE_INFO"
+            if grep -q 'flags=.*runtime' <<< "$SIGNATURE_INFO"; then
+              echo "$ARCH ad-hoc 签名不应启用 hardened runtime，否则 Sparkle 动态库会因 Team ID 不一致而被拒绝加载。" >&2
+              exit 1
+            fi
             grep -q 'Signature=adhoc' <<< "$SIGNATURE_INFO"
             grep -q 'Info.plist entries=' <<< "$SIGNATURE_INFO"
             grep -q 'Sealed Resources version=2' <<< "$SIGNATURE_INFO"
@@ -198,6 +201,23 @@ jobs:
               codesign --verify --strict --verbose=4 "$COMPONENT"
             done
           done
+
+          HOST_ARCH="$(uname -m)"
+          APP_PATH="$BUILD_PRODUCTS_PATH/$HOST_ARCH/$APP_NAME.app"
+          LAUNCH_LOG="$RUNNER_TEMP/$APP_NAME-$HOST_ARCH-launch.log"
+          "$APP_PATH/Contents/MacOS/$APP_NAME" >"$LAUNCH_LOG" 2>&1 &
+          APP_PID=$!
+          sleep 5
+
+          if ! kill -0 "$APP_PID" 2>/dev/null; then
+            wait "$APP_PID" || true
+            echo "$HOST_ARCH 发布包启动后提前退出。" >&2
+            cat "$LAUNCH_LOG" >&2
+            exit 1
+          fi
+
+          kill -TERM "$APP_PID"
+          wait "$APP_PID" || true
 
       - name: Package app and DMG
         run: |
