@@ -73,6 +73,14 @@
 1. 用 Xcode 打开项目
 2. 选择 scheme 并运行
 
+### 脚本启动
+
+```bash
+./start.sh
+```
+
+脚本会使用 Xcode 构建 Debug 版本并在当前终端前台运行应用。按 `Ctrl+C` 结束；不需要 `end.sh`。可通过 `DAZUO_DERIVED_DATA_PATH` 自定义 DerivedData 目录。
+
 ### 发布与更新签名
 
 当前 GitHub Release 不使用 Developer ID 分发签名，也不进行 Apple 公证。arm64 可执行文件保留 macOS 要求的链接器级 ad-hoc 签名，x86_64 主程序不签名。工作流会通过 `SPARKLE_PRIVATE_KEY` 对更新 ZIP 生成 EdDSA 签名；客户端使用内置 `SUPublicEDKey` 验证下载内容。
@@ -87,6 +95,8 @@
 
 - **API Key**：保存在 macOS Keychain（钥匙串）
 - **BaseURL / Model / EndpointMode**：在设置中配置
+- API 请求与响应模型由 `MacPaw/OpenAI 0.5.1` 处理，并启用第三方服务兼容解析
+- Responses 标准请求被服务端以 `HTTP 400/422` 拒绝时，会自动使用精简参数重试一次
 
 当遇到 `HTTP 429`（限流）时：
 

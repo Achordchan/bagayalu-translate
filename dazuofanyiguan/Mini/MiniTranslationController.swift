@@ -176,6 +176,7 @@ final class MiniTranslationController: ObservableObject {
         autoDismissTask = nil
         dismissDeadline = nil
         remainingDismissDuration = nil
+        isHovering = false
         requestTracker.invalidate()
 
         // requestTask 已取消；独立翻译任务会随 Task 取消结束，不触碰主窗口 ViewModel。
@@ -200,12 +201,21 @@ final class MiniTranslationController: ObservableObject {
                     settings: settings,
                     log: log,
                     languagePair: languagePair,
-                    appleTranslationCoordinator: appleTranslationCoordinator
+                    appleTranslationCoordinator: appleTranslationCoordinator,
+                    onAITextUpdate: { [weak self] partialText in
+                        guard let self,
+                              !Task.isCancelled,
+                              self.requestTracker.accepts(requestID)
+                        else {
+                            return
+                        }
+                        self.showStreamingResult(partialText)
+                    }
                 )
                 guard !Task.isCancelled, requestTracker.accepts(requestID) else {
                     return
                 }
-                show(.result(translation.translatedText))
+                showCompletedResult(translation.translatedText)
             } catch is CancellationError {
                 return
             } catch {
@@ -284,6 +294,35 @@ final class MiniTranslationController: ObservableObject {
             scheduleAutoDismiss(after: 8)
         case .translating:
             cancelAutoDismiss()
+        }
+    }
+
+    private func showStreamingResult(_ text: String) {
+        let state = MiniTranslationBubbleState.result(text)
+        bubbleModel.state = state
+        updateVisiblePanelSize(for: state)
+        cancelAutoDismiss()
+    }
+
+    private func showCompletedResult(_ text: String) {
+        let state = MiniTranslationBubbleState.result(text)
+        bubbleModel.state = state
+        updateVisiblePanelSize(for: state)
+        scheduleAutoDismiss(after: 8)
+    }
+
+    private func updateVisiblePanelSize(for state: MiniTranslationBubbleState) {
+        let contentSize = MiniTranslationLayout.contentSize(
+            for: state,
+            fontSize: bubbleModel.fontSize,
+            showsSmartDirectionNotice: bubbleModel.showsSmartDirectionNotice
+        )
+        if panel.isVisible {
+            if panel.frame.size != contentSize {
+                panel.resizeKeepingCurrentPosition(contentSize: contentSize)
+            }
+        } else {
+            panel.present(near: anchorPoint, contentSize: contentSize)
         }
     }
 

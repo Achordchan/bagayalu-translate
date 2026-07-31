@@ -226,7 +226,7 @@ struct SettingsView: View {
     }
 
     private var appVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.2.2"
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.2.3"
     }
 
     private func loadSettings() {
@@ -362,17 +362,28 @@ struct SettingsView: View {
                 sourceLanguageCode: "auto",
                 targetLanguageCode: "en"
             )
-
-            settings.openAIBaseURL = baseURL
-            settings.openAIModel = model
-            settings.openAIEndpointModeRawValue = endpointMode.rawValue
-            try KeychainStore.setString(key, for: "openAIAPIKey")
-            log.info("OpenAI 配置已验证并保存")
-            presentAlert(title: "保存成功", message: "接口验证通过，配置已保存。")
         } catch {
             log.error("验证失败：\(error.localizedDescription)")
             presentAlert(title: "验证失败", message: error.localizedDescription)
+            return
         }
+
+        do {
+            try KeychainStore.setString(key, for: "openAIAPIKey")
+        } catch {
+            log.error("接口验证通过，但密钥保存失败：\(error.localizedDescription)")
+            presentAlert(
+                title: "保存失败",
+                message: "接口验证已通过，但 API Key 写入系统钥匙串失败：\(error.localizedDescription)"
+            )
+            return
+        }
+
+        settings.openAIBaseURL = baseURL
+        settings.openAIModel = model
+        settings.openAIEndpointModeRawValue = endpointMode.rawValue
+        log.info("OpenAI 配置已验证并保存")
+        presentAlert(title: "保存成功", message: "接口验证通过，配置已保存。")
     }
 
     @MainActor

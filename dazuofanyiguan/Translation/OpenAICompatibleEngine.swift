@@ -1,4 +1,5 @@
 import Foundation
+import OpenAI
 
 struct OpenAICompatibleEngine: TranslationEngine {
     let title: String = "OpenAI 通用接口"
@@ -23,8 +24,6 @@ struct OpenAICompatibleEngine: TranslationEngine {
         }
     }
 
-    private let http = HTTPClient()
-
     struct RateLimitError: LocalizedError {
         let httpStatusCode: Int
         let apiCode: String
@@ -35,11 +34,41 @@ struct OpenAICompatibleEngine: TranslationEngine {
         }
     }
 
+    struct ResponsesCompatibilityError: LocalizedError {
+        let httpStatusCode: Int
+        let responseBody: String
+
+        var errorDescription: String? {
+            let detail = responseBody.isEmpty ? "" : "\n服务端返回：\(responseBody)"
+            return "Responses 接口已尝试标准和精简请求，仍被服务端拒绝（HTTP \(httpStatusCode)）。该服务可能未完整支持 /responses，或当前模型不支持 Responses；请改用 Chat Completions 或核对服务商文档。\(detail)"
+        }
+    }
+
     let baseURL: String
     let apiKey: String?
     let model: String
     let endpointMode: OpenAIEndpointMode
     let onPhaseChange: ((String) -> Void)?
+    let onPartialText: (@MainActor (String) -> Void)?
+    let session: URLSession
+
+    init(
+        baseURL: String,
+        apiKey: String?,
+        model: String,
+        endpointMode: OpenAIEndpointMode,
+        onPhaseChange: ((String) -> Void)?,
+        onPartialText: (@MainActor (String) -> Void)? = nil,
+        session: URLSession = .shared
+    ) {
+        self.baseURL = baseURL
+        self.apiKey = apiKey
+        self.model = model
+        self.endpointMode = endpointMode
+        self.onPhaseChange = onPhaseChange
+        self.onPartialText = onPartialText
+        self.session = session
+    }
 
     private func parseRateLimitError(body: String, httpStatusCode: Int) -> RateLimitError {
         struct Payload: Decodable {
@@ -63,14 +92,107 @@ struct OpenAICompatibleEngine: TranslationEngine {
         return RateLimitError(httpStatusCode: httpStatusCode, apiCode: String(httpStatusCode), apiMessage: msg)
     }
 
-    private func dataHandlingRateLimit(for request: URLRequest) async throws -> Data {
+    private func contentWithCompatibilityFallback(
+        transport: OpenAISDKTransport,
+        systemPrompt: String,
+        userPrompt: String,
+        temperature: Double,
+        onPartialText: (@MainActor (String) -> Void)? = nil
+    ) async throws -> String {
         do {
-            return try await http.data(for: request)
-        } catch {
-            if case let HTTPClient.HTTPError.badStatus(code, body) = error, code == 429 {
-                throw parseRateLimitError(body: body, httpStatusCode: code)
+            switch endpointMode {
+            case .chatCompletions:
+                return try await transport.chatContent(
+                    model: model,
+                    systemPrompt: systemPrompt,
+                    userPrompt: userPrompt,
+                    temperature: temperature
+                )
+            case .responses:
+                if let onPartialText {
+                    onPhaseChange?("正在流式接收译文")
+                    return try await transport.responsesContentStreaming(
+                        model: model,
+                        systemPrompt: systemPrompt,
+                        userPrompt: userPrompt,
+                        temperature: temperature,
+                        useMinimalPayload: false,
+                        onPartialText: onPartialText
+                    )
+                }
+                return try await transport.responsesContent(
+                    model: model,
+                    systemPrompt: systemPrompt,
+                    userPrompt: userPrompt,
+                    temperature: temperature,
+                    useMinimalPayload: false
+                )
             }
-            throw error
+        } catch let HTTPClient.HTTPError.badStatus(code, body) where code == 429 {
+            throw parseRateLimitError(body: body, httpStatusCode: code)
+        } catch OpenAIError.statusError(_, let code) where code == 429 {
+            throw RateLimitError(
+                httpStatusCode: code,
+                apiCode: String(code),
+                apiMessage: "请求过多，请稍后重试。"
+            )
+        } catch let HTTPClient.HTTPError.badStatus(code, _)
+            where endpointMode == .responses && (code == 400 || code == 422) {
+            return try await contentWithMinimalResponsesPayload(
+                transport: transport,
+                systemPrompt: systemPrompt,
+                userPrompt: userPrompt,
+                onPartialText: onPartialText
+            )
+        } catch OpenAIError.statusError(_, let code)
+            where endpointMode == .responses && (code == 400 || code == 422) {
+            return try await contentWithMinimalResponsesPayload(
+                transport: transport,
+                systemPrompt: systemPrompt,
+                userPrompt: userPrompt,
+                onPartialText: onPartialText
+            )
+        }
+    }
+
+    private func contentWithMinimalResponsesPayload(
+        transport: OpenAISDKTransport,
+        systemPrompt: String,
+        userPrompt: String,
+        onPartialText: (@MainActor (String) -> Void)?
+    ) async throws -> String {
+        do {
+            if let onPartialText {
+                return try await transport.responsesContentStreaming(
+                    model: model,
+                    systemPrompt: systemPrompt,
+                    userPrompt: userPrompt,
+                    temperature: nil,
+                    useMinimalPayload: true,
+                    onPartialText: onPartialText
+                )
+            }
+            return try await transport.responsesContent(
+                model: model,
+                systemPrompt: systemPrompt,
+                userPrompt: userPrompt,
+                temperature: nil,
+                useMinimalPayload: true
+            )
+        } catch let HTTPClient.HTTPError.badStatus(code, body) where code == 429 {
+            throw parseRateLimitError(body: body, httpStatusCode: code)
+        } catch OpenAIError.statusError(_, let code) where code == 429 {
+            throw RateLimitError(
+                httpStatusCode: code,
+                apiCode: String(code),
+                apiMessage: "请求过多，请稍后重试。"
+            )
+        } catch let HTTPClient.HTTPError.badStatus(code, body)
+            where code == 400 || code == 404 || code == 405 || code == 422 {
+            throw ResponsesCompatibilityError(httpStatusCode: code, responseBody: body)
+        } catch OpenAIError.statusError(_, let code)
+            where code == 400 || code == 404 || code == 405 || code == 422 {
+            throw ResponsesCompatibilityError(httpStatusCode: code, responseBody: "")
         }
     }
 
@@ -251,13 +373,7 @@ struct OpenAICompatibleEngine: TranslationEngine {
             throw EngineError.invalidBaseURL(error.localizedDescription)
         }
 
-        let endpoint: URL
-        switch endpointMode {
-        case .chatCompletions:
-            endpoint = url.appendingPathComponent("chat/completions")
-        case .responses:
-            endpoint = url.appendingPathComponent("responses")
-        }
+        let transport = try OpenAISDKTransport(baseURL: url, apiKey: apiKey, session: session)
 
         let isAutoDetect = sourceLanguageCode == "auto"
 
@@ -282,41 +398,28 @@ struct OpenAICompatibleEngine: TranslationEngine {
             userPrompt = "把下面的内容翻译成目标语言（目标语言代码：\(targetLanguageCode)）。\n\n\(preparedText)"
         }
 
-        let body: [String: Any]
-        switch endpointMode {
-        case .chatCompletions:
-            body = [
-                "model": model,
-                "temperature": 0.2,
-                "messages": [
-                    ["role": "system", "content": systemPrompt],
-                    ["role": "user", "content": userPrompt]
-                ]
-            ]
-        case .responses:
-            body = [
-                "model": model,
-                "temperature": 0.2,
-                "instructions": systemPrompt,
-                "input": userPrompt
-            ]
-        }
-
-        var request = URLRequest(url: endpoint)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-
         onPhaseChange?("正在请求服务端")
-        let data = try await dataHandlingRateLimit(for: request)
+        let streamingTextHandler: (@MainActor (String) -> Void)? = onPartialText.map { callback in
+            { @MainActor accumulatedText in
+                guard let visibleText = OpenAIStreamingTranslationProjector.visibleText(
+                    from: accumulatedText,
+                    isAutoDetect: isAutoDetect
+                ) else { return }
+                callback(visibleText)
+            }
+        }
+        let content = try await contentWithCompatibilityFallback(
+            transport: transport,
+            systemPrompt: systemPrompt,
+            userPrompt: userPrompt,
+            temperature: 0.2,
+            onPartialText: streamingTextHandler
+        )
         onPhaseChange?("正在解析响应")
-
-        let content = try OpenAIResponseParser.contentText(from: data, endpointMode: endpointMode)
         if content.isEmpty { throw EngineError.emptyResponse }
 
         if isAutoDetect {
-            if let result = OpenAIResponseParser.parseAutoDetectResult(from: content) {
+            if let result = OpenAITranslationPayloadParser.parseAutoDetectResult(from: content) {
                 return result
             }
         }
@@ -326,38 +429,13 @@ struct OpenAICompatibleEngine: TranslationEngine {
             let strongerSystemPrompt = "你是一个专业翻译引擎。你必须把输入内容翻译成目标语言（目标语言代码：\(targetLanguageCode)）。只输出译文，不要解释，不要加前后缀。严禁原文回显：如果你发现输出仍是源语言或与输入几乎一致，必须重新翻译直到输出符合目标语言。注意：输入来自 OCR，可能包含噪声，你需要先在心里纠错再翻译。注意：输入里可能包含特殊标记 [[DAZUO_NL]]，它代表换行。你必须原样保留该标记（不要翻译、不要删除、不要新增），并保持其相对位置不变。"
             let strongerUserPrompt = userPrompt
 
-            let retryBody: [String: Any]
-            switch endpointMode {
-            case .chatCompletions:
-                retryBody = [
-                    "model": model,
-                    "temperature": 0.0,
-                    "messages": [
-                        ["role": "system", "content": strongerSystemPrompt],
-                        ["role": "user", "content": strongerUserPrompt]
-                    ]
-                ]
-            case .responses:
-                retryBody = [
-                    "model": model,
-                    "temperature": 0.0,
-                    "instructions": strongerSystemPrompt,
-                    "input": strongerUserPrompt
-                ]
-            }
-
-            var retryRequest = URLRequest(url: endpoint)
-            retryRequest.httpMethod = "POST"
-            retryRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            retryRequest.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-            retryRequest.httpBody = try JSONSerialization.data(withJSONObject: retryBody)
-
             onPhaseChange?("正在重试翻译")
-            let retryData = try await dataHandlingRateLimit(for: retryRequest)
-
-            let retryContent = try OpenAIResponseParser.contentText(
-                from: retryData,
-                endpointMode: endpointMode
+            let retryContent = try await contentWithCompatibilityFallback(
+                transport: transport,
+                systemPrompt: strongerSystemPrompt,
+                userPrompt: strongerUserPrompt,
+                temperature: 0.0,
+                onPartialText: streamingTextHandler
             )
 
             let retryTrimmed = retryContent.trimmingCharacters(in: .whitespacesAndNewlines)

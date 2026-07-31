@@ -9,7 +9,7 @@ on:
       version:
         description: 要发布的版本号，必须与 Xcode 中的 MARKETING_VERSION 一致
         required: true
-        default: 1.2.2
+        default: 1.2.3
         type: string
 
 permissions:
@@ -251,6 +251,33 @@ jobs:
             exit 1
           fi
 
+          python3 - "$RELEASE_VERSION" CHANGELOG.md dist/release-notes.md <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          version, changelog_path, output_path = sys.argv[1:]
+          changelog = Path(changelog_path).read_text(encoding="utf-8")
+          pattern = re.compile(
+              rf"^## {re.escape(version)}(?:\s+-[^\n]*)?\n(?P<body>.*?)(?=^##\s|\Z)",
+              re.MULTILINE | re.DOTALL,
+          )
+          match = pattern.search(changelog)
+          if match is None:
+              raise SystemExit(f"CHANGELOG.md 中找不到版本 {version} 的发布日志。")
+
+          body = match.group("body").strip()
+          if not body:
+              raise SystemExit(f"版本 {version} 的发布日志为空。")
+
+          Path(output_path).write_text(
+              f"## 大佐翻译官 v{version}\n\n{body}\n\n"
+              "- 分别提供 Apple Silicon（arm64）和 Intel（x86_64）安装包。\n"
+              "- 主程序不使用 Developer ID 分发签名，更新包继续通过 Sparkle EdDSA 签名验证；未经过 Apple 公证。\n",
+              encoding="utf-8",
+          )
+          PY
+
           for ARCH in arm64 x86_64; do
             APPCAST_INPUT="$RUNNER_TEMP/appcast-$ARCH"
             mkdir -p "$APPCAST_INPUT"
@@ -258,15 +285,9 @@ jobs:
               "dist/update/bagayalu-translate-v$RELEASE_VERSION-$ARCH.zip" \
               "$APPCAST_INPUT/"
 
-            cat > "$APPCAST_INPUT/bagayalu-translate-v$RELEASE_VERSION-$ARCH.md" <<EOF
-          # 大佐翻译官 v$RELEASE_VERSION
-
-          - Mini 模式会自动识别中外文并选择更合适的翻译方向。
-          - 新增原文、译文和 Mini 窗口独立字号滑块及实时预览。
-          - 优先启用全局快捷键，并增强授权刷新、失败回退和模式提醒。
-          - 主界面可直接切换翻译服务，设置页接口配置更清晰。
-          - Mini 智能方向介入时会在结果底部显示状态提示。
-          EOF
+            cp \
+              dist/release-notes.md \
+              "$APPCAST_INPUT/bagayalu-translate-v$RELEASE_VERSION-$ARCH.md"
 
             printf '%s' "$SPARKLE_PRIVATE_KEY" |
               "$GENERATE_APPCAST" \
@@ -330,6 +351,7 @@ jobs:
           name: 大佐翻译官-macOS
           path: |
             dist/*.dmg
+            dist/release-notes.md
             dist/update/*
           if-no-files-found: error
 
@@ -360,25 +382,13 @@ jobs:
           mapfile -t DMGS < <(find dist -type f -name '*.dmg' | sort)
           mapfile -t ZIPS < <(find dist -type f -name '*.zip' | sort)
           APPCAST="$(find dist -type f -name 'appcast.xml' | head -1)"
+          RELEASE_NOTES="$(find dist -type f -name 'release-notes.md' | head -1)"
 
-          if [ ${#DMGS[@]} -eq 0 ] || [ ${#ZIPS[@]} -eq 0 ] || [ -z "$APPCAST" ]; then
+          if [ ${#DMGS[@]} -eq 0 ] || [ ${#ZIPS[@]} -eq 0 ] || [ -z "$APPCAST" ] || [ -z "$RELEASE_NOTES" ]; then
             echo "发布产物不完整。" >&2
             find dist -type f -print >&2 || true
             exit 1
           fi
-
-          RELEASE_NOTES="$RUNNER_TEMP/release-notes.md"
-          cat > "$RELEASE_NOTES" <<EOF
-          ## 大佐翻译官 v$RELEASE_VERSION
-
-          - Mini 模式会自动识别中外文并选择更合适的翻译方向。
-          - 新增原文、译文和 Mini 窗口独立字号滑块及实时预览。
-          - 优先启用全局快捷键，并增强授权刷新、失败回退和模式提醒。
-          - 主界面可直接切换翻译服务，设置页接口配置更清晰。
-          - Mini 智能方向介入时会在结果底部显示状态提示。
-          - 分别提供 Apple Silicon（arm64）和 Intel（x86_64）安装包。
-          - 主程序不使用 Developer ID 分发签名，更新包继续通过 Sparkle EdDSA 签名验证；未经过 Apple 公证。
-          EOF
 
           # appcast 仅在 workflow_dispatch 的 build job 生成；push 构建不进入此 job。
           gh release create "v$RELEASE_VERSION" \

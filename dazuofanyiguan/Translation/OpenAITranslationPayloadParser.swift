@@ -1,54 +1,10 @@
 import Foundation
 
-/// OpenAI 兼容接口的响应解析与自动检测 JSON 提取。
-enum OpenAIResponseParser {
-    struct ChatCompletionsResponse: Decodable {
-        struct Choice: Decodable {
-            struct Message: Decodable {
-                let content: String?
-            }
-            let message: Message?
-        }
-        let choices: [Choice]?
-    }
-
-    struct ResponsesResponse: Decodable {
-        struct Output: Decodable {
-            struct Content: Decodable {
-                let text: String?
-                let type: String?
-            }
-            let content: [Content]?
-        }
-
-        let output_text: String?
-        let output: [Output]?
-    }
-
+/// 翻译业务自动识别结果的 JSON 提取；OpenAI API 响应由 SDK 解析。
+enum OpenAITranslationPayloadParser {
     struct AutoDetectPayload: Equatable {
         let detectedSourceLanguageCode: String?
         let translatedText: String?
-    }
-
-    static func contentText(
-        from data: Data,
-        endpointMode: OpenAIEndpointMode
-    ) throws -> String {
-        let decoder = JSONDecoder()
-        switch endpointMode {
-        case .chatCompletions:
-            let decoded = try decoder.decode(ChatCompletionsResponse.self, from: data)
-            return decoded.choices?.first?.message?.content?
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        case .responses:
-            let decoded = try decoder.decode(ResponsesResponse.self, from: data)
-            if let text = decoded.output_text?.trimmingCharacters(in: .whitespacesAndNewlines),
-               !text.isEmpty {
-                return text
-            }
-            return decoded.output?.first?.content?.first?.text?
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        }
     }
 
     static func extractJSONObjectString(from raw: String) -> String {

@@ -6,7 +6,8 @@ enum FrozenTranslationExecutor {
     static func makeEngine(
         for request: TranslationRequestContext,
         apiKey: String?,
-        onPhaseChange: ((String) -> Void)? = nil
+        onPhaseChange: ((String) -> Void)? = nil,
+        onPartialText: (@MainActor (String) -> Void)? = nil
     ) -> TranslationEngine? {
         switch request.engineType {
         case .apple:
@@ -19,7 +20,8 @@ enum FrozenTranslationExecutor {
                 apiKey: apiKey,
                 model: request.openAIModel,
                 endpointMode: request.openAIEndpointMode,
-                onPhaseChange: onPhaseChange
+                onPhaseChange: onPhaseChange,
+                onPartialText: onPartialText
             )
         }
     }
@@ -29,14 +31,24 @@ enum FrozenTranslationExecutor {
         apiKey: String?,
         appleTranslationCoordinator: AppleTranslationCoordinator,
         onAIPhaseChange: ((String) -> Void)? = nil,
+        onAITextUpdate: (@MainActor (String) -> Void)? = nil,
         onApplePhaseChange: ((String) -> Void)? = nil,
         onLanguageDownloadStateChange: ((Bool) -> Void)? = nil,
         onRateLimit: ((OpenAICompatibleEngine.RateLimitError) async throws -> Void)? = nil
     ) async throws -> TranslationResult {
+        let streamUpdate: (@MainActor (String) -> Void)? = onAITextUpdate.map { callback in
+            { @MainActor partialText in
+                let visibleText = request.shouldRestoreNewlines
+                    ? TranslationRequestContext.restoreNewlines(from: partialText)
+                    : partialText
+                callback(visibleText)
+            }
+        }
         let engine = makeEngine(
             for: request,
             apiKey: apiKey,
-            onPhaseChange: onAIPhaseChange
+            onPhaseChange: onAIPhaseChange,
+            onPartialText: streamUpdate
         )
 
         let result: TranslationResult

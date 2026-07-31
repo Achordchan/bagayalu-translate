@@ -13,6 +13,7 @@ xcuserdata/
 .build/
 Packages/
 Package.resolved
+!大佐翻译官v1.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
 .swiftpm/
 
 # Playgrounds

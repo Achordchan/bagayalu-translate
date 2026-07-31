@@ -84,12 +84,34 @@ enum KeychainStore {
             guard LegacyKeychainItemPolicy.isLegacyService(rowService) else {
                 continue
             }
-            if let data = row[kSecValueData as String] as? Data,
+            guard let persistentRef = row[kSecValuePersistentRef as String] else {
+                continue
+            }
+            if let data = try copyData(persistentRef: persistentRef),
                let value = String(data: data, encoding: .utf8) {
                 return value
             }
         }
         return nil
+    }
+
+    private static func copyData(persistentRef: Any) throws -> Data? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecValuePersistentRef as String: persistentRef,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        if status == errSecItemNotFound {
+            return nil
+        }
+        if status != errSecSuccess {
+            throw NSError(domain: "KeychainStore", code: Int(status))
+        }
+        return item as? Data
     }
 
     private static func deleteMatching(query: [String: Any]) throws {
@@ -131,7 +153,6 @@ enum KeychainStore {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
             kSecReturnAttributes as String: true,
             kSecReturnPersistentRef as String: true,
             kSecMatchLimit as String: kSecMatchLimitAll

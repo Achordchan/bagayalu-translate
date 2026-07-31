@@ -6,9 +6,105 @@
 //
 
 import AppKit
+import OpenAI
 import Testing
 import UniformTypeIdentifiers
 @testable import 大佐翻译官v1
+
+private final class OpenAISDKMockURLProtocol: URLProtocol {
+    typealias Handler = (URLRequest) throws -> (statusCode: Int, body: Data)
+
+    private static let lock = NSLock()
+    private static var handlers: [String: Handler] = [:]
+
+    static func setHandler(for host: String, _ newHandler: Handler?) {
+        lock.lock()
+        handlers[host] = newHandler
+        lock.unlock()
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let host = request.url?.host ?? ""
+        Self.lock.lock()
+        let handler = Self.handlers[host]
+        Self.lock.unlock()
+
+        do {
+            guard let handler, let url = request.url else {
+                throw URLError(.badURL)
+            }
+            let result = try handler(request)
+            guard let response = HTTPURLResponse(
+                url: url,
+                statusCode: result.statusCode,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "application/json"]
+            ) else {
+                throw URLError(.badServerResponse)
+            }
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: result.body)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+}
+
+private final class OpenAISDKRequestRecorder: @unchecked Sendable {
+    struct Entry {
+        let url: URL?
+        let authorization: String?
+        let body: [String: Any]
+    }
+
+    private let lock = NSLock()
+    private var entries: [Entry] = []
+
+    func append(request: URLRequest, body: [String: Any]) -> Int {
+        lock.lock()
+        entries.append(
+            Entry(
+                url: request.url,
+                authorization: request.value(forHTTPHeaderField: "Authorization"),
+                body: body
+            )
+        )
+        let count = entries.count
+        lock.unlock()
+        return count
+    }
+
+    func snapshot() -> [Entry] {
+        lock.lock()
+        let value = entries
+        lock.unlock()
+        return value
+    }
+}
+
+private func requestBodyData(from request: URLRequest) throws -> Data {
+    if let body = request.httpBody { return body }
+    guard let stream = request.httpBodyStream else { throw URLError(.cannotDecodeContentData) }
+
+    stream.open()
+    defer { stream.close() }
+    var data = Data()
+    let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: 4_096)
+    defer { buffer.deallocate() }
+    while stream.hasBytesAvailable {
+        let count = stream.read(buffer, maxLength: 4_096)
+        if count < 0 { throw stream.streamError ?? URLError(.cannotDecodeContentData) }
+        if count == 0 { break }
+        data.append(buffer, count: count)
+    }
+    return data
+}
 
 struct dazuofanyiguanTests {
 
@@ -238,6 +334,20 @@ struct dazuofanyiguanTests {
 
         tracker.invalidate()
         #expect(!tracker.accepts(second))
+    }
+
+    @Test func miniModeStopsAcceptingStreamingUpdatesAfterCancellation() {
+        var tracker = MiniTranslationRequestTracker()
+        let streamingRequest = tracker.begin()
+
+        #expect(tracker.accepts(streamingRequest))
+
+        tracker.invalidate()
+        #expect(!tracker.accepts(streamingRequest))
+
+        let nextRequest = tracker.begin()
+        #expect(!tracker.accepts(streamingRequest))
+        #expect(tracker.accepts(nextRequest))
     }
 
     @Test func miniModePrefersChineseForNonChineseText() {
@@ -649,48 +759,393 @@ struct dazuofanyiguanTests {
         #expect(drawY == expectedY)
     }
 
-    @Test func openAIResponseParserExtractsChatCompletionsAutoDetectPayload() throws {
-        // 拆成局部常量，避免 x86_64 上整段表达式类型推断超时。
-        let nestedPayload = #"{"detectedSourceLanguageCode":"en","translatedText":"你好"}"#
-        let messageObject: [String: Any] = [
-            "message": ["content": nestedPayload]
-        ]
-        let rootObject: [String: Any] = [
-            "choices": [messageObject]
-        ]
-        let chatData = try JSONSerialization.data(withJSONObject: rootObject)
-        let content = try OpenAIResponseParser.contentText(
-            from: chatData,
-            endpointMode: .chatCompletions
-        )
-        let result = OpenAIResponseParser.parseAutoDetectResult(from: content)
+    @Test func openAITranslationPayloadParserExtractsAutoDetectPayload() {
+        let content = #"{"detectedSourceLanguageCode":"en","translatedText":"你好"}"#
+        let result = OpenAITranslationPayloadParser.parseAutoDetectResult(from: content)
         let translated = result?.translatedText
         let detected = result?.detectedSourceLanguageCode
         #expect(translated == "你好")
         #expect(detected == "en")
     }
 
-    @Test func openAIResponseParserExtractsFencedAutoDetectPayload() {
+    @Test func openAITranslationPayloadParserExtractsFencedAutoDetectPayload() {
         let fenced = """
         ```json
         {"detected_source_language_code":"ja","translated_text":"早上好"}
         ```
         """
-        let fencedResult = OpenAIResponseParser.parseAutoDetectResult(from: fenced)
+        let fencedResult = OpenAITranslationPayloadParser.parseAutoDetectResult(from: fenced)
         let translated = fencedResult?.translatedText
         let detected = fencedResult?.detectedSourceLanguageCode
         #expect(translated == "早上好")
         #expect(detected == "ja")
     }
 
-    @Test func openAIResponseParserExtractsResponsesPlainText() throws {
-        let responsesObject: [String: Any] = ["output_text": "只是纯文本"]
-        let responsesData = try JSONSerialization.data(withJSONObject: responsesObject)
-        let responsesContent = try OpenAIResponseParser.contentText(
-            from: responsesData,
-            endpointMode: .responses
+    @Test func openAISDKResponsesRetriesWithMinimalPayloadAfterHTTP400() async throws {
+        let recorder = OpenAISDKRequestRecorder()
+        let host = "responses.example.com"
+
+        OpenAISDKMockURLProtocol.setHandler(for: host) { request in
+            let body = try requestBodyData(from: request)
+            guard let json = try JSONSerialization.jsonObject(with: body) as? [String: Any] else {
+                throw URLError(.cannotParseResponse)
+            }
+            let requestNumber = recorder.append(request: request, body: json)
+
+            if requestNumber == 1 {
+                return (
+                    400,
+                    Data(#"{"error":{"message":"Upstream request failed","type":"upstream_error"}}"#.utf8)
+                )
+            }
+
+            let success = """
+            {
+              "id": "resp-test",
+              "object": "response",
+              "model": "test-model",
+              "created_at": 1,
+              "output": [],
+              "output_text": "你好",
+              "tools": [],
+              "metadata": {},
+              "parallel_tool_calls": false
+            }
+            """
+            return (200, Data(success.utf8))
+        }
+        defer { OpenAISDKMockURLProtocol.setHandler(for: host, nil) }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OpenAISDKMockURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        let engine = OpenAICompatibleEngine(
+            baseURL: "https://\(host)/v1",
+            apiKey: "test-key",
+            model: "test-model",
+            endpointMode: .responses,
+            onPhaseChange: nil,
+            session: session
         )
-        #expect(responsesContent == "只是纯文本")
+
+        let result = try await engine.translate(
+            text: "hello",
+            sourceLanguageCode: "en",
+            targetLanguageCode: "zh-CN"
+        )
+
+        let bodies = recorder.snapshot().map(\.body)
+        #expect(result.translatedText == "你好")
+        #expect(bodies.count == 2)
+        #expect(bodies[0]["instructions"] != nil)
+        #expect(bodies[0]["temperature"] != nil)
+        #expect(bodies[1]["instructions"] == nil)
+        #expect(bodies[1]["temperature"] == nil)
+        #expect((bodies[1]["input"] as? String)?.contains("hello") == true)
+    }
+
+    @Test func openAISDKResponsesMapsMinimalRetryRateLimit() async throws {
+        let recorder = OpenAISDKRequestRecorder()
+        let host = "responses-rate-limit.example.com"
+
+        OpenAISDKMockURLProtocol.setHandler(for: host) { request in
+            let body = try requestBodyData(from: request)
+            guard let json = try JSONSerialization.jsonObject(with: body) as? [String: Any] else {
+                throw URLError(.cannotParseResponse)
+            }
+            let requestNumber = recorder.append(request: request, body: json)
+            if requestNumber == 1 {
+                return (400, Data(#"{"error":{"message":"unsupported parameter"}}"#.utf8))
+            }
+            return (
+                429,
+                Data(#"{"error":{"code":"rate_limit_exceeded","message":"slow down"}}"#.utf8)
+            )
+        }
+        defer { OpenAISDKMockURLProtocol.setHandler(for: host, nil) }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OpenAISDKMockURLProtocol.self]
+        let engine = OpenAICompatibleEngine(
+            baseURL: "https://\(host)/v1",
+            apiKey: "test-key",
+            model: "test-model",
+            endpointMode: .responses,
+            onPhaseChange: nil,
+            session: URLSession(configuration: configuration)
+        )
+
+        do {
+            _ = try await engine.translate(
+                text: "hello",
+                sourceLanguageCode: "en",
+                targetLanguageCode: "zh-CN"
+            )
+            #expect(Bool(false), "expected rate limit error")
+        } catch let error as OpenAICompatibleEngine.RateLimitError {
+            #expect(error.httpStatusCode == 429)
+            #expect(error.apiCode == "rate_limit_exceeded")
+            #expect(error.apiMessage == "slow down")
+        }
+    }
+
+    @Test func openAISDKResponsesMapsMinimalRetryCompatibilityFailure() async throws {
+        let recorder = OpenAISDKRequestRecorder()
+        let host = "responses-unsupported.example.com"
+
+        OpenAISDKMockURLProtocol.setHandler(for: host) { request in
+            let body = try requestBodyData(from: request)
+            guard let json = try JSONSerialization.jsonObject(with: body) as? [String: Any] else {
+                throw URLError(.cannotParseResponse)
+            }
+            _ = recorder.append(request: request, body: json)
+            return (400, Data(#"{"error":{"message":"responses unsupported"}}"#.utf8))
+        }
+        defer { OpenAISDKMockURLProtocol.setHandler(for: host, nil) }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OpenAISDKMockURLProtocol.self]
+        let engine = OpenAICompatibleEngine(
+            baseURL: "https://\(host)/v1",
+            apiKey: "test-key",
+            model: "test-model",
+            endpointMode: .responses,
+            onPhaseChange: nil,
+            session: URLSession(configuration: configuration)
+        )
+
+        do {
+            _ = try await engine.translate(
+                text: "hello",
+                sourceLanguageCode: "en",
+                targetLanguageCode: "zh-CN"
+            )
+            #expect(Bool(false), "expected compatibility error")
+        } catch let error as OpenAICompatibleEngine.ResponsesCompatibilityError {
+            #expect(error.httpStatusCode == 400)
+            #expect(error.responseBody.contains("responses unsupported"))
+        }
+        #expect(recorder.snapshot().count == 2)
+    }
+
+    @Test func openAISDKResponsesNormalizesTextContentAndMissingDefaults() async throws {
+        let host = "responses-text.example.com"
+        OpenAISDKMockURLProtocol.setHandler(for: host) { _ in
+            let success = """
+            {
+              "id": "resp-test",
+              "object": "response",
+              "model": "test-model",
+              "created_at": "1",
+              "output": [
+                {
+                  "type": "message",
+                  "role": "assistant",
+                  "content": [{"type": "text", "text": "你好"}]
+                }
+              ]
+            }
+            """
+            return (200, Data(success.utf8))
+        }
+        defer { OpenAISDKMockURLProtocol.setHandler(for: host, nil) }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OpenAISDKMockURLProtocol.self]
+        let engine = OpenAICompatibleEngine(
+            baseURL: "https://\(host)/v1",
+            apiKey: "test-key",
+            model: "test-model",
+            endpointMode: .responses,
+            onPhaseChange: nil,
+            session: URLSession(configuration: configuration)
+        )
+
+        let result = try await engine.translate(
+            text: "hello",
+            sourceLanguageCode: "en",
+            targetLanguageCode: "zh-CN"
+        )
+        #expect(result.translatedText == "你好")
+    }
+
+    @Test func openAISDKResponsesNormalizesChatChoicesReturnedByProxy() async throws {
+        let host = "responses-choices.example.com"
+        OpenAISDKMockURLProtocol.setHandler(for: host) { _ in
+            let success = """
+            {
+              "id": "chat-test",
+              "object": "chat.completion",
+              "created": 1,
+              "model": "test-model",
+              "choices": [
+                {"index": 0, "message": {"role": "assistant", "content": "你好"}}
+              ]
+            }
+            """
+            return (200, Data(success.utf8))
+        }
+        defer { OpenAISDKMockURLProtocol.setHandler(for: host, nil) }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OpenAISDKMockURLProtocol.self]
+        let engine = OpenAICompatibleEngine(
+            baseURL: "https://\(host)/v1",
+            apiKey: "test-key",
+            model: "test-model",
+            endpointMode: .responses,
+            onPhaseChange: nil,
+            session: URLSession(configuration: configuration)
+        )
+
+        let result = try await engine.translate(
+            text: "hello",
+            sourceLanguageCode: "en",
+            targetLanguageCode: "zh-CN"
+        )
+        #expect(result.translatedText == "你好")
+    }
+
+    @Test func openAISDKResponsesNormalizesUnexpectedEventStream() async throws {
+        let host = "responses-sse.example.com"
+        OpenAISDKMockURLProtocol.setHandler(for: host) { _ in
+            let eventStream = """
+            event: response.created
+            data: {"type":"response.created","response":{"id":"resp-test","object":"response","created_at":1,"model":"test-model","output":[],"metadata":{},"parallel_tool_calls":false,"tools":[]}}
+
+            event: response.output_text.delta
+            data: {"type":"response.output_text.delta","delta":"你"}
+
+            event: response.output_text.delta
+            data: {"type":"response.output_text.delta","delta":"好"}
+
+            event: response.completed
+            data: {"type":"response.completed","response":{"id":"resp-test","object":"response","created_at":1,"model":"test-model","output":[{"id":"msg-test","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"你好","annotations":[],"logprobs":[]}]}],"metadata":{},"parallel_tool_calls":false,"tools":[]}}
+
+            data: [DONE]
+
+            """
+            return (200, Data(eventStream.utf8))
+        }
+        defer { OpenAISDKMockURLProtocol.setHandler(for: host, nil) }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OpenAISDKMockURLProtocol.self]
+        let engine = OpenAICompatibleEngine(
+            baseURL: "https://\(host)/v1",
+            apiKey: "test-key",
+            model: "test-model",
+            endpointMode: .responses,
+            onPhaseChange: nil,
+            session: URLSession(configuration: configuration)
+        )
+
+        let result = try await engine.translate(
+            text: "hello",
+            sourceLanguageCode: "en",
+            targetLanguageCode: "zh-CN"
+        )
+        #expect(result.translatedText == "你好")
+    }
+
+    @Test func responsesStreamingProjectorShowsOnlyTranslatedTextForAutoDetect() {
+        #expect(
+            OpenAIStreamingTranslationProjector.visibleText(
+                from: #"{"detectedSourceLanguageCode":"en","translatedText":"你\n好"#,
+                isAutoDetect: true
+            ) == "你\n好"
+        )
+        #expect(
+            OpenAIStreamingTranslationProjector.visibleText(
+                from: #"{"detectedSourceLanguageCode":"en","trans"#,
+                isAutoDetect: true
+            ) == nil
+        )
+        #expect(
+            OpenAIStreamingTranslationProjector.visibleText(
+                from: "直接译文",
+                isAutoDetect: false
+            ) == "直接译文"
+        )
+    }
+
+    @Test func responsesStreamAccumulatorPublishesRealServerDeltas() throws {
+        var accumulator = OpenAIResponsesStreamAccumulator()
+        let first = Components.Schemas.ResponseTextDeltaEvent(
+            _type: .response_outputText_delta,
+            itemId: "msg-test",
+            outputIndex: 0,
+            contentIndex: 0,
+            delta: "你",
+            sequenceNumber: 1,
+            logprobs: []
+        )
+        let second = Components.Schemas.ResponseTextDeltaEvent(
+            _type: .response_outputText_delta,
+            itemId: "msg-test",
+            outputIndex: 0,
+            contentIndex: 0,
+            delta: "好",
+            sequenceNumber: 2,
+            logprobs: []
+        )
+
+        #expect(try accumulator.consume(.outputText(.delta(first))) == "你")
+        #expect(try accumulator.consume(.outputText(.delta(second))) == "你好")
+        #expect(accumulator.finalText == "你好")
+    }
+
+    @Test func openAISDKChatCompletionsUsesConfiguredBasePath() async throws {
+        let recorder = OpenAISDKRequestRecorder()
+        let host = "chat.example.com"
+
+        OpenAISDKMockURLProtocol.setHandler(for: host) { request in
+            let body = try requestBodyData(from: request)
+            guard let json = try JSONSerialization.jsonObject(with: body) as? [String: Any] else {
+                throw URLError(.cannotParseResponse)
+            }
+            _ = recorder.append(request: request, body: json)
+            let success = """
+            {
+              "id": "chat-test",
+              "object": "chat.completion",
+              "created": 1,
+              "model": "test-model",
+              "choices": [
+                {
+                  "index": 0,
+                  "message": {"role": "assistant", "content": "你好"},
+                  "finish_reason": "stop"
+                }
+              ]
+            }
+            """
+            return (200, Data(success.utf8))
+        }
+        defer { OpenAISDKMockURLProtocol.setHandler(for: host, nil) }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OpenAISDKMockURLProtocol.self]
+        let engine = OpenAICompatibleEngine(
+            baseURL: "https://\(host)/api/v1",
+            apiKey: "test-key",
+            model: "test-model",
+            endpointMode: .chatCompletions,
+            onPhaseChange: nil,
+            session: URLSession(configuration: configuration)
+        )
+
+        let result = try await engine.translate(
+            text: "hello",
+            sourceLanguageCode: "en",
+            targetLanguageCode: "zh-CN"
+        )
+
+        let recorded = try #require(recorder.snapshot().first)
+        #expect(result.translatedText == "你好")
+        #expect(recorded.url?.path == "/api/v1/chat/completions")
+        #expect(recorded.authorization == "Bearer test-key")
+        #expect(recorded.body["messages"] != nil)
     }
 
 
@@ -700,6 +1155,17 @@ struct dazuofanyiguanTests {
         #expect(LegacyKeychainItemPolicy.isLegacyService("   "))
         #expect(!LegacyKeychainItemPolicy.isLegacyService("com.achord.dazuofanyiguan"))
         #expect(!LegacyKeychainItemPolicy.isLegacyService("com.other.app"))
+    }
+
+    @Test func keychainStoreRoundTripsUniqueValue() throws {
+        let key = "keychain-test-\(UUID().uuidString)"
+        let value = "secret-\(UUID().uuidString)"
+        defer { try? KeychainStore.delete(for: key) }
+
+        try KeychainStore.setString(value, for: key)
+        #expect(try KeychainStore.getString(for: key) == value)
+        try KeychainStore.delete(for: key)
+        #expect(try KeychainStore.getString(for: key) == nil)
     }
 
     @Test func translationRequestContextFreezesPreparedTextAndEngineSettings() {

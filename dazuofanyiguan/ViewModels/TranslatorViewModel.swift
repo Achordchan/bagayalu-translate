@@ -225,6 +225,10 @@ final class TranslatorViewModel: ObservableObject {
                             self?.aiRequestPhase = phase
                         }
                     },
+                    onAITextUpdate: { [weak self] partialText in
+                        guard let self, !Task.isCancelled, token == self.translationToken else { return }
+                        self.outputText = partialText
+                    },
                     onApplePhaseChange: { [weak self] phase in
                         Task { @MainActor in
                             self?.appleRequestPhase = phase

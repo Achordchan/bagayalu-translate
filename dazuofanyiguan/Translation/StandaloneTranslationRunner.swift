@@ -9,7 +9,8 @@ enum StandaloneTranslationRunner {
         settings: AppSettings,
         log: LogStore,
         languagePair: TranslationLanguagePair,
-        appleTranslationCoordinator: AppleTranslationCoordinator
+        appleTranslationCoordinator: AppleTranslationCoordinator,
+        onAITextUpdate: (@MainActor (String) -> Void)? = nil
     ) async throws -> TranslationResult {
         guard let request = TranslationRequestContext.make(
             text: text,
@@ -41,6 +42,7 @@ enum StandaloneTranslationRunner {
             request: request,
             apiKey: apiKey,
             appleTranslationCoordinator: appleTranslationCoordinator,
+            onAITextUpdate: onAITextUpdate,
             onRateLimit: { rateLimit in
                 let base = "请求过多（\(rateLimit.apiCode)）：\(rateLimit.apiMessage)"
                 log.warn("Mini 翻译遇到限流：\(base)，2秒后重试")

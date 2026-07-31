@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A10A00012F10000100000001 /* OpenAI in Frameworks */ = {isa = PBXBuildFile; productRef = A10A00032F10000100000001 /* OpenAI */; };
 		D41200012F00000100000001 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = D41200032F00000100000001 /* Sparkle */; };
 /* End PBXBuildFile section */
 
@@ -56,6 +57,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A10A00012F10000100000001 /* OpenAI in Frameworks */,
 				D41200012F00000100000001 /* Sparkle in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -117,6 +119,7 @@
 			);
 			name = "大佐翻译官v1";
 			packageProductDependencies = (
+				A10A00032F10000100000001 /* OpenAI */,
 				D41200032F00000100000001 /* Sparkle */,
 			);
 			productName = dazuofanyiguan;
@@ -202,6 +205,7 @@
 			mainGroup = 55115C3D2EF4DD8E00FAF4C0;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
+				A10A00022F10000100000001 /* XCRemoteSwiftPackageReference "OpenAI" */,
 				D41200022F00000100000001 /* XCRemoteSwiftPackageReference "Sparkle" */,
 			);
 			preferredProjectObjectVersion = 77;
@@ -404,7 +408,7 @@
 				CODE_SIGN_ENTITLEMENTS = dazuofanyiguan/dazuofanyiguan.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 122;
+				CURRENT_PROJECT_VERSION = 123;
 				DEVELOPMENT_ASSET_PATHS = "\"dazuofanyiguan/Preview Content\"";
 				DEVELOPMENT_TEAM = S336CKXSUQ;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -418,7 +422,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 1.2.2;
+				MARKETING_VERSION = 1.2.3;
 				PRODUCT_BUNDLE_IDENTIFIER = achord.dazuofanyiguan;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -434,7 +438,7 @@
 				CODE_SIGN_ENTITLEMENTS = dazuofanyiguan/dazuofanyiguan.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 122;
+				CURRENT_PROJECT_VERSION = 123;
 				DEVELOPMENT_ASSET_PATHS = "\"dazuofanyiguan/Preview Content\"";
 				DEVELOPMENT_TEAM = S336CKXSUQ;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -448,7 +452,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 1.2.2;
+				MARKETING_VERSION = 1.2.3;
 				PRODUCT_BUNDLE_IDENTIFIER = achord.dazuofanyiguan;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -597,7 +601,7 @@
 				CODE_SIGN_ENTITLEMENTS = dazuofanyiguan/dazuofanyiguanDebug.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 122;
+				CURRENT_PROJECT_VERSION = 123;
 				DEVELOPMENT_ASSET_PATHS = "\"dazuofanyiguan/Preview Content\"";
 				DEVELOPMENT_TEAM = S336CKXSUQ;
 				ENABLE_HARDENED_RUNTIME = NO;
@@ -611,7 +615,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 1.2.2;
+				MARKETING_VERSION = 1.2.3;
 				PRODUCT_BUNDLE_IDENTIFIER = achord.dazuofanyiguan.debug;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -701,6 +705,14 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
+		A10A00022F10000100000001 /* XCRemoteSwiftPackageReference "OpenAI" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/MacPaw/OpenAI";
+			requirement = {
+				kind = exactVersion;
+				version = 0.5.1;
+			};
+		};
 		D41200022F00000100000001 /* XCRemoteSwiftPackageReference "Sparkle" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/sparkle-project/Sparkle";
@@ -712,6 +724,11 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		A10A00032F10000100000001 /* OpenAI */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A10A00022F10000100000001 /* XCRemoteSwiftPackageReference "OpenAI" */;
+			productName = OpenAI;
+		};
 		D41200032F00000100000001 /* Sparkle */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = D41200022F00000100000001 /* XCRemoteSwiftPackageReference "Sparkle" */;
