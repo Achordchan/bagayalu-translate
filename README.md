@@ -83,7 +83,7 @@
 
 ### 发布与更新签名
 
-当前 GitHub Release 不使用 Developer ID 分发签名，也不进行 Apple 公证。arm64 可执行文件保留 macOS 要求的链接器级 ad-hoc 签名，x86_64 主程序不签名。工作流会通过 `SPARKLE_PRIVATE_KEY` 对更新 ZIP 生成 EdDSA 签名；客户端使用内置 `SUPublicEDKey` 验证下载内容。
+当前 GitHub Release 不使用 Developer ID 分发签名，也不进行 Apple 公证。arm64 和 x86_64 发布包都使用不含 sandbox 权限的 ad-hoc bundle 签名，使 Sparkle 可以检查完整包结构。工作流会通过 `SPARKLE_PRIVATE_KEY` 对更新 ZIP 生成 EdDSA 签名；客户端使用内置 `SUPublicEDKey` 验证下载内容。
 
 主程序不再启用 App Sandbox 的 InstallerLauncher XPC，避免无 Developer ID 时辅助进程连接不稳定。首次从旧沙盒版本迁移时会复制已有设置，但 macOS 辅助功能、屏幕录制等权限仍可能需要重新确认。
 

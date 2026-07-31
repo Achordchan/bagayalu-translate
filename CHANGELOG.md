@@ -8,6 +8,7 @@
 - 增加常见第三方 Responses 响应结构的兼容解析，保留 Chat Completions 模式。
 - 修复接口验证成功但 API Key 写入失败时仍保存部分配置的问题。
 - 修复 Mini 窗口关闭后残留悬停状态，导致后续结果不再自动关闭的问题。
+- 发布包改为无 sandbox 权限的完整 ad-hoc bundle 签名，确保 Sparkle 可生成并验证更新包。
 - 增加本地 `start.sh`、锁定 Swift Package 版本并补充第三方许可声明。
 
 ## 1.2.2 - 2026-07-17

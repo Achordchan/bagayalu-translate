@@ -131,6 +131,21 @@ jobs:
               build
           done
 
+      - name: Ad-hoc sign release app bundles
+        run: |
+          set -euo pipefail
+
+          for ARCH in arm64 x86_64; do
+            APP_PATH="$BUILD_PRODUCTS_PATH/$ARCH/$APP_NAME.app"
+            codesign \
+              --force \
+              --deep \
+              --sign - \
+              --options runtime \
+              --timestamp=none \
+              "$APP_PATH"
+          done
+
       - name: Verify update configuration, signatures, and architectures
         run: |
           set -euo pipefail
@@ -147,20 +162,15 @@ jobs:
             echo "$ARCH 构建架构：$ARCHITECTURES"
             [ "$ARCHITECTURES" = "$ARCH" ]
 
-            if [ "$ARCH" = "arm64" ]; then
-              # Apple Silicon 可执行文件由链接器生成最小 ad-hoc 签名；
-              # 这不是 Developer ID 分发签名，也不应封装 App 资源或权限。
-              SIGNATURE_INFO="$(codesign -dv --verbose=4 "$APP_PATH" 2>&1)"
-              printf '%s\n' "$SIGNATURE_INFO"
-              grep -q 'flags=.*adhoc,linker-signed' <<< "$SIGNATURE_INFO"
-              grep -q 'Signature=adhoc' <<< "$SIGNATURE_INFO"
-              grep -q 'Info.plist=not bound' <<< "$SIGNATURE_INFO"
-              grep -q 'TeamIdentifier=not set' <<< "$SIGNATURE_INFO"
-              grep -q 'Internal requirements=none' <<< "$SIGNATURE_INFO"
-            elif codesign -dv --verbose=4 "$APP_PATH" >/dev/null 2>&1; then
-              echo "$ARCH 主程序不应包含分发签名。" >&2
-              exit 1
-            fi
+            codesign --verify --deep --strict --verbose=4 "$APP_PATH"
+
+            SIGNATURE_INFO="$(codesign -dv --verbose=4 "$APP_PATH" 2>&1)"
+            printf '%s\n' "$SIGNATURE_INFO"
+            grep -q 'flags=.*adhoc,runtime' <<< "$SIGNATURE_INFO"
+            grep -q 'Signature=adhoc' <<< "$SIGNATURE_INFO"
+            grep -q 'Info.plist entries=' <<< "$SIGNATURE_INFO"
+            grep -q 'Sealed Resources version=2' <<< "$SIGNATURE_INFO"
+            grep -q 'TeamIdentifier=not set' <<< "$SIGNATURE_INFO"
 
             if /usr/libexec/PlistBuddy \
               -c 'Print :SUEnableInstallerLauncherService' \
