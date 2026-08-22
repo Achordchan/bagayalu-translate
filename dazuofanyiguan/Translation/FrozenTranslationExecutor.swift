@@ -36,10 +36,13 @@ enum FrozenTranslationExecutor {
         onLanguageDownloadStateChange: ((Bool) -> Void)? = nil,
         onRateLimit: ((OpenAICompatibleEngine.RateLimitError) async throws -> Void)? = nil
     ) async throws -> TranslationResult {
+        // 还原器带状态：只处理每个 delta 新增的字符，避免每次都对全文跑两次
+        // replacingOccurrences。回调本身是 @MainActor 串行执行的，无需额外同步。
+        let restorerBox = StreamingNewlineRestorerBox()
         let streamUpdate: (@MainActor (String) -> Void)? = onAITextUpdate.map { callback in
             { @MainActor partialText in
                 let visibleText = request.shouldRestoreNewlines
-                    ? TranslationRequestContext.restoreNewlines(from: partialText)
+                    ? restorerBox.restorer.restore(from: partialText)
                     : partialText
                 callback(visibleText)
             }

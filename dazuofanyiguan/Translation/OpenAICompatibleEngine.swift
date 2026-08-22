@@ -399,9 +399,12 @@ struct OpenAICompatibleEngine: TranslationEngine {
         }
 
         onPhaseChange?("正在请求服务端")
+        // 投影器带状态：只解析每个 delta 新增的字符，避免每次都重扫整段累积文本。
+        // 回调本身是 @MainActor 串行执行的，这里用一个盒子承载可变状态即可。
+        let projectorBox = StreamingProjectorBox()
         let streamingTextHandler: (@MainActor (String) -> Void)? = onPartialText.map { callback in
             { @MainActor accumulatedText in
-                guard let visibleText = OpenAIStreamingTranslationProjector.visibleText(
+                guard let visibleText = projectorBox.session.project(
                     from: accumulatedText,
                     isAutoDetect: isAutoDetect
                 ) else { return }

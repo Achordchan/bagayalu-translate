@@ -1,7 +1,10 @@
 import Foundation
+import SwiftUI
 
 @MainActor
 final class LogStore: ObservableObject {
+    nonisolated init() {}
+
     struct Entry: Identifiable {
         let id = UUID()
         let date: Date
@@ -32,6 +35,23 @@ final class LogStore: ObservableObject {
         if entries.count > 500 {
             entries.removeFirst(entries.count - 500)
         }
+        #if DEBUG
         print("[\(level)] \(message)")
+        #endif
+    }
+}
+
+private struct LogStoreEnvironmentKey: EnvironmentKey {
+    static let defaultValue = LogStore()
+}
+
+extension EnvironmentValues {
+    /// 不参与变更订阅的 LogStore 入口。
+    ///
+    /// 只需要往下传日志、不读 `entries` 的视图应该用它而不是 `@EnvironmentObject`：
+    /// `@EnvironmentObject` 会订阅整个对象，于是每写一条日志都会让那些视图重新求值。
+    var logStore: LogStore {
+        get { self[LogStoreEnvironmentKey.self] }
+        set { self[LogStoreEnvironmentKey.self] = newValue }
     }
 }

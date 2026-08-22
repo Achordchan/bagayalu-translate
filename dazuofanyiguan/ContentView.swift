@@ -11,7 +11,8 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var toast: ToastCenter
-    @EnvironmentObject private var log: LogStore
+    // 只往下传日志、不读 entries：用不订阅的入口，避免每条日志都让整个视图重新求值。
+    @Environment(\.logStore) private var log
     @EnvironmentObject private var windowController: AppWindowController
     @EnvironmentObject private var clipboardMonitor: ClipboardDoubleCopyMonitor
     @EnvironmentObject private var hotkeyMonitor: GlobalHotkeyMonitor
@@ -243,7 +244,7 @@ struct ContentView: View {
     }
 
     private var appVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.2.4"
+        AppVersion.current
     }
 
     private var miniPresentationConfiguration: MiniPresentationConfiguration {
@@ -646,6 +647,7 @@ struct ContentView: View {
         .appleTranslationSession(using: appleTranslationCoordinator)
         .environmentObject(settings)
         .environmentObject(toast)
+        .environment(\.logStore, log)
         .environmentObject(log)
         .environmentObject(windowController)
         .environmentObject(clipboardMonitor)

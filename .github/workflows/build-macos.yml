@@ -9,7 +9,7 @@ on:
       version:
         description: 要发布的版本号，必须与 Xcode 中的 MARKETING_VERSION 一致
         required: true
-        default: 1.2.4
+        default: 1.2.5
         type: string
 
 permissions:

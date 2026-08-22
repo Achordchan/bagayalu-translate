@@ -1251,5 +1251,107 @@ struct dazuofanyiguanTests {
         #expect(AppWindowController.preferredMinSize == AppWindowController.preferredContentSize)
     }
 
+    // MARK: - 流式增量解析
+
+    /// 逐字符喂入投影器，每一步都必须和一次性解析整段文本的结果完全一致。
+    private func expectStreamingProjectionMatchesOneShot(_ full: String) {
+        var session = OpenAIStreamingTranslationProjector.Session()
+        var accumulated = ""
+        for character in full {
+            accumulated.append(character)
+            let oneShot = OpenAIStreamingTranslationProjector.visibleText(
+                from: accumulated,
+                isAutoDetect: true
+            )
+            let streamed = session.project(from: accumulated, isAutoDetect: true)
+            #expect(streamed == oneShot, "累积到 \(accumulated.debugDescription) 时结果不一致")
+        }
+    }
+
+    @Test func streamingProjectorMatchesOneShotParsingCharacterByCharacter() {
+        let samples = [
+            #"{"detectedSourceLanguageCode":"en","translatedText":"你好世界"}"#,
+            #"{"detectedSourceLanguageCode":"en","translatedText":"未闭合的译文"#,
+            #"{"translated_text":"下划线键也要支持"#,
+            #"{"translatedText"  :  "键和冒号之间有空格"#,
+            #"{"translatedText":"他说 \"你好\" 然后走了"#,
+            #"{"translatedText":"路径 C:\\Users\\test"#,
+            #"{"translatedText":"制表\t换行\n回车\r"#,
+            #"{"translatedText":"转义中文 \u4f60\u597d"#,
+            #"{"translatedText":"表情 \ud83d\ude00 结束"#,
+            #"{"translatedText":"第一行 [[DAZUO_NL]] 第二行"#,
+            #"{"detectedSourceLanguageCode":"en","trans"#,
+            "模型没有按 JSON 输出，直接给了译文",
+        ]
+        for sample in samples {
+            expectStreamingProjectionMatchesOneShot(sample)
+        }
+    }
+
+    @Test func streamingProjectorDecodesEscapesAndSurrogatePairsSplitAcrossDeltas() {
+        var session = OpenAIStreamingTranslationProjector.Session()
+        // 代理对被切在两个 delta 中间时，不能先吐出半个孤立代理。
+        #expect(session.project(from: #"{"translatedText":"hi \ud83d"#, isAutoDetect: true) == "hi ")
+        #expect(session.project(from: #"{"translatedText":"hi \ud83d\ude00"#, isAutoDetect: true) == "hi 😀")
+        #expect(session.project(from: #"{"translatedText":"hi \ud83d\ude00 ok"#, isAutoDetect: true) == "hi 😀 ok")
+    }
+
+    @Test func streamingProjectorRestartsWhenStreamIsRetried() {
+        var session = OpenAIStreamingTranslationProjector.Session()
+        #expect(session.project(from: #"{"translatedText":"第一次请求"#, isAutoDetect: true) == "第一次请求")
+
+        // 兼容性回退或原文回显重试会重新开一条流，累积文本不再是上一次的延续。
+        #expect(session.project(from: #"{"translatedText":"重"#, isAutoDetect: true) == "重")
+        #expect(session.project(from: #"{"translatedText":"重试后的译文"#, isAutoDetect: true) == "重试后的译文")
+    }
+
+    @Test func streamingProjectorPassesThroughWhenNotAutoDetect() {
+        var session = OpenAIStreamingTranslationProjector.Session()
+        #expect(session.project(from: "直接译文", isAutoDetect: false) == "直接译文")
+        #expect(session.project(from: "直接译文更长了", isAutoDetect: false) == "直接译文更长了")
+    }
+
+    /// 逐字符喂入还原器，每一步都必须和一次性 restoreNewlines 的结果完全一致。
+    private func expectStreamingRestoreMatchesOneShot(_ full: String) {
+        var restorer = StreamingNewlineRestorer()
+        var accumulated = ""
+        for character in full {
+            accumulated.append(character)
+            let oneShot = TranslationRequestContext.restoreNewlines(from: accumulated)
+            let streamed = restorer.restore(from: accumulated)
+            #expect(streamed == oneShot, "累积到 \(accumulated.debugDescription) 时结果不一致")
+        }
+    }
+
+    @Test func streamingNewlineRestorerMatchesOneShotCharacterByCharacter() {
+        let marker = TranslationRequestContext.newlineMarker
+        let samples = [
+            "没有任何标记的普通译文",
+            "第一行 \(marker) 第二行",
+            "第一行\(marker)第二行",
+            "连续 \(marker) \(marker) 两个",
+            "\(marker) 开头",
+            " \(marker) 两边都有空格 \(marker) ",
+            "结尾也有 \(marker)",
+            "左边有空格右边没有 \(marker)紧跟",
+            "疑似前缀 [[DAZUO_N 并不是标记",
+            "数组字面量 [[1,2],[3]] 不该被误伤",
+            "表情 😀 \(marker) 后面",
+            marker,
+        ]
+        for sample in samples {
+            expectStreamingRestoreMatchesOneShot(sample)
+        }
+    }
+
+    @Test func streamingNewlineRestorerRestartsWhenStreamIsRetried() {
+        let marker = TranslationRequestContext.newlineMarker
+        var restorer = StreamingNewlineRestorer()
+        #expect(restorer.restore(from: "第一次 \(marker) 请求") == "第一次\n请求")
+
+        // 重试会重新开一条流，还原器必须跟着重头来。
+        #expect(restorer.restore(from: "重") == "重")
+        #expect(restorer.restore(from: "重试 \(marker) 之后") == "重试\n之后")
+    }
 
 }

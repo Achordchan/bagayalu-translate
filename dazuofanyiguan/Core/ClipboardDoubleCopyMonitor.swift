@@ -26,10 +26,14 @@ final class ClipboardDoubleCopyMonitor: ObservableObject {
         lastEmittedText = nil
         lastEmittedDate = nil
 
-        timer = Timer.scheduledTimer(withTimeInterval: 0.18, repeats: true) { [weak self] _ in
+        // macOS 没有剪贴板变更通知，只能轮询。间隔保持 0.18s 不动（双复制判定依赖它），
+        // 但加一点容差，让系统把这些唤醒和其它定时器合并，减少空闲耗电。
+        let timer = Timer.scheduledTimer(withTimeInterval: 0.18, repeats: true) { [weak self] _ in
             self?.tick(windowMs: windowMs, log: log)
         }
-        RunLoop.main.add(timer!, forMode: .common)
+        timer.tolerance = 0.03
+        self.timer = timer
+        RunLoop.main.add(timer, forMode: .common)
         Task { @MainActor in
             log.info("剪贴板监听已启动（需两次相同文本）")
         }

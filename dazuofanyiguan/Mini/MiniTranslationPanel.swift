@@ -258,7 +258,7 @@ private struct MiniTranslationBubbleView: View {
     @Environment(\.colorScheme) private var colorScheme
 
     private var appVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.2.4"
+        AppVersion.current
     }
 
     var body: some View {
@@ -499,6 +499,8 @@ private struct MiniSelectableTranslationTextView: NSViewRepresentable {
         var onMetricsChange: ((MiniTranslationScrollMetrics) -> Void)?
 
         private var currentText = ""
+        private var currentUTF8Count = 0
+        private var currentFingerprint: [UInt8] = []
         private var currentFontSize: Double = 0
         private var boundsObserver: NSObjectProtocol?
 
@@ -528,14 +530,38 @@ private struct MiniSelectableTranslationTextView: NSViewRepresentable {
                 return
             }
 
-            currentText = text
-            currentFontSize = fontSize
-            textView.textStorage?.setAttributedString(
-                NSAttributedString(
-                    string: text,
-                    attributes: Self.textAttributes(fontSize: fontSize)
+            let attributes = Self.textAttributes(fontSize: fontSize)
+            // 流式翻译时每个 delta 都会走到这里。整段替换 textStorage 会让 TextKit
+            // 重新排版全文，代价随译文长度呈二次增长；字号没变且是纯追加时只写新增部分。
+            if currentFontSize == fontSize,
+               currentUTF8Count > 0,
+               AppendOnlyStreamCheck.isContinuation(
+                   of: text,
+                   previousUTF8Count: currentUTF8Count,
+                   previousFingerprint: currentFingerprint
+               ),
+               let textStorage = textView.textStorage {
+                let appended = text[
+                    text.utf8.index(text.utf8.startIndex, offsetBy: currentUTF8Count)...
+                ]
+                textStorage.append(
+                    NSAttributedString(string: String(appended), attributes: attributes)
                 )
+            } else {
+                textView.textStorage?.setAttributedString(
+                    NSAttributedString(string: text, attributes: attributes)
+                )
+            }
+
+            currentText = text
+            currentUTF8Count = text.utf8.count
+            // String.hasPrefix 会走 Unicode 规范化比较，放在每个 delta 上会重新变成瓶颈，
+            // 因此用长度加结尾指纹做 O(1) 的「是不是纯追加」判断。
+            currentFingerprint = AppendOnlyStreamCheck.fingerprint(
+                of: text,
+                endingAt: currentUTF8Count
             )
+            currentFontSize = fontSize
             needsLayout = true
         }
 
