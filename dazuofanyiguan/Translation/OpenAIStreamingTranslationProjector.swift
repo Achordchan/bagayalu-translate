@@ -33,30 +33,21 @@ enum OpenAIStreamingTranslationProjector {
         private static let candidateKeys = ["\"translatedText\"", "\"translated_text\""]
 
         private var parsers = candidateKeys.map(KeyValueParser.init(key:))
-        /// 上一次收到的累积文本长度与指纹，用来确认这次确实是它的延续。
+        /// 上一次收到的累积文本长度，仅作兜底：正常情况下上游会用显式的替换标志通知重置。
         private var seenUTF8Count = 0
-        private var seenFingerprint: [UInt8] = []
 
         init() {}
 
         mutating func project(from accumulatedText: String, isAutoDetect: Bool) -> String? {
             guard isAutoDetect else { return accumulatedText }
 
-            // 累积文本正常只会追加。一旦不是上次内容的延续，说明上游重新发起了一次流式请求
-            // （例如 Responses 精简参数回退、或译文疑似原文回显后的重试），需要重头解析。
-            if !AppendOnlyStreamCheck.isContinuation(
-                of: accumulatedText,
-                previousUTF8Count: seenUTF8Count,
-                previousFingerprint: seenFingerprint
-            ) {
+            // 换流和权威全文替换由上游通过显式标志通知（见 OpenAICompatibleEngine）。
+            // 这里只留一个兜底：文本变短一定不是追加。
+            let utf8Count = accumulatedText.utf8.count
+            if utf8Count < seenUTF8Count {
                 self = Session()
             }
-            let utf8Count = accumulatedText.utf8.count
             seenUTF8Count = utf8Count
-            seenFingerprint = AppendOnlyStreamCheck.fingerprint(
-                of: accumulatedText,
-                endingAt: utf8Count
-            )
 
             for index in parsers.indices {
                 if let value = parsers[index].advance(over: accumulatedText, utf8Count: utf8Count) {

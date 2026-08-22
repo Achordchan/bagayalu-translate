@@ -1090,9 +1090,46 @@ struct dazuofanyiguanTests {
             logprobs: []
         )
 
-        #expect(try accumulator.consume(.outputText(.delta(first))) == "你")
-        #expect(try accumulator.consume(.outputText(.delta(second))) == "你好")
+        let firstUpdate = try accumulator.consume(.outputText(.delta(first)))
+        #expect(firstUpdate?.text == "你")
+        // delta 是在上一次结果后面追加，不是替换。
+        #expect(firstUpdate?.replacesPreviousText == false)
+
+        let secondUpdate = try accumulator.consume(.outputText(.delta(second)))
+        #expect(secondUpdate?.text == "你好")
+        #expect(secondUpdate?.replacesPreviousText == false)
+
         #expect(accumulator.finalText == "你好")
+    }
+
+    @Test func responsesStreamAccumulatorMarksDoneEventAsAuthoritativeReplacement() throws {
+        var accumulator = OpenAIResponsesStreamAccumulator()
+        let delta = Components.Schemas.ResponseTextDeltaEvent(
+            _type: .response_outputText_delta,
+            itemId: "msg-test",
+            outputIndex: 0,
+            contentIndex: 0,
+            delta: "草稿",
+            sequenceNumber: 1,
+            logprobs: []
+        )
+        #expect(try accumulator.consume(.outputText(.delta(delta)))?.replacesPreviousText == false)
+
+        let done = Components.Schemas.ResponseTextDoneEvent(
+            _type: .response_outputText_done,
+            itemId: "msg-test",
+            outputIndex: 0,
+            contentIndex: 0,
+            text: "服务端给出的权威全文",
+            sequenceNumber: 2,
+            logprobs: []
+        )
+        let doneUpdate = try accumulator.consume(.outputText(.done(done)))
+        // .done 会整体替换累积文本，下游的增量状态必须重置后重头处理，
+        // 不能当成在草稿后面追加。
+        #expect(doneUpdate?.text == "服务端给出的权威全文")
+        #expect(doneUpdate?.replacesPreviousText == true)
+        #expect(accumulator.finalText == "服务端给出的权威全文")
     }
 
     @Test func openAISDKChatCompletionsUsesConfiguredBasePath() async throws {

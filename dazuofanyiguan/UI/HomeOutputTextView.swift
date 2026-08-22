@@ -74,12 +74,13 @@ struct OutputTextView: NSViewRepresentable {
         let paragraphStyle = textView.defaultParagraphStyle
         defer { coordinator.markApplied(text) }
 
+        // 精确判定「是不是纯追加」：这里的 text 未必来自流式增量，
+        // 也可能是翻译结束后一次性写入的最终译文，用长度加指纹的近似判定会漏掉
+        // 「长度相同但中间不同」的替换，从而留下过期内容。
+        // utf8.starts(with:) 是逐字节比较，比 String.hasPrefix 的 Unicode 规范化比较快得多，
+        // 相对这里 TextKit 排版的开销可以忽略。
         if coordinator.appliedUTF8Count > 0,
-           AppendOnlyStreamCheck.isContinuation(
-               of: text,
-               previousUTF8Count: coordinator.appliedUTF8Count,
-               previousFingerprint: coordinator.appliedFingerprint
-           ),
+           text.utf8.starts(with: coordinator.appliedText.utf8),
            let textStorage = textView.textStorage {
             let appended = text[
                 text.utf8.index(text.utf8.startIndex, offsetBy: coordinator.appliedUTF8Count)...
@@ -114,18 +115,12 @@ struct OutputTextView: NSViewRepresentable {
     final class Coordinator {
         /// 已经写进 textView 的文本。直接读 textView.string 每次都要做一遍 NSString 桥接。
         private(set) var appliedText = ""
-        /// 长度与结尾指纹用于 O(1) 判断「是不是纯追加」。
-        /// String.hasPrefix 会走 Unicode 规范化比较，放在每个 delta 上会重新变成瓶颈。
+        /// 缓存 UTF-8 长度，用来 O(1) 定位新增部分的起点。
         private(set) var appliedUTF8Count = 0
-        private(set) var appliedFingerprint: [UInt8] = []
 
         func markApplied(_ text: String) {
             appliedText = text
             appliedUTF8Count = text.utf8.count
-            appliedFingerprint = AppendOnlyStreamCheck.fingerprint(
-                of: text,
-                endingAt: appliedUTF8Count
-            )
         }
     }
 }

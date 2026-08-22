@@ -7,7 +7,7 @@ enum FrozenTranslationExecutor {
         for request: TranslationRequestContext,
         apiKey: String?,
         onPhaseChange: ((String) -> Void)? = nil,
-        onPartialText: (@MainActor (String) -> Void)? = nil
+        onPartialText: (@MainActor (_ text: String, _ replacesPreviousText: Bool) -> Void)? = nil
     ) -> TranslationEngine? {
         switch request.engineType {
         case .apple:
@@ -39,14 +39,19 @@ enum FrozenTranslationExecutor {
         // 还原器带状态：只处理每个 delta 新增的字符，避免每次都对全文跑两次
         // replacingOccurrences。回调本身是 @MainActor 串行执行的，无需额外同步。
         let restorerBox = StreamingNewlineRestorerBox()
-        let streamUpdate: (@MainActor (String) -> Void)? = onAITextUpdate.map { callback in
-            { @MainActor partialText in
-                let visibleText = request.shouldRestoreNewlines
-                    ? restorerBox.restorer.restore(from: partialText)
-                    : partialText
-                callback(visibleText)
+        let streamUpdate: (@MainActor (_ text: String, _ replacesPreviousText: Bool) -> Void)? =
+            onAITextUpdate.map { callback in
+                { @MainActor partialText, replacesPreviousText in
+                    // 新的一条流，或服务端给出的权威全文：增量状态必须先丢掉再重头还原。
+                    if replacesPreviousText {
+                        restorerBox.restorer = StreamingNewlineRestorer()
+                    }
+                    let visibleText = request.shouldRestoreNewlines
+                        ? restorerBox.restorer.restore(from: partialText)
+                        : partialText
+                    callback(visibleText)
+                }
             }
-        }
         let engine = makeEngine(
             for: request,
             apiKey: apiKey,

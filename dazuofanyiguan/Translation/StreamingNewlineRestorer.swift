@@ -30,28 +30,16 @@ struct StreamingNewlineRestorer {
     private var pendingSource: [Character] = []
     /// 已经消费到的输入位置。用 UTF-8 偏移记录，String.Index 不能跨 String 实例复用。
     private var consumedUTF8Offset = 0
-    /// 上一次收到的可见文本长度与结尾指纹，用来确认这次确实是它的延续。
-    private var seenUTF8Count = 0
-    private var seenFingerprint: [UInt8] = []
 
     init() {}
 
     mutating func restore(from visibleText: String) -> String {
-        // 可见文本正常只会追加。一旦不是上次内容的延续，说明上游重新发起了一次流式请求，
-        // 需要重头还原。
-        if !AppendOnlyStreamCheck.isContinuation(
-            of: visibleText,
-            previousUTF8Count: seenUTF8Count,
-            previousFingerprint: seenFingerprint
-        ) {
+        // 换流和权威全文替换由上游通过显式标志通知（见 FrozenTranslationExecutor）。
+        // 这里只留一个兜底：文本变短一定不是追加。
+        let utf8Count = visibleText.utf8.count
+        if utf8Count < consumedUTF8Offset {
             self = StreamingNewlineRestorer()
         }
-        let utf8Count = visibleText.utf8.count
-        seenUTF8Count = utf8Count
-        seenFingerprint = AppendOnlyStreamCheck.fingerprint(
-            of: visibleText,
-            endingAt: utf8Count
-        )
         guard utf8Count > consumedUTF8Offset else { return display }
 
         // consumedUTF8Offset 始终等于上一次完整输入的 UTF-8 长度，必然落在字符边界上。
