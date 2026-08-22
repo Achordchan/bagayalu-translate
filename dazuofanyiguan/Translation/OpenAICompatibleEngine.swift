@@ -409,11 +409,15 @@ struct OpenAICompatibleEngine: TranslationEngine {
                     if replacesPreviousText {
                         projectorBox.session = OpenAIStreamingTranslationProjector.Session()
                     }
-                    guard let visibleText = projectorBox.session.project(
+                    guard let projection = projectorBox.session.project(
                         from: accumulatedText,
                         isAutoDetect: isAutoDetect
                     ) else { return }
-                    callback(visibleText, replacesPreviousText)
+                    // 投影器自己换了候选键时，输出同样不是追加，必须一并告诉下游。
+                    callback(
+                        projection.text,
+                        replacesPreviousText || projection.replacesPreviousText
+                    )
                 }
             }
         let content = try await contentWithCompatibilityFallback(

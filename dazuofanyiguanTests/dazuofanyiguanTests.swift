@@ -1300,7 +1300,7 @@ struct dazuofanyiguanTests {
                 from: accumulated,
                 isAutoDetect: true
             )
-            let streamed = session.project(from: accumulated, isAutoDetect: true)
+            let streamed = session.project(from: accumulated, isAutoDetect: true)?.text
             #expect(streamed == oneShot, "累积到 \(accumulated.debugDescription) 时结果不一致")
         }
     }
@@ -1328,9 +1328,9 @@ struct dazuofanyiguanTests {
     @Test func streamingProjectorDecodesEscapesAndSurrogatePairsSplitAcrossDeltas() {
         var session = OpenAIStreamingTranslationProjector.Session()
         // 代理对被切在两个 delta 中间时，不能先吐出半个孤立代理。
-        #expect(session.project(from: #"{"translatedText":"hi \ud83d"#, isAutoDetect: true) == "hi ")
-        #expect(session.project(from: #"{"translatedText":"hi \ud83d\ude00"#, isAutoDetect: true) == "hi 😀")
-        #expect(session.project(from: #"{"translatedText":"hi \ud83d\ude00 ok"#, isAutoDetect: true) == "hi 😀 ok")
+        #expect(session.project(from: #"{"translatedText":"hi \ud83d"#, isAutoDetect: true)?.text == "hi ")
+        #expect(session.project(from: #"{"translatedText":"hi \ud83d\ude00"#, isAutoDetect: true)?.text == "hi 😀")
+        #expect(session.project(from: #"{"translatedText":"hi \ud83d\ude00 ok"#, isAutoDetect: true)?.text == "hi 😀 ok")
     }
 
     @Test func streamingProjectorFallsBackToSnakeCaseKeyWhenCamelCaseValueIsUnusable() {
@@ -1347,7 +1347,7 @@ struct dazuofanyiguanTests {
         ]
         for sample in samples {
             var session = OpenAIStreamingTranslationProjector.Session()
-            #expect(session.project(from: sample, isAutoDetect: true) == "译文")
+            #expect(session.project(from: sample, isAutoDetect: true)?.text == "译文")
             #expect(
                 OpenAIStreamingTranslationProjector.visibleText(
                     from: sample,
@@ -1362,28 +1362,28 @@ struct dazuofanyiguanTests {
         // 优先级在每次调用时重新裁决：已经在读 translated_text，
         // 后到的 translatedText 依然要把它顶掉。
         var session = OpenAIStreamingTranslationProjector.Session()
-        #expect(session.project(from: #"{"translated_text":"备用"#, isAutoDetect: true) == "备用")
+        #expect(session.project(from: #"{"translated_text":"备用"#, isAutoDetect: true)?.text == "备用")
         #expect(
             session.project(
                 from: #"{"translated_text":"备用","translatedText":"优先"#,
                 isAutoDetect: true
-            ) == "优先"
+            )?.text == "优先"
         )
     }
 
     @Test func streamingProjectorRestartsWhenStreamIsRetried() {
         var session = OpenAIStreamingTranslationProjector.Session()
-        #expect(session.project(from: #"{"translatedText":"第一次请求"#, isAutoDetect: true) == "第一次请求")
+        #expect(session.project(from: #"{"translatedText":"第一次请求"#, isAutoDetect: true)?.text == "第一次请求")
 
         // 兼容性回退或原文回显重试会重新开一条流，累积文本不再是上一次的延续。
-        #expect(session.project(from: #"{"translatedText":"重"#, isAutoDetect: true) == "重")
-        #expect(session.project(from: #"{"translatedText":"重试后的译文"#, isAutoDetect: true) == "重试后的译文")
+        #expect(session.project(from: #"{"translatedText":"重"#, isAutoDetect: true)?.text == "重")
+        #expect(session.project(from: #"{"translatedText":"重试后的译文"#, isAutoDetect: true)?.text == "重试后的译文")
     }
 
     @Test func streamingProjectorPassesThroughWhenNotAutoDetect() {
         var session = OpenAIStreamingTranslationProjector.Session()
-        #expect(session.project(from: "直接译文", isAutoDetect: false) == "直接译文")
-        #expect(session.project(from: "直接译文更长了", isAutoDetect: false) == "直接译文更长了")
+        #expect(session.project(from: "直接译文", isAutoDetect: false)?.text == "直接译文")
+        #expect(session.project(from: "直接译文更长了", isAutoDetect: false)?.text == "直接译文更长了")
     }
 
     /// 逐字符喂入还原器，每一步都必须和一次性 restoreNewlines 的结果完全一致。
@@ -1396,6 +1396,57 @@ struct dazuofanyiguanTests {
             let streamed = restorer.restore(from: accumulated)
             #expect(streamed == oneShot, "累积到 \(accumulated.debugDescription) 时结果不一致")
         }
+    }
+
+    @Test func streamingProjectorMarksKeySwitchAsReplacement() {
+        var session = OpenAIStreamingTranslationProjector.Session()
+
+        // 第一次给出结果：对下游而言也是一次替换（此前什么都没有）。
+        let first = session.project(from: #"{"translated_text":"备用"#, isAutoDetect: true)
+        #expect(first?.text == "备用")
+        #expect(first?.replacesPreviousText == true)
+
+        // 同一个键继续增长是追加。
+        let grown = session.project(from: #"{"translated_text":"备用更多"#, isAutoDetect: true)
+        #expect(grown?.text == "备用更多")
+        #expect(grown?.replacesPreviousText == false)
+
+        // 换到更高优先级的键：整段换掉，必须标成替换，
+        // 否则下游会把两段拼成「备用更多且更长」之类的东西。
+        let switched = session.project(
+            from: #"{"translated_text":"备用更多","translatedText":"优先且更长"#,
+            isAutoDetect: true
+        )
+        #expect(switched?.text == "优先且更长")
+        #expect(switched?.replacesPreviousText == true)
+    }
+
+    /// 投影器与还原器串起来跑，模拟真实链路：只有单独测每一段是发现不了拼接错误的。
+    @Test func streamingProjectorAndRestorerChainSurvivesKeySwitch() {
+        var session = OpenAIStreamingTranslationProjector.Session()
+        var restorer = StreamingNewlineRestorer()
+
+        func visibleText(after rawText: String) -> String? {
+            guard let projection = session.project(from: rawText, isAutoDetect: true) else {
+                return nil
+            }
+            if projection.replacesPreviousText {
+                restorer = StreamingNewlineRestorer()
+            }
+            return restorer.restore(from: projection.text)
+        }
+
+        #expect(visibleText(after: #"{"translated_text":"备用"#) == "备用")
+        #expect(
+            visibleText(after: #"{"translated_text":"备用","translatedText":"优先且更长"#)
+                == "优先且更长"
+        )
+        // 换键之后继续流式追加，换行标记依然要正常还原。
+        #expect(
+            visibleText(
+                after: #"{"translated_text":"备用","translatedText":"优先且更长 [[DAZUO_NL]] 第二行"#
+            ) == "优先且更长\n第二行"
+        )
     }
 
     @Test func streamingNewlineRestorerMatchesOneShotCharacterByCharacter() {

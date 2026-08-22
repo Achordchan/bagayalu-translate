@@ -15,7 +15,7 @@ enum OpenAIStreamingTranslationProjector {
     /// 一次性解析整段累积文本。保持原有语义，供非流式调用与测试使用。
     static func visibleText(from accumulatedText: String, isAutoDetect: Bool) -> String? {
         var session = Session()
-        return session.project(from: accumulatedText, isAutoDetect: isAutoDetect)
+        return session.project(from: accumulatedText, isAutoDetect: isAutoDetect)?.text
     }
 
     /// 流式投影器：只解析每个 delta 新增的字符。
@@ -25,6 +25,18 @@ enum OpenAIStreamingTranslationProjector {
     /// 主线程开销随译文长度呈二次增长。这里记住上次扫描停下的位置，只处理新增字符，
     /// 并自行增量解码 JSON 转义，摊还后每个 delta 只付出 O(新增长度) 的代价。
     struct Session {
+        /// 一次投影结果。
+        struct Projection {
+            /// 当前应该显示的译文。
+            let text: String
+            /// true 表示这次的结果不是在上一次结果后面追加。
+            ///
+            /// 单个候选键的解析结果只增不减，但**换了候选键**就不是追加了：
+            /// 例如先读到 `translated_text` 的「备用」，随后 `translatedText` 出现并接管，
+            /// 结果会整体变成另一段文字。下游必须重置增量状态，否则会把两段拼在一起。
+            let replacesPreviousText: Bool
+        }
+
         /// 候选键，按优先级排列。
         ///
         /// 旧实现是无状态的：每个 delta 都重新按这个顺序把两个键各试一遍，谁先给出字符串值就用谁。
@@ -33,13 +45,21 @@ enum OpenAIStreamingTranslationProjector {
         private static let candidateKeys = ["\"translatedText\"", "\"translated_text\""]
 
         private var parsers = candidateKeys.map(KeyValueParser.init(key:))
+        /// 上一次给出结果的候选键下标。换了键就说明这次不是追加。
+        private var lastWinningParserIndex: Int?
         /// 上一次收到的累积文本长度，仅作兜底：正常情况下上游会用显式的替换标志通知重置。
         private var seenUTF8Count = 0
 
         init() {}
 
-        mutating func project(from accumulatedText: String, isAutoDetect: Bool) -> String? {
-            guard isAutoDetect else { return accumulatedText }
+        mutating func project(
+            from accumulatedText: String,
+            isAutoDetect: Bool
+        ) -> Projection? {
+            // 非自动识别时直接透传；这条路径下是不是替换由上游的原始流标志决定。
+            guard isAutoDetect else {
+                return Projection(text: accumulatedText, replacesPreviousText: false)
+            }
 
             // 换流和权威全文替换由上游通过显式标志通知（见 OpenAICompatibleEngine）。
             // 这里只留一个兜底：文本变短一定不是追加。
@@ -51,7 +71,9 @@ enum OpenAIStreamingTranslationProjector {
 
             for index in parsers.indices {
                 if let value = parsers[index].advance(over: accumulatedText, utf8Count: utf8Count) {
-                    return value
+                    let switchedKey = index != lastWinningParserIndex
+                    lastWinningParserIndex = index
+                    return Projection(text: value, replacesPreviousText: switchedKey)
                 }
             }
             return nil
