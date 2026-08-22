@@ -164,7 +164,7 @@ struct OpenAISDKTransport {
         userPrompt: String,
         temperature: Double?,
         useMinimalPayload: Bool,
-        onPartialText: @escaping @MainActor (String) -> Void
+        onPartialText: @escaping @MainActor (_ text: String, _ replacesPreviousText: Bool) -> Void
     ) async throws -> String {
         let input: CreateModelResponseQuery.Input
         let instructions: String?
@@ -186,10 +186,17 @@ struct OpenAISDKTransport {
         let stream: AsyncThrowingStream<ResponseStreamEvent, Error> =
             client.responses.createResponseStreaming(query: query)
         var accumulator = OpenAIResponsesStreamAccumulator()
+        // 这是一条全新的流，第一次回调必须让下游重置增量状态：
+        // 同一个回调会被兼容性回退和原文回显重试复用。
+        var isFirstUpdate = true
         for try await event in stream {
             try Task.checkCancellation()
-            if let text = try accumulator.consume(event) {
-                await onPartialText(text)
+            if let update = try accumulator.consume(event) {
+                await onPartialText(
+                    update.text,
+                    update.replacesPreviousText || isFirstUpdate
+                )
+                isFirstUpdate = false
             }
         }
         return accumulator.finalText.trimmingCharacters(in: .whitespacesAndNewlines)

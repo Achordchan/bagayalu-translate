@@ -8,21 +8,33 @@ struct OpenAIResponsesStreamError: LocalizedError {
 }
 
 struct OpenAIResponsesStreamAccumulator {
+    /// 一次文本更新。
+    struct Update {
+        /// 完整的累积文本。
+        let text: String
+        /// true 表示这不是在上一次结果后面追加，而是服务端给出的权威全文替换。
+        /// 下游的增量状态必须先重置再处理，不能当成追加。
+        let replacesPreviousText: Bool
+    }
+
     private(set) var finalText = ""
 
-    mutating func consume(_ event: ResponseStreamEvent) throws -> String? {
+    mutating func consume(_ event: ResponseStreamEvent) throws -> Update? {
         switch event {
         case .outputText(.delta(let delta)):
             finalText += delta.delta
-            return finalText
+            return Update(text: finalText, replacesPreviousText: false)
         case .outputText(.done(let done)):
+            // 服务端在这里给出权威全文，可能与逐个 delta 拼出来的不完全一致。
             finalText = done.text
-            return finalText
+            return Update(text: finalText, replacesPreviousText: true)
         case .completed(let completed):
             if finalText.isEmpty {
                 finalText = Self.text(from: completed.response)
             }
-            return finalText.isEmpty ? nil : finalText
+            return finalText.isEmpty
+                ? nil
+                : Update(text: finalText, replacesPreviousText: true)
         case .failed(let failed), .incomplete(let failed):
             throw OpenAIResponsesStreamError(
                 message: failed.response.error?.message ?? "Responses 流式请求未完成"

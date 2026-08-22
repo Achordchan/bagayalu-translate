@@ -53,6 +53,7 @@ struct dazuofanyiguanApp: App {
                 .environmentObject(settings)
                 .environmentObject(toast)
                 .environmentObject(log)
+                .environment(\.logStore, log)
                 .environmentObject(windowController)
                 .environmentObject(clipboardMonitor)
                 .environmentObject(hotkeyMonitor)
@@ -74,6 +75,7 @@ struct dazuofanyiguanApp: App {
                 .preferredColorScheme(settings.appearance.colorScheme)
                 .environmentObject(settings)
                 .environmentObject(log)
+                .environment(\.logStore, log)
                 .environmentObject(hotkeyMonitor)
                 .environmentObject(updater)
         }

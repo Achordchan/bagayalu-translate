@@ -88,7 +88,10 @@ struct ScreenshotSelectionWorkspaceView: View {
 
                 let rectTopLeft = normalizedRectTopLeft(start: start, current: value.location)
                 session.selectionRect = rectToBottomLeft(rectTopLeft: rectTopLeft, containerSize: size)
-                session.stage = .selecting
+                // @Published 不做相等性检查，拖拽期间每帧重复赋同一个值会多发一次变更通知。
+                if session.stage != .selecting {
+                    session.stage = .selecting
+                }
             }
             .onEnded { _ in
                 defer {

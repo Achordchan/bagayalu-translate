@@ -42,6 +42,13 @@ enum ScreenRegionCapture {
 
     @MainActor
     static func capture(rect: CGRect) async throws -> NSImage {
+        try await capture(rect: rect, content: nil)
+    }
+
+    /// 连续截多块屏幕时，把 `SCShareableContent` 查询结果传进来复用。
+    /// 这个查询要枚举全系统窗口，开销不小，每块屏各查一次会明显拖慢截图快捷键的响应。
+    @MainActor
+    static func capture(rect: CGRect, content: SCShareableContent?) async throws -> NSImage {
         let integral = rect.integral
         guard integral.width > 2, integral.height > 2 else { throw CaptureError.invalidRect }
 
@@ -56,11 +63,20 @@ enum ScreenRegionCapture {
             let target = targets[0]
             let clipped = integral.intersection(target.frame).integral
             guard clipped.width > 2, clipped.height > 2 else { throw CaptureError.invalidRect }
-            return try await captureSingleTarget(target: target, rectInScreen: clipped)
+            return try await captureSingleTarget(
+                target: target,
+                rectInScreen: clipped,
+                content: content
+            )
         }
 
         // 跨屏：按显示器切分截图，再按全局坐标合成。
-        let content = try await shareableContent()
+        let resolvedContent: SCShareableContent
+        if let content {
+            resolvedContent = content
+        } else {
+            resolvedContent = try await shareableContent()
+        }
         var pieces: [(image: CGImage, originInUnion: CGPoint, scale: CGFloat)] = []
         pieces.reserveCapacity(targets.count)
 
@@ -73,7 +89,7 @@ enum ScreenRegionCapture {
             let piece = try await captureCGImage(
                 target: target,
                 rectInScreen: layout.rectInScreen,
-                content: content
+                content: resolvedContent
             )
             pieces.append((piece, layout.originInUnionTopLeft, target.scale))
         }
@@ -138,18 +154,24 @@ enum ScreenRegionCapture {
     @MainActor
     private static func captureSingleTarget(
         target: ScreenCaptureTarget,
-        rectInScreen: CGRect
+        rectInScreen: CGRect,
+        content: SCShareableContent?
     ) async throws -> NSImage {
-        let content = try await shareableContent()
+        let resolvedContent: SCShareableContent
+        if let content {
+            resolvedContent = content
+        } else {
+            resolvedContent = try await shareableContent()
+        }
         let image = try await captureCGImage(
             target: target,
             rectInScreen: rectInScreen,
-            content: content
+            content: resolvedContent
         )
         return NSImage(cgImage: image, size: rectInScreen.size)
     }
 
-    private static func shareableContent() async throws -> SCShareableContent {
+    static func shareableContent() async throws -> SCShareableContent {
         try await withCheckedThrowingContinuation { continuation in
             SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: true) { content, error in
                 if let error {

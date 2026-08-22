@@ -1090,9 +1090,46 @@ struct dazuofanyiguanTests {
             logprobs: []
         )
 
-        #expect(try accumulator.consume(.outputText(.delta(first))) == "你")
-        #expect(try accumulator.consume(.outputText(.delta(second))) == "你好")
+        let firstUpdate = try accumulator.consume(.outputText(.delta(first)))
+        #expect(firstUpdate?.text == "你")
+        // delta 是在上一次结果后面追加，不是替换。
+        #expect(firstUpdate?.replacesPreviousText == false)
+
+        let secondUpdate = try accumulator.consume(.outputText(.delta(second)))
+        #expect(secondUpdate?.text == "你好")
+        #expect(secondUpdate?.replacesPreviousText == false)
+
         #expect(accumulator.finalText == "你好")
+    }
+
+    @Test func responsesStreamAccumulatorMarksDoneEventAsAuthoritativeReplacement() throws {
+        var accumulator = OpenAIResponsesStreamAccumulator()
+        let delta = Components.Schemas.ResponseTextDeltaEvent(
+            _type: .response_outputText_delta,
+            itemId: "msg-test",
+            outputIndex: 0,
+            contentIndex: 0,
+            delta: "草稿",
+            sequenceNumber: 1,
+            logprobs: []
+        )
+        #expect(try accumulator.consume(.outputText(.delta(delta)))?.replacesPreviousText == false)
+
+        let done = Components.Schemas.ResponseTextDoneEvent(
+            _type: .response_outputText_done,
+            itemId: "msg-test",
+            outputIndex: 0,
+            contentIndex: 0,
+            text: "服务端给出的权威全文",
+            sequenceNumber: 2,
+            logprobs: []
+        )
+        let doneUpdate = try accumulator.consume(.outputText(.done(done)))
+        // .done 会整体替换累积文本，下游的增量状态必须重置后重头处理，
+        // 不能当成在草稿后面追加。
+        #expect(doneUpdate?.text == "服务端给出的权威全文")
+        #expect(doneUpdate?.replacesPreviousText == true)
+        #expect(accumulator.finalText == "服务端给出的权威全文")
     }
 
     @Test func openAISDKChatCompletionsUsesConfiguredBasePath() async throws {
@@ -1251,5 +1288,196 @@ struct dazuofanyiguanTests {
         #expect(AppWindowController.preferredMinSize == AppWindowController.preferredContentSize)
     }
 
+    // MARK: - 流式增量解析
+
+    /// 逐字符喂入投影器，每一步都必须和一次性解析整段文本的结果完全一致。
+    private func expectStreamingProjectionMatchesOneShot(_ full: String) {
+        var session = OpenAIStreamingTranslationProjector.Session()
+        var accumulated = ""
+        for character in full {
+            accumulated.append(character)
+            let oneShot = OpenAIStreamingTranslationProjector.visibleText(
+                from: accumulated,
+                isAutoDetect: true
+            )
+            let streamed = session.project(from: accumulated, isAutoDetect: true)?.text
+            #expect(streamed == oneShot, "累积到 \(accumulated.debugDescription) 时结果不一致")
+        }
+    }
+
+    @Test func streamingProjectorMatchesOneShotParsingCharacterByCharacter() {
+        let samples = [
+            #"{"detectedSourceLanguageCode":"en","translatedText":"你好世界"}"#,
+            #"{"detectedSourceLanguageCode":"en","translatedText":"未闭合的译文"#,
+            #"{"translated_text":"下划线键也要支持"#,
+            #"{"translatedText"  :  "键和冒号之间有空格"#,
+            #"{"translatedText":"他说 \"你好\" 然后走了"#,
+            #"{"translatedText":"路径 C:\\Users\\test"#,
+            #"{"translatedText":"制表\t换行\n回车\r"#,
+            #"{"translatedText":"转义中文 \u4f60\u597d"#,
+            #"{"translatedText":"表情 \ud83d\ude00 结束"#,
+            #"{"translatedText":"第一行 [[DAZUO_NL]] 第二行"#,
+            #"{"detectedSourceLanguageCode":"en","trans"#,
+            "模型没有按 JSON 输出，直接给了译文",
+        ]
+        for sample in samples {
+            expectStreamingProjectionMatchesOneShot(sample)
+        }
+    }
+
+    @Test func streamingProjectorDecodesEscapesAndSurrogatePairsSplitAcrossDeltas() {
+        var session = OpenAIStreamingTranslationProjector.Session()
+        // 代理对被切在两个 delta 中间时，不能先吐出半个孤立代理。
+        #expect(session.project(from: #"{"translatedText":"hi \ud83d"#, isAutoDetect: true)?.text == "hi ")
+        #expect(session.project(from: #"{"translatedText":"hi \ud83d\ude00"#, isAutoDetect: true)?.text == "hi 😀")
+        #expect(session.project(from: #"{"translatedText":"hi \ud83d\ude00 ok"#, isAutoDetect: true)?.text == "hi 😀 ok")
+    }
+
+    @Test func streamingProjectorFallsBackToSnakeCaseKeyWhenCamelCaseValueIsUnusable() {
+        // 服务商同时返回两个字段、且驼峰字段不是字符串时，要退回下划线字段。
+        // 旧实现靠「解析 translatedText 得到 nil 就试 translated_text」拿到译文，
+        // 增量化之后必须保住这个回退。
+        let samples = [
+            #"{"translatedText":null,"translated_text":"译文"}"#,
+            #"{"translatedText":null,"translated_text":"译文"#,
+            #"{"translatedText":123,"translated_text":"译文"#,
+            #"{"translatedText":[1,2],"translated_text":"译文"#,
+            // 值里含非法转义时，旧实现同样会退到下一个候选键。
+            #"{"translatedText":"坏\q转义","translated_text":"译文"#,
+        ]
+        for sample in samples {
+            var session = OpenAIStreamingTranslationProjector.Session()
+            #expect(session.project(from: sample, isAutoDetect: true)?.text == "译文")
+            #expect(
+                OpenAIStreamingTranslationProjector.visibleText(
+                    from: sample,
+                    isAutoDetect: true
+                ) == "译文"
+            )
+            expectStreamingProjectionMatchesOneShot(sample)
+        }
+    }
+
+    @Test func streamingProjectorPrefersCamelCaseKeyEvenWhenItArrivesLater() {
+        // 优先级在每次调用时重新裁决：已经在读 translated_text，
+        // 后到的 translatedText 依然要把它顶掉。
+        var session = OpenAIStreamingTranslationProjector.Session()
+        #expect(session.project(from: #"{"translated_text":"备用"#, isAutoDetect: true)?.text == "备用")
+        #expect(
+            session.project(
+                from: #"{"translated_text":"备用","translatedText":"优先"#,
+                isAutoDetect: true
+            )?.text == "优先"
+        )
+    }
+
+    @Test func streamingProjectorRestartsWhenStreamIsRetried() {
+        var session = OpenAIStreamingTranslationProjector.Session()
+        #expect(session.project(from: #"{"translatedText":"第一次请求"#, isAutoDetect: true)?.text == "第一次请求")
+
+        // 兼容性回退或原文回显重试会重新开一条流，累积文本不再是上一次的延续。
+        #expect(session.project(from: #"{"translatedText":"重"#, isAutoDetect: true)?.text == "重")
+        #expect(session.project(from: #"{"translatedText":"重试后的译文"#, isAutoDetect: true)?.text == "重试后的译文")
+    }
+
+    @Test func streamingProjectorPassesThroughWhenNotAutoDetect() {
+        var session = OpenAIStreamingTranslationProjector.Session()
+        #expect(session.project(from: "直接译文", isAutoDetect: false)?.text == "直接译文")
+        #expect(session.project(from: "直接译文更长了", isAutoDetect: false)?.text == "直接译文更长了")
+    }
+
+    /// 逐字符喂入还原器，每一步都必须和一次性 restoreNewlines 的结果完全一致。
+    private func expectStreamingRestoreMatchesOneShot(_ full: String) {
+        var restorer = StreamingNewlineRestorer()
+        var accumulated = ""
+        for character in full {
+            accumulated.append(character)
+            let oneShot = TranslationRequestContext.restoreNewlines(from: accumulated)
+            let streamed = restorer.restore(from: accumulated)
+            #expect(streamed == oneShot, "累积到 \(accumulated.debugDescription) 时结果不一致")
+        }
+    }
+
+    @Test func streamingProjectorMarksKeySwitchAsReplacement() {
+        var session = OpenAIStreamingTranslationProjector.Session()
+
+        // 第一次给出结果：对下游而言也是一次替换（此前什么都没有）。
+        let first = session.project(from: #"{"translated_text":"备用"#, isAutoDetect: true)
+        #expect(first?.text == "备用")
+        #expect(first?.replacesPreviousText == true)
+
+        // 同一个键继续增长是追加。
+        let grown = session.project(from: #"{"translated_text":"备用更多"#, isAutoDetect: true)
+        #expect(grown?.text == "备用更多")
+        #expect(grown?.replacesPreviousText == false)
+
+        // 换到更高优先级的键：整段换掉，必须标成替换，
+        // 否则下游会把两段拼成「备用更多且更长」之类的东西。
+        let switched = session.project(
+            from: #"{"translated_text":"备用更多","translatedText":"优先且更长"#,
+            isAutoDetect: true
+        )
+        #expect(switched?.text == "优先且更长")
+        #expect(switched?.replacesPreviousText == true)
+    }
+
+    /// 投影器与还原器串起来跑，模拟真实链路：只有单独测每一段是发现不了拼接错误的。
+    @Test func streamingProjectorAndRestorerChainSurvivesKeySwitch() {
+        var session = OpenAIStreamingTranslationProjector.Session()
+        var restorer = StreamingNewlineRestorer()
+
+        func visibleText(after rawText: String) -> String? {
+            guard let projection = session.project(from: rawText, isAutoDetect: true) else {
+                return nil
+            }
+            if projection.replacesPreviousText {
+                restorer = StreamingNewlineRestorer()
+            }
+            return restorer.restore(from: projection.text)
+        }
+
+        #expect(visibleText(after: #"{"translated_text":"备用"#) == "备用")
+        #expect(
+            visibleText(after: #"{"translated_text":"备用","translatedText":"优先且更长"#)
+                == "优先且更长"
+        )
+        // 换键之后继续流式追加，换行标记依然要正常还原。
+        #expect(
+            visibleText(
+                after: #"{"translated_text":"备用","translatedText":"优先且更长 [[DAZUO_NL]] 第二行"#
+            ) == "优先且更长\n第二行"
+        )
+    }
+
+    @Test func streamingNewlineRestorerMatchesOneShotCharacterByCharacter() {
+        let marker = TranslationRequestContext.newlineMarker
+        let samples = [
+            "没有任何标记的普通译文",
+            "第一行 \(marker) 第二行",
+            "第一行\(marker)第二行",
+            "连续 \(marker) \(marker) 两个",
+            "\(marker) 开头",
+            " \(marker) 两边都有空格 \(marker) ",
+            "结尾也有 \(marker)",
+            "左边有空格右边没有 \(marker)紧跟",
+            "疑似前缀 [[DAZUO_N 并不是标记",
+            "数组字面量 [[1,2],[3]] 不该被误伤",
+            "表情 😀 \(marker) 后面",
+            marker,
+        ]
+        for sample in samples {
+            expectStreamingRestoreMatchesOneShot(sample)
+        }
+    }
+
+    @Test func streamingNewlineRestorerRestartsWhenStreamIsRetried() {
+        let marker = TranslationRequestContext.newlineMarker
+        var restorer = StreamingNewlineRestorer()
+        #expect(restorer.restore(from: "第一次 \(marker) 请求") == "第一次\n请求")
+
+        // 重试会重新开一条流，还原器必须跟着重头来。
+        #expect(restorer.restore(from: "重") == "重")
+        #expect(restorer.restore(from: "重试 \(marker) 之后") == "重试\n之后")
+    }
 
 }

@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import ScreenCaptureKit
 
 @MainActor
 final class ScreenshotOCRCoordinator: ObservableObject {
@@ -415,10 +416,22 @@ final class ScreenshotOCRCoordinator: ObservableObject {
         var items: [ScreenshotOCRSession.FrozenBackground] = []
         items.reserveCapacity(NSScreen.screens.count)
 
+        // 所有屏幕共用同一次 SCShareableContent 查询，避免每块屏都重新枚举全系统窗口。
+        let content: SCShareableContent
+        do {
+            content = try await ScreenRegionCapture.shareableContent()
+        } catch {
+            log.warn("冻结背景截图失败：\(error.localizedDescription)，将使用实时背景")
+            return []
+        }
+
         for screen in NSScreen.screens {
             let rectInScreen = screen.frame
             do {
-                let image = try await ScreenRegionCapture.capture(rect: rectInScreen)
+                let image = try await ScreenRegionCapture.capture(
+                    rect: rectInScreen,
+                    content: content
+                )
                 // 转换到 selectionWindow content 坐标（左下原点）。
                 let rectInContent = CGRect(
                     x: rectInScreen.minX - virtualFrame.minX,

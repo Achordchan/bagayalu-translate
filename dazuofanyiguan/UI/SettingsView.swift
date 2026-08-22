@@ -3,7 +3,8 @@ import SwiftUI
 
 struct SettingsView: View {
     @EnvironmentObject private var settings: AppSettings
-    @EnvironmentObject private var log: LogStore
+    // 只往下传日志、不读 entries：用不订阅的入口，避免每条日志都让整个视图重新求值。
+    @Environment(\.logStore) private var log
     @EnvironmentObject private var hotkeyMonitor: GlobalHotkeyMonitor
     @EnvironmentObject private var updater: AppUpdaterController
 
@@ -226,7 +227,7 @@ struct SettingsView: View {
     }
 
     private var appVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.2.4"
+        AppVersion.current
     }
 
     private func loadSettings() {

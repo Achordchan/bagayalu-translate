@@ -102,10 +102,13 @@ final class GlobalHotkeyMonitor: ObservableObject {
             }
 
             let refcon = Unmanaged.passUnretained(self).toOpaque()
+            // 这里只监听、从不修改或吞掉事件（回调始终原样返回 event），
+            // 所以用被动 tap：主动 tap 会把本进程插进全系统键盘输入的必经之路上，
+            // 每一次按键都要等我们处理完才投递，卡顿时还会被系统判定超时而停用。
             guard let tap = CGEvent.tapCreate(
                 tap: .cgSessionEventTap,
                 place: .headInsertEventTap,
-                options: .defaultTap,
+                options: .listenOnly,
                 eventsOfInterest: mask,
                 callback: callback,
                 userInfo: refcon

@@ -49,7 +49,7 @@ struct OpenAICompatibleEngine: TranslationEngine {
     let model: String
     let endpointMode: OpenAIEndpointMode
     let onPhaseChange: ((String) -> Void)?
-    let onPartialText: (@MainActor (String) -> Void)?
+    let onPartialText: (@MainActor (_ text: String, _ replacesPreviousText: Bool) -> Void)?
     let session: URLSession
 
     init(
@@ -58,7 +58,7 @@ struct OpenAICompatibleEngine: TranslationEngine {
         model: String,
         endpointMode: OpenAIEndpointMode,
         onPhaseChange: ((String) -> Void)?,
-        onPartialText: (@MainActor (String) -> Void)? = nil,
+        onPartialText: (@MainActor (_ text: String, _ replacesPreviousText: Bool) -> Void)? = nil,
         session: URLSession = .shared
     ) {
         self.baseURL = baseURL
@@ -97,7 +97,7 @@ struct OpenAICompatibleEngine: TranslationEngine {
         systemPrompt: String,
         userPrompt: String,
         temperature: Double,
-        onPartialText: (@MainActor (String) -> Void)? = nil
+        onPartialText: (@MainActor (_ text: String, _ replacesPreviousText: Bool) -> Void)? = nil
     ) async throws -> String {
         do {
             switch endpointMode {
@@ -159,7 +159,7 @@ struct OpenAICompatibleEngine: TranslationEngine {
         transport: OpenAISDKTransport,
         systemPrompt: String,
         userPrompt: String,
-        onPartialText: (@MainActor (String) -> Void)?
+        onPartialText: (@MainActor (_ text: String, _ replacesPreviousText: Bool) -> Void)?
     ) async throws -> String {
         do {
             if let onPartialText {
@@ -399,15 +399,27 @@ struct OpenAICompatibleEngine: TranslationEngine {
         }
 
         onPhaseChange?("正在请求服务端")
-        let streamingTextHandler: (@MainActor (String) -> Void)? = onPartialText.map { callback in
-            { @MainActor accumulatedText in
-                guard let visibleText = OpenAIStreamingTranslationProjector.visibleText(
-                    from: accumulatedText,
-                    isAutoDetect: isAutoDetect
-                ) else { return }
-                callback(visibleText)
+        // 投影器带状态：只解析每个 delta 新增的字符，避免每次都重扫整段累积文本。
+        // 回调本身是 @MainActor 串行执行的，这里用一个盒子承载可变状态即可。
+        let projectorBox = StreamingProjectorBox()
+        let streamingTextHandler: (@MainActor (_ text: String, _ replacesPreviousText: Bool) -> Void)? =
+            onPartialText.map { callback in
+                { @MainActor accumulatedText, replacesPreviousText in
+                    // 新的一条流，或服务端给出的权威全文：增量状态必须先丢掉再重头解析。
+                    if replacesPreviousText {
+                        projectorBox.session = OpenAIStreamingTranslationProjector.Session()
+                    }
+                    guard let projection = projectorBox.session.project(
+                        from: accumulatedText,
+                        isAutoDetect: isAutoDetect
+                    ) else { return }
+                    // 投影器自己换了候选键时，输出同样不是追加，必须一并告诉下游。
+                    callback(
+                        projection.text,
+                        replacesPreviousText || projection.replacesPreviousText
+                    )
+                }
             }
-        }
         let content = try await contentWithCompatibilityFallback(
             transport: transport,
             systemPrompt: systemPrompt,
