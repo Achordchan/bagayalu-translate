@@ -1296,6 +1296,44 @@ struct dazuofanyiguanTests {
         #expect(session.project(from: #"{"translatedText":"hi \ud83d\ude00 ok"#, isAutoDetect: true) == "hi 😀 ok")
     }
 
+    @Test func streamingProjectorFallsBackToSnakeCaseKeyWhenCamelCaseValueIsUnusable() {
+        // 服务商同时返回两个字段、且驼峰字段不是字符串时，要退回下划线字段。
+        // 旧实现靠「解析 translatedText 得到 nil 就试 translated_text」拿到译文，
+        // 增量化之后必须保住这个回退。
+        let samples = [
+            #"{"translatedText":null,"translated_text":"译文"}"#,
+            #"{"translatedText":null,"translated_text":"译文"#,
+            #"{"translatedText":123,"translated_text":"译文"#,
+            #"{"translatedText":[1,2],"translated_text":"译文"#,
+            // 值里含非法转义时，旧实现同样会退到下一个候选键。
+            #"{"translatedText":"坏\q转义","translated_text":"译文"#,
+        ]
+        for sample in samples {
+            var session = OpenAIStreamingTranslationProjector.Session()
+            #expect(session.project(from: sample, isAutoDetect: true) == "译文")
+            #expect(
+                OpenAIStreamingTranslationProjector.visibleText(
+                    from: sample,
+                    isAutoDetect: true
+                ) == "译文"
+            )
+            expectStreamingProjectionMatchesOneShot(sample)
+        }
+    }
+
+    @Test func streamingProjectorPrefersCamelCaseKeyEvenWhenItArrivesLater() {
+        // 优先级在每次调用时重新裁决：已经在读 translated_text，
+        // 后到的 translatedText 依然要把它顶掉。
+        var session = OpenAIStreamingTranslationProjector.Session()
+        #expect(session.project(from: #"{"translated_text":"备用"#, isAutoDetect: true) == "备用")
+        #expect(
+            session.project(
+                from: #"{"translated_text":"备用","translatedText":"优先"#,
+                isAutoDetect: true
+            ) == "优先"
+        )
+    }
+
     @Test func streamingProjectorRestartsWhenStreamIsRetried() {
         var session = OpenAIStreamingTranslationProjector.Session()
         #expect(session.project(from: #"{"translatedText":"第一次请求"#, isAutoDetect: true) == "第一次请求")

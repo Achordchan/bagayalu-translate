@@ -25,36 +25,15 @@ enum OpenAIStreamingTranslationProjector {
     /// 主线程开销随译文长度呈二次增长。这里记住上次扫描停下的位置，只处理新增字符，
     /// 并自行增量解码 JSON 转义，摊还后每个 delta 只付出 O(新增长度) 的代价。
     struct Session {
-        private enum Phase {
-            /// 还没定位到 translatedText 这个键。
-            case searchingKey
-            /// 已找到键，等待 `:`。
-            case awaitingColon
-            /// 已读到 `:`，等待值的起始引号。
-            case awaitingQuote
-            /// 正在读字符串值。
-            case readingValue
-            /// 读到了闭合引号。
-            case finished
-            /// 结构不符合预期，后续一律不再投影（与旧实现返回 nil 的行为一致）。
-            case failed
-        }
+        /// 候选键，按优先级排列。
+        ///
+        /// 旧实现是无状态的：每个 delta 都重新按这个顺序把两个键各试一遍，谁先给出字符串值就用谁。
+        /// 这里给每个键配一个互相独立的增量解析器，同样每次都按优先级取第一个有结果的，
+        /// 只是把「重新试一遍」变成了「各自往前推进新增的那几个字符」。
+        private static let candidateKeys = ["\"translatedText\"", "\"translated_text\""]
 
-        /// `"translatedText"` 带引号共 16 字节，`"translated_text"` 共 17 字节。
-        /// 键有可能被切在两个 delta 中间，因此每次搜索都往回重叠这么多字节。
-        private static let keySearchOverlap = 20
-        private static let primaryKey = "\"translatedText\""
-        private static let fallbackKey = "\"translated_text\""
-
-        private var phase: Phase = .searchingKey
-        /// 已消费到的位置，用 UTF-8 偏移记录（String.Index 不能跨 String 实例复用）。
-        private var scanOffset = 0
-        /// 搜索键时的起始偏移，避免键始终不出现时每次都重扫整段文本。
-        private var keySearchOffset = 0
-        private var decoded = ""
-        /// JSON 用两个 \u 转义表示的代理对，高位先到时先暂存。
-        private var pendingHighSurrogate: UInt32?
-        /// 上一次收到的累积文本长度与结尾指纹，用来确认这次确实是它的延续。
+        private var parsers = candidateKeys.map(KeyValueParser.init(key:))
+        /// 上一次收到的累积文本长度与指纹，用来确认这次确实是它的延续。
         private var seenUTF8Count = 0
         private var seenFingerprint: [UInt8] = []
 
@@ -79,8 +58,59 @@ enum OpenAIStreamingTranslationProjector {
                 endingAt: utf8Count
             )
 
+            for index in parsers.indices {
+                if let value = parsers[index].advance(over: accumulatedText, utf8Count: utf8Count) {
+                    return value
+                }
+            }
+            return nil
+        }
+    }
+
+    /// 单个键的增量解析器，对应旧实现里的 `jsonStringPrefix(forKey:in:)`。
+    ///
+    /// 语义完全一致：找到键、校验 `:` 和起始引号、增量解码字符串值。
+    /// 键还没出现、结构还没读全、或者确定这个键给不出字符串值时，都返回 nil。
+    private struct KeyValueParser {
+        private enum Phase {
+            /// 还没定位到这个键。
+            case searchingKey
+            /// 已找到键，等待 `:`。
+            case awaitingColon
+            /// 已读到 `:`，等待值的起始引号。
+            case awaitingQuote
+            /// 正在读字符串值。
+            case readingValue
+            /// 读到了闭合引号。
+            case finished
+            /// 这个键确定给不出字符串值（值不是字符串，或含非法转义）。
+            ///
+            /// 旧实现只看键的第一次出现，而第一次出现的位置不会随文本增长而改变，
+            /// 所以这个结论是永久的。
+            case failed
+        }
+
+        /// 键有可能被切在两个 delta 中间，因此每次搜索都往回重叠这么多字节。
+        /// `"translated_text"` 带引号共 17 字节，取 20 足够。
+        private static let keySearchOverlap = 20
+
+        private let key: String
+        private var phase: Phase = .searchingKey
+        /// 搜索键时的起始偏移，避免键始终不出现时每次都重扫整段文本。
+        private var keySearchOffset = 0
+        /// 已消费到的位置，用 UTF-8 偏移记录（String.Index 不能跨 String 实例复用）。
+        private var scanOffset = 0
+        private var decoded = ""
+        /// JSON 用两个 \u 转义表示的代理对，高位先到时先暂存。
+        private var pendingHighSurrogate: UInt32?
+
+        init(key: String) {
+            self.key = key
+        }
+
+        mutating func advance(over text: String, utf8Count: Int) -> String? {
             if phase == .searchingKey {
-                locateKey(in: accumulatedText, utf8Count: utf8Count)
+                locateKey(in: text, utf8Count: utf8Count)
             }
 
             switch phase {
@@ -89,12 +119,12 @@ enum OpenAIStreamingTranslationProjector {
             case .finished:
                 return decoded
             case .awaitingColon, .awaitingQuote, .readingValue:
-                consume(accumulatedText, utf8Count: utf8Count)
+                consume(text, utf8Count: utf8Count)
                 switch phase {
                 case .failed:
                     return nil
                 case .awaitingColon, .awaitingQuote:
-                    // 结构还没读全（例如 `:` 还在下一个 delta 里），先不投影。
+                    // 结构还没读全（例如 `:` 还在下一个 delta 里），这个键暂时给不出值。
                     return nil
                 default:
                     return decoded
@@ -105,18 +135,15 @@ enum OpenAIStreamingTranslationProjector {
         private mutating func locateKey(in text: String, utf8Count: Int) {
             let searchStart = index(in: text, atUTF8Offset: keySearchOffset, utf8Count: utf8Count)
 
-            for key in [Self.primaryKey, Self.fallbackKey] {
-                guard let found = text.range(of: key, range: searchStart..<text.endIndex) else {
-                    continue
-                }
+            if let found = text.range(of: key, range: searchStart..<text.endIndex) {
                 scanOffset = text.utf8.distance(from: text.utf8.startIndex, to: found.upperBound)
                 phase = .awaitingColon
                 return
             }
 
             // 没找到就把搜索起点推到接近末尾，只保留一个键长度的重叠。
-            // 从末尾按字符往回退，保证偏移落在字符边界上（UTF-8 偏移若切在多字节字符中间，
-            // 用它构造出来的 String.Index 不能安全地传给字符串 API）。
+            // 从末尾按字符往回退，保证偏移落在字符边界上：UTF-8 偏移若切在多字节字符中间，
+            // 用它构造出来的 String.Index 不能安全地传给字符串 API。
             var boundary = text.endIndex
             var walkedBytes = 0
             while walkedBytes < Self.keySearchOverlap, boundary > text.startIndex {
@@ -147,6 +174,8 @@ enum OpenAIStreamingTranslationProjector {
             }
 
             if phase == .awaitingQuote {
+                // 值不是字符串（例如 translatedText 为 null）时，这个键就废了，
+                // 由 Session 去取下一个候选键的结果。
                 guard let next = skipWhitespace(in: text, from: cursor) else { return }
                 guard text[next] == "\"" else {
                     phase = .failed
@@ -181,8 +210,8 @@ enum OpenAIStreamingTranslationProjector {
                 let escaped = text[escapeIndex]
                 if escaped != "u" {
                     guard let unescaped = Self.simpleEscape(escaped) else {
-                        // 非法转义序列。旧实现会把整段交给 JSONDecoder 并失败返回 nil，
-                        // 这里同样不再投影，保持行为一致。
+                        // 非法转义序列。旧实现此时 JSONDecoder 会解码失败并对这个键返回 nil，
+                        // 外层随即去试下一个键，这里保持一致。
                         phase = .failed
                         return
                     }
