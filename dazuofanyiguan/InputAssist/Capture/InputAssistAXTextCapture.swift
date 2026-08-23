@@ -296,6 +296,29 @@ enum InputAssistAXTextCapture {
         )
     }
 
+    /// 按 UTF-16 范围拼出「替换之后应该长什么样」。
+    ///
+    /// 用来做 AX 写入的精确校验：只有读回来的全文和它逐字相同，
+    /// 才能说这次写确实把完整译文落在了预期位置。
+    /// 范围越界或切在字符中间时返回 nil——算不出期望值就不该动手写。
+    static func replacingRange(
+        in text: String,
+        range: InputAssistTextRange,
+        with replacement: String
+    ) -> String? {
+        guard range.location >= 0, range.length >= 0 else { return nil }
+        guard range.upperBound <= text.utf16.count else { return nil }
+        guard let start = String.Index(utf16Offset: range.location, in: text)
+            .samePosition(in: text),
+            let end = String.Index(utf16Offset: range.upperBound, in: text)
+                .samePosition(in: text),
+            start <= end
+        else {
+            return nil
+        }
+        return text.replacingCharacters(in: start..<end, with: replacement)
+    }
+
     /// 按 UTF-16 范围取子串。范围越界或落在字符中间时返回 nil，绝不返回一个「差不多」的结果。
     static func substring(of text: String, range: InputAssistTextRange) -> String? {
         guard range.location >= 0, range.length >= 0 else { return nil }

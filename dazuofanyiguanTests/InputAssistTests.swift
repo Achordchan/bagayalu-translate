@@ -1875,37 +1875,100 @@ struct InputAssistTests {
         }
     }
 
-    @Test func writeVerificationDistinguishesUnverifiableFromNoChange() {
-        // 回归：AX 写返回 .success 之后读不回 kAXValue（目标 App 忙 / 超时 / 瞬时错误），
-        // 旧实现把这种情况当成「内容没动过」继续走粘贴兜底——
-        // 可写很可能已经生效、选区已经塌缩，于是译文被插进去第二遍。
-        //
-        // 「读不回来」和「读回来但没变」必须是两种结论：前者要中止，后者才能粘贴。
-        #expect(InputAssistReplacementSafetyGuard.AbortReason.writeVerificationUnavailable.rawValue
-            == "writeVerificationUnavailable")
-        #expect(InputAssistReplacementSafetyGuard.AbortReason.writeVerificationUnavailable
-            != .sourceTextChanged)
+    // 这一组直接调用生产判定函数。
+    // 之前那两条只断言枚举 rawValue 和 NSPasteboard 自身的行为——
+    // 把三态分支删掉、把 .unverifiable 重新接回粘贴兜底，它们照样全绿，
+    // 等于对本轮真正修的行为没有任何防护。
+
+    @Test func readBackFailureNeverFallsBackToPaste() {
+        // 回归：AX 写返回 .success 之后读不回 kAXValue（目标 App 忙 / 超时 / 瞬时错误）。
+        // 写很可能已经生效、选区已经塌缩，这时再粘贴就是把译文插进去第二遍。
+        let verification = InputAssistTextReplaceEngine.WriteVerification.classify(
+            valueAfterWrite: nil,
+            valueBeforeWrite: "前面我们可以提供后面",
+            expectedValueAfterWrite: "前面We can provide后面"
+        )
+        #expect(verification == .unverifiable)
+        // 这一条才是真正的不变式：验不了 → 绝不粘贴。
+        #expect(!verification.allowsPasteFallback)
     }
 
-    @MainActor
-    @Test func clipboardMustStillHoldOurTranslationRightBeforePasting() {
+    @Test func onlyTheExactExpectedValueCountsAsASuccessfulWrite() {
+        let before = "前面我们可以提供后面"
+        let expected = "前面We can provide后面"
+
+        #expect(InputAssistTextReplaceEngine.WriteVerification.classify(
+            valueAfterWrite: expected,
+            valueBeforeWrite: before,
+            expectedValueAfterWrite: expected
+        ) == .applied)
+
+        // 一个字都没变 = 目标 App 悄悄忽略了这次调用，选区完好，可以粘贴。
+        let ignored = InputAssistTextReplaceEngine.WriteVerification.classify(
+            valueAfterWrite: before,
+            valueBeforeWrite: before,
+            expectedValueAfterWrite: expected
+        )
+        #expect(ignored == .didNotApply)
+        #expect(ignored.allowsPasteFallback)
+    }
+
+    @Test func aThirdStateMustNotBeMistakenForSuccess() {
+        // 关键回归：「和写之前不一样」**不能**当成功判据。
+        // 读回失败后我们还会等 30ms 重试，这期间用户输入、宿主自动更正、异步编辑，
+        // 任何一样让全文变了，弱判据都会误报成功——哪怕 AX 写其实被忽略、或只写进去一半。
+        let before = "前面我们可以提供后面"
+        let expected = "前面We can provide后面"
+
+        for actual in [
+            "前面我们可以提供后面X",        // 用户在这期间又打了一个字
+            "前面We can provide",          // 只写进去一半
+            "前面WE CAN PROVIDE后面"       // 宿主自动更正改写了
+        ] {
+            let verification = InputAssistTextReplaceEngine.WriteVerification.classify(
+                valueAfterWrite: actual,
+                valueBeforeWrite: before,
+                expectedValueAfterWrite: expected
+            )
+            #expect(verification == .unverifiable, "\(actual) 不该被判成写入成功")
+            #expect(!verification.allowsPasteFallback, "\(actual) 也不该退到粘贴")
+        }
+    }
+
+    @Test func pasteIsNotPostedWhenTheClipboardChangedUnderUs() {
         // 回归：记下 ourChangeCount 之后、按 ⌘V 之前还要跑好几次跨进程 AX 查询，
-        // 那段时间剪贴板管理器完全可能再写一次。不查这一下，
-        // ⌘V 会把别人刚写进来的东西粘到用户的原文位置上。
-        let pasteboard = NSPasteboard(name: NSPasteboard.Name("InputAssistTests.\(UUID().uuidString)"))
-        defer { pasteboard.releaseGlobally() }
+        // 那段时间剪贴板管理器完全可能再写一次。
+        // 直接断言生产判定函数：版本号对不上就不许发按键。
+        #expect(InputAssistTextReplaceEngine.shouldPostPaste(
+            currentChangeCount: 42,
+            expectedChangeCount: 42
+        ))
+        #expect(!InputAssistTextReplaceEngine.shouldPostPaste(
+            currentChangeCount: 43,
+            expectedChangeCount: 42
+        ))
+    }
 
-        pasteboard.clearContents()
-        pasteboard.setString("我们放进去的译文", forType: .string)
-        let ourChangeCount = pasteboard.changeCount
+    @Test func expectedValueAfterWriteIsSplicedByUTF16Range() {
+        let text = "前面内容我们可以提供后面"
+        let range = InputAssistTextRange(location: 4, length: 6)
+        #expect(InputAssistAXTextCapture.replacingRange(
+            in: text,
+            range: range,
+            with: "We can provide"
+        ) == "前面内容We can provide后面")
 
-        // 校验期间第三方改写了剪贴板。
-        pasteboard.clearContents()
-        pasteboard.setString("剪贴板管理器写进来的东西", forType: .string)
-
-        #expect(pasteboard.changeCount != ourChangeCount)
-        // 而且这时不能还原——对方的内容比我们的快照新。
-        #expect(pasteboard.string(forType: .string) == "剪贴板管理器写进来的东西")
+        // 越界或切在代理对中间 → 算不出期望值，就不该动手写。
+        #expect(InputAssistAXTextCapture.replacingRange(
+            in: text,
+            range: InputAssistTextRange(location: 0, length: 999),
+            with: "x"
+        ) == nil)
+        #expect(InputAssistAXTextCapture.replacingRange(
+            in: "报价👍好的",
+            range: InputAssistTextRange(location: 2, length: 1),
+            with: "x"
+        ) == nil)
     }
 
     // MARK: - Apple 并行槽位（PRD §18）
