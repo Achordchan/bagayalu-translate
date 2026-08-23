@@ -110,6 +110,7 @@ enum InputAssistTextReplaceEngine {
                 in: settledElement,
                 valueBeforeWrite: settled.value,
                 expectedSelectedRange: range,
+                expectedSelectedText: session.sourceText,
                 expectedBundleIdentifier: session.appBundleIdentifier
             )
 
@@ -122,6 +123,7 @@ enum InputAssistTextReplaceEngine {
                 in: element,
                 valueBeforeWrite: initial.value,
                 expectedSelectedRange: InputAssistAXTextCapture.selectedRange(element),
+                expectedSelectedText: session.sourceText,
                 expectedBundleIdentifier: session.appBundleIdentifier
             )
         }
@@ -178,6 +180,7 @@ enum InputAssistTextReplaceEngine {
         in element: AXUIElement,
         valueBeforeWrite: String?,
         expectedSelectedRange: InputAssistTextRange?,
+        expectedSelectedText: String?,
         expectedBundleIdentifier: String?
     ) async -> InputAssistReplacementOutcome {
         // 关键：**只有在能验证结果的前提下才尝试 AX 直写。**
@@ -209,6 +212,7 @@ enum InputAssistTextReplaceEngine {
             text,
             in: element,
             expectedSelectedRange: expectedSelectedRange,
+            expectedSelectedText: expectedSelectedText,
             expectedBundleIdentifier: expectedBundleIdentifier
         )
     }
@@ -240,6 +244,7 @@ enum InputAssistTextReplaceEngine {
         _ text: String,
         in element: AXUIElement,
         expectedSelectedRange: InputAssistTextRange?,
+        expectedSelectedText: String?,
         expectedBundleIdentifier: String?
     ) async -> InputAssistReplacementOutcome {
         guard !InputAssistSecureInputGuard.isSecureEventInputEnabled else {
@@ -279,14 +284,22 @@ enum InputAssistTextReplaceEngine {
         // 而且光比 bundle id 不够：**同一个 App 里换个输入框，bundle id 是不变的**。
         // 替换期间自动监听是暂停的，前面那些元素 / 选区校验都覆盖不到这段间隔，
         // 所以这里要把焦点元素和选区一起重新确认一遍。
-        guard isFrontmostApplication(expectedBundleIdentifier),
-              let focusedNow = InputAssistAXTextCapture.focusedElement(),
-              CFEqual(focusedNow, element),
-              expectedSelectedRange == nil
-                || InputAssistAXTextCapture.selectedRange(element) == expectedSelectedRange
-        else {
-            InputAssistPasteboardSnapshot.restore(saved, to: pasteboard)
+        guard isFrontmostApplication(expectedBundleIdentifier) else {
+            restoreIfUntouched(saved, expectedChangeCount: ourChangeCount, on: pasteboard)
             return .aborted(reason: .applicationChanged)
+        }
+        guard let focusedNow = InputAssistAXTextCapture.focusedElement(),
+              CFEqual(focusedNow, element) else {
+            restoreIfUntouched(saved, expectedChangeCount: ourChangeCount, on: pasteboard)
+            return .aborted(reason: .focusedElementChanged)
+        }
+        guard isSelectionUnchanged(
+            in: element,
+            expectedSelectedRange: expectedSelectedRange,
+            expectedSelectedText: expectedSelectedText
+        ) else {
+            restoreIfUntouched(saved, expectedChangeCount: ourChangeCount, on: pasteboard)
+            return .aborted(reason: .selectionChanged)
         }
 
         guard InputAssistKeyboardSynthesizer.press(
@@ -304,6 +317,28 @@ enum InputAssistTextReplaceEngine {
 
     static func isFrontmostApplication(_ bundleIdentifier: String?) -> Bool {
         NSWorkspace.shared.frontmostApplication?.bundleIdentifier == bundleIdentifier
+    }
+
+    /// 选区还是不是我们要替换的那一段。
+    ///
+    /// **拿不到 `AXSelectedTextRange` 的输入面恰恰就是走粘贴兜底的那批**——
+    /// 如果只在 range 可用时才校验，等于在最需要它的地方跳过了校验。
+    /// 所以 range 拿不到时退一步比选中的**文本**；两样都验不了就不放行。
+    static func isSelectionUnchanged(
+        in element: AXUIElement,
+        expectedSelectedRange: InputAssistTextRange?,
+        expectedSelectedText: String?
+    ) -> Bool {
+        if let expectedSelectedRange {
+            return InputAssistAXTextCapture.selectedRange(element) == expectedSelectedRange
+        }
+        if let expectedSelectedText {
+            return InputAssistAXTextCapture.stringAttribute(
+                element,
+                kAXSelectedTextAttribute as String
+            ) == expectedSelectedText
+        }
+        return false
     }
 
     /// 只在剪贴板里还是我们放进去的那份译文时才还原。

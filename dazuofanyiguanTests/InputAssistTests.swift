@@ -1757,6 +1757,62 @@ struct InputAssistTests {
         #expect(sameBundle == sameBundle)
     }
 
+    @MainActor
+    @Test func selectionValidationNeverSilentlySkipsWhenRangeIsUnavailable() {
+        // 回归：拿不到 AXSelectedTextRange 的输入面**恰恰就是走粘贴兜底的那批**。
+        // 旧写法是 `expectedSelectedRange == nil || 范围相等`——
+        // range 为 nil 时整个条件恒真，等于在最需要校验的地方跳过了校验。
+        let element = AXUIElementCreateSystemWide()
+
+        // 两样都验不了 → 绝不放行。
+        #expect(!InputAssistTextReplaceEngine.isSelectionUnchanged(
+            in: element,
+            expectedSelectedRange: nil,
+            expectedSelectedText: nil
+        ))
+
+        // systemWide 元素读不到选区，所以给了期望值也必然对不上——
+        // 关键是它返回 false 而不是 true。
+        #expect(!InputAssistTextReplaceEngine.isSelectionUnchanged(
+            in: element,
+            expectedSelectedRange: nil,
+            expectedSelectedText: "我们可以提供16吨船吊"
+        ))
+        #expect(!InputAssistTextReplaceEngine.isSelectionUnchanged(
+            in: element,
+            expectedSelectedRange: InputAssistTextRange(location: 0, length: 4),
+            expectedSelectedText: nil
+        ))
+    }
+
+    @MainActor
+    @Test func abortPathRestoresClipboardOnlyWhenUntouched() {
+        // 回归：press 前的几道 abort 分支原本是无条件 restore，
+        // 会把用户在这期间复制的新内容覆盖掉。
+        // press 失败和沉降路径早就用的是 restoreIfUntouched，abort 路径漏了。
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("InputAssistTests.\(UUID().uuidString)"))
+        defer { pasteboard.releaseGlobally() }
+
+        pasteboard.clearContents()
+        pasteboard.setString("用户原本的剪贴板", forType: .string)
+        let snapshot = InputAssistPasteboardSnapshot.snapshot(from: pasteboard)
+
+        pasteboard.clearContents()
+        pasteboard.setString("我们放进去的译文", forType: .string)
+        let ourChangeCount = pasteboard.changeCount
+
+        // 中途用户复制了新东西，然后某道检查失败要 abort。
+        pasteboard.clearContents()
+        pasteboard.setString("用户刚复制的新内容", forType: .string)
+
+        InputAssistTextReplaceEngine.restoreIfUntouched(
+            snapshot,
+            expectedChangeCount: ourChangeCount,
+            on: pasteboard
+        )
+        #expect(pasteboard.string(forType: .string) == "用户刚复制的新内容")
+    }
+
     // MARK: - Apple 并行槽位（PRD §18）
 
     @MainActor
