@@ -91,7 +91,8 @@ enum InputAssistTextReplaceEngine {
             return await writeSelection(
                 translatedText,
                 in: settledElement,
-                valueBeforeWrite: settled.value
+                valueBeforeWrite: settled.value,
+                expectedBundleIdentifier: session.appBundleIdentifier
             )
 
         case .replaceSelection:
@@ -101,7 +102,8 @@ enum InputAssistTextReplaceEngine {
             return await writeSelection(
                 translatedText,
                 in: element,
-                valueBeforeWrite: initial.value
+                valueBeforeWrite: initial.value,
+                expectedBundleIdentifier: session.appBundleIdentifier
             )
         }
     }
@@ -155,7 +157,8 @@ enum InputAssistTextReplaceEngine {
     private static func writeSelection(
         _ text: String,
         in element: AXUIElement,
-        valueBeforeWrite: String?
+        valueBeforeWrite: String?,
+        expectedBundleIdentifier: String?
     ) async -> InputAssistReplacementOutcome {
         // 关键：**只有在能验证结果的前提下才尝试 AX 直写。**
         //
@@ -182,7 +185,7 @@ enum InputAssistTextReplaceEngine {
             // （Chromium 系会接受 set 然后悄悄忽略它）。两种都没有动过文字，
             // 选区仍然圈着原文，粘贴是安全的。
         }
-        return await pasteReplace(text)
+        return await pasteReplace(text, expectedBundleIdentifier: expectedBundleIdentifier)
     }
 
     /// `err == .success` 完全不能证明文字真的被改了——必须读回来和写之前比一比。
@@ -208,9 +211,20 @@ enum InputAssistTextReplaceEngine {
     /// 合成 ⌘V 替换当前选区。
     ///
     /// 走粘贴而不是逐字重打，是为了尽量落进宿主 App 自己的 Undo 栈（PRD §28.1）。
-    private static func pasteReplace(_ text: String) async -> InputAssistReplacementOutcome {
+    private static func pasteReplace(
+        _ text: String,
+        expectedBundleIdentifier: String?
+    ) async -> InputAssistReplacementOutcome {
         guard !InputAssistSecureInputGuard.isSecureEventInputEnabled else {
             return .aborted(reason: .secureInputActive)
+        }
+
+        // 合成的 ⌘V 是发给**此刻**的前台 App 的，这是整个功能里最危险的一个动作。
+        // 调用方虽然刚校验过，但那是几步之前的事——把这条不变式做成自守，
+        // 而不是指望每个调用路径都记得先查一遍。
+        guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+            == expectedBundleIdentifier else {
+            return .aborted(reason: .applicationChanged)
         }
 
         let pasteboard = NSPasteboard.general
