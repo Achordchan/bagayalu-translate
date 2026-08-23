@@ -1351,6 +1351,130 @@ struct InputAssistTests {
         #expect(identifiers.count == InputAssistShortcut.selectableOptions.count)
     }
 
+    // MARK: - Codex 第三轮 review 的回归
+
+    @Test func caretMovementIsDistinguishedFromTypingByValueLength() {
+        // 回归：只挡「往回删过起点」是不够的。在已有文字中间打完中文再按一下 →，
+        // 锚点还停在原处、待触发任务也还在，算出来的 source range 会一路延伸到光标，
+        // 把用户原本就有的文字圈进去。
+        //
+        // 但也不能一见光标前进就重置——打字本身就会让光标前进。
+        // 区分办法：伴随编辑的移动会改变全文长度，纯导航不会。
+
+        // 打字：全文变长，光标前进 → 算「跟着编辑走」。
+        #expect(InputAssistCaretMovement.classify(
+            previousValueUTF16Count: 10,
+            previousCaretUTF16Offset: 4,
+            currentValueUTF16Count: 12,
+            currentCaretUTF16Offset: 6
+        ) == .followsEdit)
+
+        // 按 →：全文长度不变，光标前进 → 导航，锚点作废。
+        #expect(InputAssistCaretMovement.classify(
+            previousValueUTF16Count: 12,
+            previousCaretUTF16Offset: 6,
+            currentValueUTF16Count: 12,
+            currentCaretUTF16Offset: 7
+        ) == .navigation)
+
+        // 按 ←：同样是导航。
+        #expect(InputAssistCaretMovement.classify(
+            previousValueUTF16Count: 12,
+            previousCaretUTF16Offset: 6,
+            currentValueUTF16Count: 12,
+            currentCaretUTF16Offset: 2
+        ) == .navigation)
+
+        // 删除：全文变短 → 跟着编辑走（是否越过起点由调用方另行判断）。
+        #expect(InputAssistCaretMovement.classify(
+            previousValueUTF16Count: 12,
+            previousCaretUTF16Offset: 6,
+            currentValueUTF16Count: 11,
+            currentCaretUTF16Offset: 5
+        ) == .followsEdit)
+
+        #expect(InputAssistCaretMovement.classify(
+            previousValueUTF16Count: 12,
+            previousCaretUTF16Offset: 6,
+            currentValueUTF16Count: 12,
+            currentCaretUTF16Offset: 6
+        ) == .unchanged)
+    }
+
+    @Test func forwardCaretMoveWouldHaveSweptInPreExistingText() {
+        // 把上面那个场景算成具体范围，说明为什么必须作废。
+        // 已有 "前面内容XXXX"，在第 4 位插入「你好」，然后按一下 →。
+        let value = "前面内容你好XXXX"
+        let burstStart = 4
+        let caretAfterTyping = 6
+        let caretAfterPressingRight = 7
+
+        let correct = InputAssistSentenceBoundary.autoTriggerSourceRange(
+            in: value,
+            burstStartUTF16Offset: burstStart,
+            caretUTF16Offset: caretAfterTyping
+        )
+        #expect(correct.map { InputAssistAXTextCapture.substring(of: value, range: $0) } == "你好")
+
+        // 光标前移之后如果还用同一个锚点，就会把原有的 "X" 也圈进来——
+        // 接受这个候选等于替换掉用户这轮根本没输入过的内容。
+        let contaminated = InputAssistSentenceBoundary.autoTriggerSourceRange(
+            in: value,
+            burstStartUTF16Offset: burstStart,
+            caretUTF16Offset: caretAfterPressingRight
+        )
+        #expect(
+            contaminated.map { InputAssistAXTextCapture.substring(of: value, range: $0) } == "你好X"
+        )
+    }
+
+    @Test func revalidationAfterTheSettleDelayCatchesAFocusSwitch() {
+        // 回归：选区沉降那 40ms 里用户可能点走或者 ⌘Tab。
+        // 之前只在睡之前验过一次，睡醒直接写——粘贴兜底尤其危险，
+        // 合成的 ⌘V 是发给**此刻**的前台 App 的。
+        //
+        // 这里验的是「睡醒后重跑同一套校验会拦下来」这个前提。
+        let range = InputAssistTextRange(location: 0, length: 2)
+
+        let beforeSleep = InputAssistReplacementSafetyGuard.validate(
+            expectedSourceText: "好的",
+            sourceRange: range,
+            currentElementValue: "好的",
+            currentSelectedText: "好的",
+            hasFocusedElement: true,
+            isFocusedElementUnchanged: true,
+            isFrontmostApplicationUnchanged: true,
+            isSecureEventInputEnabled: false
+        )
+        #expect(beforeSleep == .replaceRange(range))
+
+        // 睡醒之后：用户 ⌘Tab 走了。
+        let afterAppSwitch = InputAssistReplacementSafetyGuard.validate(
+            expectedSourceText: "好的",
+            sourceRange: range,
+            currentElementValue: "好的",
+            currentSelectedText: "好的",
+            hasFocusedElement: true,
+            isFocusedElementUnchanged: true,
+            isFrontmostApplicationUnchanged: false,
+            isSecureEventInputEnabled: false
+        )
+        #expect(afterAppSwitch == .abort(reason: .applicationChanged))
+
+        // 或者只是点到了同一个 App 的另一个输入框。
+        let afterFocusSwitch = InputAssistReplacementSafetyGuard.validate(
+            expectedSourceText: "好的",
+            sourceRange: range,
+            currentElementValue: "好的",
+            currentSelectedText: "好的",
+            hasFocusedElement: true,
+            isFocusedElementUnchanged: false,
+            isFrontmostApplicationUnchanged: true,
+            isSecureEventInputEnabled: false
+        )
+        #expect(afterFocusSwitch == .abort(reason: .focusedElementChanged))
+    }
+
     // MARK: - Apple 并行槽位（PRD §18）
 
     @MainActor

@@ -257,6 +257,14 @@ final class InputAssistCoordinator: ObservableObject {
         guard settings.isEnabled else { return }
         guard let appSettings else { return }
 
+        // 替换正在进行时不能再开一轮：选区沉降和粘贴沉降都是 await，
+        // 这中间按快捷键会建出第二个 session，而旧的替换任务收尾时
+        // 会把 currentSession 清掉，新浮层就变成一个既收不到结果、也提交不了的空壳。
+        guard !isReplacing else {
+            log?.info("Input Assist 正在替换中，忽略这次手动触发")
+            return
+        }
+
         guard isAccessibilityTrusted else {
             lastStatusMessage = "需要辅助功能权限才能使用输入增强"
             toast?.show("输入增强需要辅助功能权限", style: .warning)
@@ -381,8 +389,12 @@ final class InputAssistCoordinator: ObservableObject {
                 session: session,
                 with: translatedText
             )
-            self.currentSession = nil
-            self.currentRequest = nil
+            // 只清理**自己这一轮**留下的东西。
+            // 无条件清空的话，万一期间已经开了新一轮，会把新 session 一起抹掉。
+            if self.currentSession?.sessionID == session.sessionID {
+                self.currentSession = nil
+                self.currentRequest = nil
+            }
 
             // 替换完成后从当前光标重新起一轮，避免刚写进去的译文被算成新输入。
             self.autoTrigger.resetBurst()

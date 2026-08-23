@@ -28,35 +28,24 @@ enum InputAssistTextReplaceEngine {
     static let pasteSettleNanoseconds: UInt64 = 250_000_000
     static let selectionSettleNanoseconds: UInt64 = 40_000_000
 
+    /// 某一刻读到的目标状态 + 对应的裁决。
+    private struct Evaluation {
+        let element: AXUIElement?
+        let value: String?
+        let verdict: InputAssistReplacementSafetyGuard.Verdict
+    }
+
     static func replace(
         session: CandidateSession,
         with translatedText: String
     ) async -> InputAssistReplacementOutcome {
-        let currentElement = InputAssistAXTextCapture.focusedElement()
-        let currentValue = currentElement.flatMap {
-            InputAssistAXTextCapture.stringAttribute($0, kAXValueAttribute as String)
-        }
-        let currentSelectedText = currentElement.flatMap {
-            InputAssistAXTextCapture.stringAttribute($0, kAXSelectedTextAttribute as String)
-        }
-        let frontmostBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        let initial = evaluate(session: session)
 
-        let verdict = InputAssistReplacementSafetyGuard.validate(
-            expectedSourceText: session.sourceText,
-            sourceRange: session.sourceRange,
-            currentElementValue: currentValue,
-            currentSelectedText: currentSelectedText,
-            hasFocusedElement: currentElement != nil,
-            isFocusedElementUnchanged: currentElement.map { CFEqual($0, session.element) } ?? false,
-            isFrontmostApplicationUnchanged: frontmostBundleID == session.appBundleIdentifier,
-            isSecureEventInputEnabled: InputAssistSecureInputGuard.isSecureEventInputEnabled
-        )
-
-        guard let element = currentElement else {
+        guard let element = initial.element else {
             return .aborted(reason: .focusLost)
         }
 
-        switch verdict {
+        switch initial.verdict {
         case .abort(let reason):
             return .aborted(reason: reason)
 
@@ -66,19 +55,59 @@ enum InputAssistTextReplaceEngine {
                 return .failed(message: "无法选中要替换的文本范围")
             }
             try? await Task.sleep(nanoseconds: selectionSettleNanoseconds)
+
+            // 这一觉睡下去的功夫，用户完全可能点到别的输入框或者 ⌘Tab 换了 App。
+            // 之前那次校验是在睡之前做的，对现在这一刻不作数——必须重新验一遍。
+            // 粘贴兜底尤其危险：合成的 ⌘V 是发给**此刻**的前台 App 的。
+            let settled = evaluate(session: session)
+            guard let settledElement = settled.element else {
+                return .aborted(reason: .focusLost)
+            }
+            guard CFEqual(settledElement, element) else {
+                return .aborted(reason: .focusedElementChanged)
+            }
+            if case .abort(let reason) = settled.verdict {
+                return .aborted(reason: reason)
+            }
             return await writeSelection(
                 translatedText,
-                in: element,
-                valueBeforeWrite: currentValue
+                in: settledElement,
+                valueBeforeWrite: settled.value
             )
 
         case .replaceSelection:
             return await writeSelection(
                 translatedText,
                 in: element,
-                valueBeforeWrite: currentValue
+                valueBeforeWrite: initial.value
             )
         }
+    }
+
+    private static func evaluate(session: CandidateSession) -> Evaluation {
+        let element = InputAssistAXTextCapture.focusedElement()
+        let value = element.flatMap {
+            InputAssistAXTextCapture.stringAttribute($0, kAXValueAttribute as String)
+        }
+        let selectedText = element.flatMap {
+            InputAssistAXTextCapture.stringAttribute($0, kAXSelectedTextAttribute as String)
+        }
+        let frontmostBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+
+        return Evaluation(
+            element: element,
+            value: value,
+            verdict: InputAssistReplacementSafetyGuard.validate(
+                expectedSourceText: session.sourceText,
+                sourceRange: session.sourceRange,
+                currentElementValue: value,
+                currentSelectedText: selectedText,
+                hasFocusedElement: element != nil,
+                isFocusedElementUnchanged: element.map { CFEqual($0, session.element) } ?? false,
+                isFrontmostApplicationUnchanged: frontmostBundleID == session.appBundleIdentifier,
+                isSecureEventInputEnabled: InputAssistSecureInputGuard.isSecureEventInputEnabled
+            )
+        )
     }
 
     // MARK: - Private

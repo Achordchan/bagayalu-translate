@@ -8,6 +8,38 @@ struct InputAssistTypingBurst {
     /// 这轮输入开始时光标在控件全文里的 UTF-16 偏移。
     let startCaretUTF16Offset: Int
     let appBundleIdentifier: String?
+
+    /// 上一次看到的全文长度和光标位置。
+    ///
+    /// 用来区分「光标动了是因为刚插入了文字」和「用户自己把光标挪走了」：
+    /// 前者全文长度会变，后者不会。见 `InputAssistCaretMovement`。
+    var lastValueUTF16Count: Int
+    var lastCaretUTF16Offset: Int
+}
+
+/// 光标变化的性质判定（纯函数，可单测）。
+enum InputAssistCaretMovement: Equatable {
+    /// 伴随文本编辑的光标移动——打字本身就会让光标前进，不能当成「用户挪走了光标」。
+    case followsEdit
+    /// 用户自己移动了光标（方向键、点击、⌘←…）。这轮输入的锚点随即作废。
+    case navigation
+    /// 什么都没变。
+    case unchanged
+
+    static func classify(
+        previousValueUTF16Count: Int,
+        previousCaretUTF16Offset: Int,
+        currentValueUTF16Count: Int,
+        currentCaretUTF16Offset: Int
+    ) -> InputAssistCaretMovement {
+        guard currentValueUTF16Count == previousValueUTF16Count else {
+            return .followsEdit
+        }
+        guard currentCaretUTF16Offset == previousCaretUTF16Offset else {
+            return .navigation
+        }
+        return .unchanged
+    }
 }
 
 /// 自动触发（PRD §7.1 / §8 / §29）。
@@ -144,13 +176,40 @@ final class InputAssistAutoTriggerController {
         guard !isSuspended else { return }
         onSourceInvalidated?()
 
-        // 光标被挪到了这轮输入起点之前：之前记的锚点已经没有意义了，重新起一轮。
         guard let burst, CFEqual(burst.element, element) else {
             beginBurst(at: element)
             return
         }
-        guard let caret = InputAssistAXTextCapture.selectedRange(element)?.location else { return }
-        if caret < burst.startCaretUTF16Offset {
+        guard let caret = InputAssistAXTextCapture.selectedRange(element)?.location,
+              let value = InputAssistAXTextCapture.stringAttribute(
+                  element,
+                  kAXValueAttribute as String
+              )
+        else {
+            return
+        }
+
+        switch InputAssistCaretMovement.classify(
+            previousValueUTF16Count: burst.lastValueUTF16Count,
+            previousCaretUTF16Offset: burst.lastCaretUTF16Offset,
+            currentValueUTF16Count: value.utf16.count,
+            currentCaretUTF16Offset: caret
+        ) {
+        case .unchanged:
+            return
+
+        case .followsEdit:
+            // 打字本身就会让光标前进，这不算「用户挪走了光标」。
+            self.burst?.lastValueUTF16Count = value.utf16.count
+            self.burst?.lastCaretUTF16Offset = caret
+
+        case .navigation:
+            // 用户自己动了光标——**往前往后都一样**。
+            //
+            // 只挡「往回删过起点」是不够的：在已有文字中间打完中文再按一下 →，
+            // 锚点还停在原处、待触发的任务也还在，等 debounce 到点算出来的
+            // source range 就会从锚点一路延伸到光标，把用户原本就有的文字圈进去。
+            // 接受那个候选等于替换掉这轮根本没输入过的内容。
             beginBurst(at: element)
         }
     }
@@ -171,6 +230,11 @@ final class InputAssistAutoTriggerController {
         else {
             return
         }
+        // 先把「上次看到的样子」更新掉，让 handleSelectionChanged 能正确区分
+        // 「光标是被这次编辑带着走的」还是「用户自己挪的」。
+        self.burst?.lastValueUTF16Count = value.utf16.count
+        self.burst?.lastCaretUTF16Offset = caret
+
         guard caret > burst.startCaretUTF16Offset else {
             // 删到了起点之前（或光标跳走了），重新起一轮。
             beginBurst(at: element)
@@ -216,10 +280,16 @@ final class InputAssistAutoTriggerController {
             burst = nil
             return
         }
+        let valueLength = InputAssistAXTextCapture.stringAttribute(
+            element,
+            kAXValueAttribute as String
+        )?.utf16.count ?? 0
         burst = InputAssistTypingBurst(
             element: element,
             startCaretUTF16Offset: caret,
-            appBundleIdentifier: NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+            appBundleIdentifier: NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+            lastValueUTF16Count: valueLength,
+            lastCaretUTF16Offset: caret
         )
     }
 
