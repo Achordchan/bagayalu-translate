@@ -1813,6 +1813,54 @@ struct InputAssistTests {
         #expect(pasteboard.string(forType: .string) == "用户刚复制的新内容")
     }
 
+    @Test func bareDomainUrlsAreNotTranslatable() {
+        // 回归：`example.com/产品` 既不带 http:// 前缀也不含 ://，旧实现判不出是 URL。
+        // 而它路径里带中文，会被自动触发当成「新增了中文」——
+        // 于是在一条 URL 中间弹候选，甚至替换掉其中一段。
+        for url in [
+            "example.com/产品",
+            "example.com",
+            "shop.example.co/列表",
+            "my-site.cn/关于我们"
+        ] {
+            #expect(InputAssistSentenceBoundary.looksLikeURL(url), "\(url) 应当被识别为 URL")
+            #expect(!InputAssistSentenceBoundary.looksTranslatable(url), "\(url) 不该可翻译")
+        }
+    }
+
+    @Test func bareDomainDetectionDoesNotSwallowOrdinaryText() {
+        // 别把上一条修过头了。
+        for text in [
+            "12.5",                      // 小数
+            "我们提供16吨船吊.价格面议",   // 顶级域不是 ASCII 字母
+            "我们可以提供16吨船吊",        // 压根没有点
+            "总价 12.5 万美元"            // 有空格，不是单 token
+        ] {
+            #expect(
+                !InputAssistSentenceBoundary.looksLikeBareDomain(text),
+                "\(text) 不该被当成域名"
+            )
+        }
+        #expect(InputAssistSentenceBoundary.looksTranslatable("我们提供16吨船吊.价格面议"))
+    }
+
+    @MainActor
+    @Test func targetValidationCoversAppFocusAndSelectionTogether() {
+        // 回归：AX 写之前也要重新确认——`isSettable` 是跨进程查询，
+        // 目标 App 忙的时候能卡上好几秒，之前那次校验早就过期了。
+        //
+        // 三样任意一样对不上都要给出对应的 abort 原因，而不是笼统地报一个。
+        let element = AXUIElementCreateSystemWide()
+
+        // 前台 App 对不上 → applicationChanged（最先短路）。
+        #expect(InputAssistTextReplaceEngine.invalidTargetReason(
+            element: element,
+            expectedSelectedRange: nil,
+            expectedSelectedText: "好的",
+            expectedBundleIdentifier: "com.example.definitely-not-frontmost"
+        ) == .applicationChanged)
+    }
+
     // MARK: - Apple 并行槽位（PRD §18）
 
     @MainActor

@@ -149,9 +149,34 @@ enum InputAssistSentenceBoundary {
         if lowered.hasPrefix("http://") || lowered.hasPrefix("https://") || lowered.hasPrefix("www.") {
             return true
         }
-        // 单个 token 且带域名点号，例如 example.com/path
         guard !text.contains(where: { $0.isWhitespace }) else { return false }
-        return lowered.contains("://")
+        if lowered.contains("://") { return true }
+        return looksLikeBareDomain(text)
+    }
+
+    /// 不带协议头的域名，例如 `example.com/产品`。
+    ///
+    /// 这种写法很常见，而且**因为路径里可能带中文，会被自动触发当成"新增了中文"**——
+    /// 只判断 `http://` 前缀和 `://` 的话，正好把它漏掉，
+    /// 结果是在一条 URL 中间弹候选、甚至替换掉其中一段。
+    static func looksLikeBareDomain(_ text: String) -> Bool {
+        guard !text.contains(where: { $0.isWhitespace }) else { return false }
+        // 只看路径 / 查询之前的主机名部分。
+        let host = text.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false)[0]
+        let labels = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard labels.count >= 2 else { return false }
+
+        // 顶级域必须是两个以上的 ASCII 字母：这样 "12.5" 这类小数不会被误判。
+        guard let topLevel = labels.last,
+              topLevel.count >= 2,
+              topLevel.allSatisfy({ $0.isASCII && $0.isLetter })
+        else {
+            return false
+        }
+        // 其余各段是 ASCII 字母数字或连字符，于是「我们提供16吨船吊.价格面议」不会中招。
+        return labels.dropLast().allSatisfy { label in
+            !label.isEmpty && label.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-") }
+        }
     }
 
     static func looksLikeEmail(_ text: String) -> Bool {

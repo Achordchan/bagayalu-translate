@@ -196,6 +196,18 @@ enum InputAssistTextReplaceEngine {
 
         if canVerifyWrite,
            InputAssistAXTextCapture.isSettable(element, kAXSelectedTextAttribute as String) {
+            // `isSettable` 是跨进程 AX 查询，目标 App 忙的时候能卡上好几秒。
+            // 这期间用户完全可能挪光标、换输入框、切 App，
+            // 之前那次校验到这里已经过期了。写之前必须重来一次。
+            if let reason = invalidTargetReason(
+                element: element,
+                expectedSelectedRange: expectedSelectedRange,
+                expectedSelectedText: expectedSelectedText,
+                expectedBundleIdentifier: expectedBundleIdentifier
+            ) {
+                return .aborted(reason: reason)
+            }
+
             let error = AXUIElementSetAttributeValue(
                 element,
                 kAXSelectedTextAttribute as CFString,
@@ -284,22 +296,14 @@ enum InputAssistTextReplaceEngine {
         // 而且光比 bundle id 不够：**同一个 App 里换个输入框，bundle id 是不变的**。
         // 替换期间自动监听是暂停的，前面那些元素 / 选区校验都覆盖不到这段间隔，
         // 所以这里要把焦点元素和选区一起重新确认一遍。
-        guard isFrontmostApplication(expectedBundleIdentifier) else {
-            restoreIfUntouched(saved, expectedChangeCount: ourChangeCount, on: pasteboard)
-            return .aborted(reason: .applicationChanged)
-        }
-        guard let focusedNow = InputAssistAXTextCapture.focusedElement(),
-              CFEqual(focusedNow, element) else {
-            restoreIfUntouched(saved, expectedChangeCount: ourChangeCount, on: pasteboard)
-            return .aborted(reason: .focusedElementChanged)
-        }
-        guard isSelectionUnchanged(
-            in: element,
+        if let reason = invalidTargetReason(
+            element: element,
             expectedSelectedRange: expectedSelectedRange,
-            expectedSelectedText: expectedSelectedText
-        ) else {
+            expectedSelectedText: expectedSelectedText,
+            expectedBundleIdentifier: expectedBundleIdentifier
+        ) {
             restoreIfUntouched(saved, expectedChangeCount: ourChangeCount, on: pasteboard)
-            return .aborted(reason: .selectionChanged)
+            return .aborted(reason: reason)
         }
 
         guard InputAssistKeyboardSynthesizer.press(
@@ -317,6 +321,37 @@ enum InputAssistTextReplaceEngine {
 
     static func isFrontmostApplication(_ bundleIdentifier: String?) -> Bool {
         NSWorkspace.shared.frontmostApplication?.bundleIdentifier == bundleIdentifier
+    }
+
+    /// 目标是不是还是那个目标：前台 App、焦点元素、选区，一次全查。
+    ///
+    /// 返回 nil 表示可以往下走；否则给出该报的 abort 原因。
+    ///
+    /// **每一个可能变慢的调用前后都要重来一次。** 这段代码本质上是在和用户的
+    /// 实时操作赛跑：跨进程 AX 查询（`isSettable` 默认超时能到数秒）、
+    /// 剪贴板深拷贝、`Task.sleep`——任何一个之后，之前那次校验就已经过期了。
+    /// 而替换期间自动监听是暂停的，没有别人会替我们发现焦点变了。
+    static func invalidTargetReason(
+        element: AXUIElement,
+        expectedSelectedRange: InputAssistTextRange?,
+        expectedSelectedText: String?,
+        expectedBundleIdentifier: String?
+    ) -> InputAssistReplacementSafetyGuard.AbortReason? {
+        guard isFrontmostApplication(expectedBundleIdentifier) else {
+            return .applicationChanged
+        }
+        guard let focusedNow = InputAssistAXTextCapture.focusedElement(),
+              CFEqual(focusedNow, element) else {
+            return .focusedElementChanged
+        }
+        guard isSelectionUnchanged(
+            in: element,
+            expectedSelectedRange: expectedSelectedRange,
+            expectedSelectedText: expectedSelectedText
+        ) else {
+            return .selectionChanged
+        }
+        return nil
     }
 
     /// 选区还是不是我们要替换的那一段。
