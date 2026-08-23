@@ -71,6 +71,11 @@ struct dazuofanyiguanApp: App {
                 .environmentObject(screenshotOCR)
                 .environmentObject(inputAssistSettings)
                 .environmentObject(inputAssistCoordinator)
+                .inputAssistTestWindowOpener()
+                .inputAssistOnboarding(
+                    settings: inputAssistSettings,
+                    coordinator: inputAssistCoordinator
+                )
                 .onAppear {
                     inputAssistCoordinator.activate(
                         appSettings: settings,

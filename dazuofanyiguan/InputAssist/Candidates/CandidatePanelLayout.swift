@@ -28,7 +28,7 @@ enum CandidatePanelLayout {
             return 1
         case .failed:
             return 1
-        case .translated(let text, _, _):
+        case .translated(let text, _, _, _):
             let wrapped = text
                 .split(separator: "\n", omittingEmptySubsequences: false)
                 .reduce(into: 0) { total, paragraph in

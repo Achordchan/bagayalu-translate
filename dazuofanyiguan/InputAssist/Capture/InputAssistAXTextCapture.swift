@@ -18,6 +18,9 @@ struct InputAssistCapture {
     let role: String?
     /// 光标 / 选区在屏幕上的矩形（Cocoa 坐标），用于浮层定位。
     let anchorRect: CGRect
+    /// 锚点是不是精确的插入点（PRD §16.1 Level 1）。
+    /// 只拿到控件位置或鼠标位置时为 false，对应能力等级要降一档。
+    let hasPreciseCaretBounds: Bool
 }
 
 /// 跨 App 的 AX 文本读取。
@@ -93,23 +96,26 @@ enum InputAssistAXTextCapture {
     static func anchorRect(
         element: AXUIElement,
         range: InputAssistTextRange?
-    ) -> CGRect {
+    ) -> (rect: CGRect, isPrecise: Bool) {
         let primaryMaxY = CandidatePanelPositioner.primaryScreenMaxY()
 
+        // Level 1：拿得到精确插入点。
         if let range, let bounds = boundsForRange(element: element, range: range) {
-            return CandidatePanelPositioner.cocoaRect(
-                fromAXRect: bounds,
-                primaryScreenMaxY: primaryMaxY
+            return (
+                CandidatePanelPositioner.cocoaRect(fromAXRect: bounds, primaryScreenMaxY: primaryMaxY),
+                true
             )
         }
+        // Level 2：只知道控件在哪。
         if let frame = elementFrame(element) {
-            return CandidatePanelPositioner.cocoaRect(
-                fromAXRect: frame,
-                primaryScreenMaxY: primaryMaxY
+            return (
+                CandidatePanelPositioner.cocoaRect(fromAXRect: frame, primaryScreenMaxY: primaryMaxY),
+                false
             )
         }
+        // Level 3：退到鼠标位置。
         let mouse = NSEvent.mouseLocation
-        return CGRect(x: mouse.x, y: mouse.y - 4, width: 1, height: 18)
+        return (CGRect(x: mouse.x, y: mouse.y - 4, width: 1, height: 18), false)
     }
 
     static func boundsForRange(
@@ -194,6 +200,7 @@ enum InputAssistAXTextCapture {
                 guard let range else { return nil }
                 return InputAssistSentenceBoundary.context(in: value, sourceRange: range)
             } ?? selectedText
+            let anchor = anchorRect(element: element, range: range)
             return InputAssistCapture(
                 element: element,
                 sourceText: selectedText,
@@ -202,7 +209,8 @@ enum InputAssistAXTextCapture {
                 context: context,
                 capability: capability,
                 role: role,
-                anchorRect: anchorRect(element: element, range: range)
+                anchorRect: anchor.rect,
+                hasPreciseCaretBounds: anchor.isPrecise
             )
         }
 
@@ -219,6 +227,7 @@ enum InputAssistAXTextCapture {
             return nil
         }
 
+        let anchor = anchorRect(element: element, range: sentence)
         return InputAssistCapture(
             element: element,
             sourceText: sourceText,
@@ -227,7 +236,53 @@ enum InputAssistAXTextCapture {
             context: InputAssistSentenceBoundary.context(in: elementValue, sourceRange: sentence),
             capability: capability,
             role: role,
-            anchorRect: anchorRect(element: element, range: sentence)
+            anchorRect: anchor.rect,
+            hasPreciseCaretBounds: anchor.isPrecise
+        )
+    }
+
+    /// 自动触发的取词：范围由「这轮输入的起点」和「当前句」共同决定。
+    static func captureForAutoTrigger(
+        element: AXUIElement,
+        burstStartUTF16Offset: Int
+    ) -> InputAssistCapture? {
+        let role = stringAttribute(element, kAXRoleAttribute as String)
+        let subrole = stringAttribute(element, kAXSubroleAttribute as String)
+        guard InputAssistSecureInputGuard.allowsAutomation(
+            role: role,
+            subrole: subrole,
+            isSecureEventInputEnabled: InputAssistSecureInputGuard.isSecureEventInputEnabled
+        ) else {
+            return nil
+        }
+
+        let capability = capability(of: element)
+        guard capability != .unavailable else { return nil }
+
+        guard let value = stringAttribute(element, kAXValueAttribute as String),
+              let caret = selectedRange(element)?.location,
+              let range = InputAssistSentenceBoundary.autoTriggerSourceRange(
+                  in: value,
+                  burstStartUTF16Offset: burstStartUTF16Offset,
+                  caretUTF16Offset: caret
+              ),
+              let sourceText = substring(of: value, range: range),
+              InputAssistSentenceBoundary.looksTranslatable(sourceText)
+        else {
+            return nil
+        }
+
+        let anchor = anchorRect(element: element, range: range)
+        return InputAssistCapture(
+            element: element,
+            sourceText: sourceText,
+            sourceRange: range,
+            elementValue: value,
+            context: InputAssistSentenceBoundary.context(in: value, sourceRange: range),
+            capability: capability,
+            role: role,
+            anchorRect: anchor.rect,
+            hasPreciseCaretBounds: anchor.isPrecise
         )
     }
 

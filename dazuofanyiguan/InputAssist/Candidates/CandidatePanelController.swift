@@ -39,6 +39,7 @@ final class CandidatePanelController {
     private var inputSourceObserver: (any NSObjectProtocol)?
 
     private(set) var isVisible = false
+    private var anchorRect: CGRect = .zero
 
     init() {
         model.onCommitRow = { [weak self] index in
@@ -78,6 +79,7 @@ final class CandidatePanelController {
         model.state = CandidateListState(languageCodes: languageCodes)
         model.showsDebugInfo = false
         model.showsCacheBadge = showsCacheBadge
+        self.anchorRect = anchorRect
 
         panel.applyAppearance(appearance)
         panel.present(
@@ -141,10 +143,9 @@ final class CandidatePanelController {
             showsDebugInfo: model.showsDebugInfo
         )
         guard panel.frame.size != size else { return }
-        // 顶边固定，向下生长，避免浮层在光标上方来回跳。
-        let topLeft = CGPoint(x: panel.frame.minX, y: panel.frame.maxY)
-        panel.setContentSize(size)
-        panel.setFrameTopLeftPoint(topLeft)
+        // 重新跑一遍定位而不是就地把顶边钉住：高亮行展开到 4 行时浮层会长高，
+        // 就地生长会把它顶出屏幕下边缘，定位器会负责该翻上方就翻上方。
+        panel.present(anchorRect: anchorRect, contentSize: size)
     }
 
     private func handleKeyEvent(_ event: InputAssistKeyEvent) -> Bool {

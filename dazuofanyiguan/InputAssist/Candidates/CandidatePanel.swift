@@ -31,9 +31,10 @@ struct CandidatePanelView: View {
                 )
                 .contentShape(Rectangle())
                 .onTapGesture {
-                    if case .failed = row.state {
+                    switch row.state {
+                    case .failed, .languagePackRequired:
                         model.onRetryRow?(index)
-                    } else {
+                    case .loading, .translated:
                         model.onCommitRow?(index)
                     }
                 }
@@ -74,7 +75,7 @@ private struct CandidateRowView: View {
             if showsCacheBadge, isCacheHit {
                 Text("⚡")
                     .font(.system(size: 10))
-                    .help("本地缓存命中")
+                    .help(cacheBadgeHelp)
             }
         }
         .padding(.horizontal, 8)
@@ -94,7 +95,7 @@ private struct CandidateRowView: View {
         case .loading:
             CandidateSkeletonView()
 
-        case .translated(let text, _, _):
+        case .translated(let text, _, _, _):
             Text(text)
                 .font(.system(size: 13))
                 .lineLimit(
@@ -116,22 +117,36 @@ private struct CandidateRowView: View {
             .help(message)
 
         case .languagePackRequired:
-            Text("需要下载语言包")
-                .font(.system(size: 13))
-                .foregroundStyle(.secondary)
+            HStack(spacing: 4) {
+                Text("需要下载语言包")
+                    .font(.system(size: 13))
+                Text("点击下载")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 
     private var isCacheHit: Bool {
-        guard case .translated(_, let source, _) = row.state else { return false }
+        guard case .translated(_, let source, _, _) = row.state else { return false }
         return source == .cache
+    }
+
+    /// ⚡ 的 hover 提示（PRD §22）。
+    private var cacheBadgeHelp: String {
+        guard case .translated(_, _, let latency, let engineTitle) = row.state else {
+            return "本地缓存命中"
+        }
+        return "本地缓存命中\n引擎：\(engineTitle)\n响应：\(latency)ms"
     }
 
     /// ⌥ 按住时的调试信息（PRD §23）。
     private var debugText: String? {
         switch row.state {
-        case .translated(_, let source, let latency):
-            return source == .cache ? "Cache · \(latency)ms" : "Network · \(latency)ms"
+        case .translated(_, let source, let latency, let engineTitle):
+            return source == .cache
+                ? "\(engineTitle) · Cache · \(latency)ms"
+                : "\(engineTitle) · \(latency)ms · Network"
         case .failed(let message):
             return message
         case .languagePackRequired:

@@ -192,7 +192,8 @@ struct InputAssistTests {
         state.update(languageCode: "es", state: .translated(
             text: "Hola",
             source: .network,
-            latencyMilliseconds: 12
+            latencyMilliseconds: 12,
+            engineTitle: "Apple 本地翻译"
         ))
         #expect(state.count == 3)
         #expect(state.committableIndices == [1])
@@ -204,7 +205,8 @@ struct InputAssistTests {
         state.update(languageCode: "en", state: .translated(
             text: "   \n ",
             source: .network,
-            latencyMilliseconds: 5
+            latencyMilliseconds: 5,
+            engineTitle: "Apple 本地翻译"
         ))
         #expect(state.committableIndices.isEmpty)
         #expect(state.selectedRow?.translatedText == nil)
@@ -778,7 +780,12 @@ struct InputAssistTests {
         let long = String(repeating: "word ", count: 200)
         let row = CandidateRow(
             languageCode: "en",
-            state: .translated(text: long, source: .network, latencyMilliseconds: 10)
+            state: .translated(
+                text: long,
+                source: .network,
+                latencyMilliseconds: 10,
+                engineTitle: "Apple 本地翻译"
+            )
         )
         #expect(
             CandidatePanelLayout.lineCount(for: row, isSelected: false)
@@ -858,6 +865,240 @@ struct InputAssistTests {
         #expect(settings.isEnabled)
         #expect(!settings.showsCacheBadge)
         #expect(settings.appScope == .allowlistOnly)
+    }
+
+    // MARK: - 自动触发判定（PRD §8）
+
+    @Test func pinyinStillBeingComposedNeverTriggers() {
+        // 中文输入法开着、新出现的全是 ASCII 字母 = 还没上屏的拼音。
+        // 这时候弹出来翻译的会是 "women keyi"，不是「我们可以」。
+        for buffer in ["women keyi tigong", "nihao", "xi'an", "ni3hao3"] {
+            #expect(
+                InputAssistAutoTriggerPolicy.classify(
+                    newText: buffer,
+                    isCJKInputSourceActive: true
+                ) == .composing,
+                "\(buffer)"
+            )
+        }
+    }
+
+    @Test func sameAsciiTextIsJustEnglishWhenNoCJKInputSourceIsActive() {
+        // 英文输入法下的 "hello there" 不是组字缓冲，只是用户在打英文——
+        // 自动触发第一版只针对新增中文，直接跳过。
+        #expect(
+            InputAssistAutoTriggerPolicy.classify(
+                newText: "hello there",
+                isCJKInputSourceActive: false
+            ) == .skip(.noChineseText)
+        )
+    }
+
+    @Test func committedChineseWaitsForAPauseThenTriggers() {
+        #expect(
+            InputAssistAutoTriggerPolicy.classify(
+                newText: "我们可以提供16吨船吊",
+                isCJKInputSourceActive: true
+            ) == .waitForPause
+        )
+    }
+
+    @Test func strongPunctuationTriggersWithoutWaitingButCommasDoNot() {
+        for terminator in ["。", "！", "？", "；"] {
+            #expect(
+                InputAssistAutoTriggerPolicy.classify(
+                    newText: "我们可以提供16吨船吊\(terminator)",
+                    isCJKInputSourceActive: true
+                ) == .triggerImmediately,
+                "\(terminator)"
+            )
+        }
+        // 逗号是弱分隔，不得只因为它就切断翻译范围（PRD §8.1）。
+        for separator in ["，", "、"] {
+            #expect(
+                InputAssistAutoTriggerPolicy.classify(
+                    newText: "我们可以提供16吨船吊\(separator)",
+                    isCJKInputSourceActive: true
+                ) == .waitForPause,
+                "\(separator)"
+            )
+        }
+    }
+
+    @Test func mixedTextWithChineseStillTriggers() {
+        // PRD §8.3：混合文本允许触发。
+        #expect(
+            InputAssistAutoTriggerPolicy.classify(
+                newText: "SQ16 Marine Crane 价格是 12000 USD",
+                isCJKInputSourceActive: true
+            ) == .waitForPause
+        )
+    }
+
+    @Test func structuredAndOversizedInsertionsAreSkipped() {
+        #expect(
+            InputAssistAutoTriggerPolicy.classify(
+                newText: "https://example.com/产品",
+                isCJKInputSourceActive: true
+            ) == .skip(.looksStructured)
+        )
+        #expect(
+            InputAssistAutoTriggerPolicy.classify(
+                newText: "  \n ",
+                isCJKInputSourceActive: true
+            ) == .skip(.empty)
+        )
+        let pasted = String(repeating: "很长的一句话", count: 100)
+        #expect(
+            InputAssistAutoTriggerPolicy.classify(
+                newText: pasted,
+                isCJKInputSourceActive: true
+            ) == .skip(.tooLong)
+        )
+    }
+
+    @Test func triggerSpeedPresetsMatchThePRDAndCustomValuesAreClamped() {
+        #expect(InputAssistTriggerSpeed.fast.presetMilliseconds == 200)
+        #expect(InputAssistTriggerSpeed.standard.presetMilliseconds == 300)
+        #expect(InputAssistTriggerSpeed.steady.presetMilliseconds == 500)
+        #expect(InputAssistTriggerSpeed.custom.presetMilliseconds == nil)
+
+        #expect(
+            InputAssistTriggerSpeed.milliseconds(speed: .custom, customMilliseconds: 50) == 100
+        )
+        #expect(
+            InputAssistTriggerSpeed.milliseconds(speed: .custom, customMilliseconds: 5000) == 1000
+        )
+        #expect(
+            InputAssistTriggerSpeed.milliseconds(speed: .custom, customMilliseconds: 420) == 420
+        )
+        // 选了预设时自定义值不生效。
+        #expect(
+            InputAssistTriggerSpeed.milliseconds(speed: .fast, customMilliseconds: 999) == 200
+        )
+    }
+
+    @Test func cjkInputSourceDetectionLooksAtTheLanguageSubtag() {
+        #expect(InputAssistInputSourceMonitor.isCJKLanguage("zh-Hans"))
+        #expect(InputAssistInputSourceMonitor.isCJKLanguage("ja"))
+        #expect(InputAssistInputSourceMonitor.isCJKLanguage("ko"))
+        #expect(!InputAssistInputSourceMonitor.isCJKLanguage("en"))
+        #expect(!InputAssistInputSourceMonitor.isCJKLanguage("ru"))
+        #expect(InputAssistInputSourceMonitor.containsCJKLanguage(["en", "zh-Hant"]))
+        #expect(!InputAssistInputSourceMonitor.containsCJKLanguage(["en", "de"]))
+        #expect(!InputAssistInputSourceMonitor.containsCJKLanguage([]))
+    }
+
+    // MARK: - 自动触发的替换范围（PRD §9.1 + §9.3）
+
+    @Test func autoTriggerNeverTouchesTextTypedBeforeThisRound() {
+        // PRD §9.1 的例子：前文已有内容，这一轮只新增了最后一句。
+        let existing = "Hello John，关于你昨天问的设备，"
+        let value = existing + "我们可以提供16吨船吊"
+        let burstStart = existing.utf16.count
+
+        let range = InputAssistSentenceBoundary.autoTriggerSourceRange(
+            in: value,
+            burstStartUTF16Offset: burstStart,
+            caretUTF16Offset: value.utf16.count
+        )
+        #expect(
+            range.map { InputAssistAXTextCapture.substring(of: value, range: $0) }
+                == "我们可以提供16吨船吊"
+        )
+    }
+
+    @Test func autoTriggerStopsAtTheSentenceStartEvenWhenTheBurstStartedEarlier() {
+        // PRD §9.3：不得跨多个完整句子一次性替换。
+        let value = "第一句。第二句"
+        let range = InputAssistSentenceBoundary.autoTriggerSourceRange(
+            in: value,
+            burstStartUTF16Offset: 0,
+            caretUTF16Offset: value.utf16.count
+        )
+        #expect(range.map { InputAssistAXTextCapture.substring(of: value, range: $0) } == "第二句")
+    }
+
+    @Test func autoTriggerRangeSkipsLeadingWhitespace() {
+        let existing = "前面。"
+        let value = existing + "   我们可以提供"
+        let range = InputAssistSentenceBoundary.autoTriggerSourceRange(
+            in: value,
+            burstStartUTF16Offset: existing.utf16.count,
+            caretUTF16Offset: value.utf16.count
+        )
+        #expect(
+            range.map { InputAssistAXTextCapture.substring(of: value, range: $0) } == "我们可以提供"
+        )
+    }
+
+    @Test func autoTriggerRangeIsNilWhenTheCaretDidNotMoveForward() {
+        let value = "我们可以提供"
+        #expect(InputAssistSentenceBoundary.autoTriggerSourceRange(
+            in: value,
+            burstStartUTF16Offset: 6,
+            caretUTF16Offset: 6
+        ) == nil)
+        // 删到了起点之前。
+        #expect(InputAssistSentenceBoundary.autoTriggerSourceRange(
+            in: value,
+            burstStartUTF16Offset: 6,
+            caretUTF16Offset: 3
+        ) == nil)
+    }
+
+    // MARK: - 应用兼容等级（PRD §46 / §53）
+
+    @Test func compatibilityLevelFollowsTheSurfaceCapability() {
+        #expect(InputAssistAppCompatibility.level(
+            bundleIdentifier: "com.apple.TextEdit",
+            capability: .axDirect,
+            hasPreciseCaretBounds: true
+        ) == .full)
+
+        #expect(InputAssistAppCompatibility.level(
+            bundleIdentifier: "com.google.Chrome",
+            capability: .axDirect,
+            hasPreciseCaretBounds: false
+        ) == .degraded)
+
+        #expect(InputAssistAppCompatibility.level(
+            bundleIdentifier: "net.whatsapp.WhatsApp",
+            capability: .pasteFallback,
+            hasPreciseCaretBounds: false
+        ) == .degraded)
+
+        #expect(InputAssistAppCompatibility.level(
+            bundleIdentifier: "com.apple.TextEdit",
+            capability: .unavailable,
+            hasPreciseCaretBounds: true
+        ) == .disabled)
+    }
+
+    @Test func terminalsStayManualOnlyEvenWithFullAXSupport() {
+        // 终端即使 AX 读写都正常也不该被自动改写命令行（PRD §53）。
+        // 黑名单是第一道闸，这是第二道——用户把黑名单清空也不会放开自动触发。
+        #expect(InputAssistAppCompatibility.level(
+            bundleIdentifier: "com.apple.Terminal",
+            capability: .axDirect,
+            hasPreciseCaretBounds: true
+        ) == .manualOnly)
+        #expect(InputAssistAppCompatibility.isManualOnly("com.googlecode.iterm2"))
+        #expect(!InputAssistAppCompatibility.isManualOnly("com.apple.mail"))
+        #expect(!InputAssistAppCompatibility.isManualOnly(nil))
+    }
+
+    @Test func compatibilityLevelsGateTheRightTriggers() {
+        #expect(InputAssistCompatibilityLevel.full.allowsAutoTrigger)
+        #expect(InputAssistCompatibilityLevel.degraded.allowsAutoTrigger)
+        #expect(!InputAssistCompatibilityLevel.manualOnly.allowsAutoTrigger)
+        #expect(!InputAssistCompatibilityLevel.disabled.allowsAutoTrigger)
+
+        #expect(InputAssistCompatibilityLevel.manualOnly.allowsManualTrigger)
+        #expect(!InputAssistCompatibilityLevel.disabled.allowsManualTrigger)
+
+        #expect(InputAssistCompatibilityLevel.full > InputAssistCompatibilityLevel.degraded)
+        #expect(InputAssistCompatibilityLevel.disabled < InputAssistCompatibilityLevel.manualOnly)
     }
 
     // MARK: - Apple 并行槽位（PRD §18）

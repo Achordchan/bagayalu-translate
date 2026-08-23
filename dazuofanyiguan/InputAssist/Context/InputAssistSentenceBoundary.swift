@@ -98,6 +98,40 @@ enum InputAssistSentenceBoundary {
         return String(context.suffix(characterLimit))
     }
 
+    /// 自动触发的替换范围（PRD §9.1 + §9.3）。
+    ///
+    /// 取「这轮输入的起点」和「当前句的起点」里**靠后**的那一个作为开头：
+    /// - 用输入起点，保证不会去改用户之前就写好的内容（§9.1「不得修改前文」）；
+    /// - 用句起点，保证不会一次跨掉好几个完整句子（§9.3）。
+    static func autoTriggerSourceRange(
+        in text: String,
+        burstStartUTF16Offset: Int,
+        caretUTF16Offset: Int
+    ) -> InputAssistTextRange? {
+        guard caretUTF16Offset > burstStartUTF16Offset else { return nil }
+
+        let sentenceStart = currentSentenceRange(
+            in: text,
+            caretUTF16Offset: caretUTF16Offset
+        )?.location ?? burstStartUTF16Offset
+        var start = max(burstStartUTF16Offset, sentenceStart)
+
+        // 起点落在空白上时往后挪，别把用户敲的空格一起替换掉。
+        while start < caretUTF16Offset {
+            guard let character = InputAssistAXTextCapture.substring(
+                of: text,
+                range: InputAssistTextRange(location: start, length: 1)
+            ) else {
+                break
+            }
+            guard character.allSatisfy({ $0.isWhitespace }) else { break }
+            start += 1
+        }
+
+        guard start < caretUTF16Offset else { return nil }
+        return InputAssistTextRange(location: start, length: caretUTF16Offset - start)
+    }
+
     /// 这段文字看起来值不值得翻译。
     ///
     /// 不设最小字数（PRD §9.4：「好的」「收到」必须支持），

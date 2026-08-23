@@ -301,7 +301,36 @@ TypeTide 干脆不校验。PRD 要求的
 
 ---
 
-## 8. Phase 1 落地映射
+## 7.4 补记：这些空白最后是怎么填的
+
+Phase 3 做完之后回填，方便下次有人读到这里时不用再重新想一遍。
+
+**composition 检测：绕开了，没有去解。**
+既然从进程外问不出「输入法现在在不在组字」，那就不问状态，只看**新出现的文字长什么样**：
+中文输入法开着、新增内容却全是 ASCII 字母 → 那是还没上屏的拼音，等着；
+一旦出现汉字 → 已经 commit 了。
+判定逻辑落在 `InputAssistAutoTriggerPolicy.classify`，纯函数，有单测。
+
+**AXObserver：确实得自己写。**
+`InputAssistFocusObserver` 给前台 App 的 pid 建 observer，监听
+`kAXFocusedUIElementChanged`，焦点落定后再给那个控件挂 `kAXValueChanged` 和
+`kAXSelectedTextChanged`。挂不上就挂不上——那个 App 的自动触发不可用，
+手动快捷键照常，这就是 PRD §30 说的 best-effort。
+
+**PRD §32 建议的 TextDiffTracker 最后没有做，而且不做更稳。**
+拼音 `nihao`（5 字符）被 commit 成「你好」（2 字符）时**光标是往回跳的**，
+任何「只往前增长」的 diff 在这里都会失效，放宽成通用 diff 又会把组字过程中的
+每一次抖动当成新输入。改成记住「这轮输入开始时光标在哪」这一个锚点，
+新增内容永远是 `value[burstStart ..< caret]`，组字期间光标怎么跳都不影响这个区间的定义。
+
+**PRD §8.2 的 50–100ms 保护延迟：普通 debounce 已经覆盖了。**
+时间基准本来就是「最后一次 AX 文本变化」，而原生候选框正是在 commit
+（也就是那次文本变化）的瞬间关闭的，200–500ms 的 debounce 足够。
+只有强标点绕过 debounce 那条路径才单独留了 80ms。因此**没有**为自动触发再挂一个常驻键盘 tap。
+
+---
+
+## 8. 落地映射
 
 | PRD §32 建议模块 | 来源 | 档位 |
 |---|---|---|
@@ -316,7 +345,9 @@ TypeTide 干脆不校验。PRD 要求的
 | `CandidateNavigation` | — | 自研（许可风险规避） |
 | `TranslationCache` L1+L2 | — | 自研（PRD 要求两级） |
 | `CandidateSession` 校验 | — | 自研（无先例） |
-| Auto Trigger 全链路 | — | 自研（无先例，Phase 3） |
+| `InputAssistFocusObserver` | — | 自研（无先例） |
+| `InputAssistAutoTriggerPolicy` | — | 自研（无先例） |
+| `InputAssistAppCompatibility` | — | 自研（PRD §46） |
 
 ---
 

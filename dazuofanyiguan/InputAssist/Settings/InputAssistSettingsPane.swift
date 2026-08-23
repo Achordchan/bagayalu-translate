@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// 输入增强设置页（PRD §47）。
 ///
@@ -14,7 +15,11 @@ struct InputAssistSettingsPane: View {
     let onOpenTestWindow: () -> Void
 
     @State private var cacheUsageText = "统计中…"
-    @State private var isAddingLanguage = false
+    @State private var draggingIndex: Int?
+
+    private static let customTriggerRange =
+        Double(InputAssistTriggerSpeed.customRange.lowerBound)
+            ... Double(InputAssistTriggerSpeed.customRange.upperBound)
 
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
@@ -85,6 +90,70 @@ struct InputAssistSettingsPane: View {
 
     private var triggerSection: some View {
         section("触发") {
+            Toggle("自动触发", isOn: Binding(
+                get: { settings.isAutoTriggerEnabled },
+                set: { newValue in
+                    settings.isAutoTriggerEnabled = newValue
+                    coordinator.applyEnabledState()
+                }
+            ))
+            .font(.system(size: 12))
+
+            Text("中文确认上屏后自动给出候选。终端一类应用即使不在黑名单里也只支持手动触发。")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+
+            if settings.isAutoTriggerEnabled {
+                HStack(spacing: 10) {
+                    Text("触发速度")
+                        .font(.system(size: 12))
+                    Picker("", selection: Binding(
+                        get: { settings.triggerSpeed },
+                        set: { newValue in
+                            settings.triggerSpeed = newValue
+                            coordinator.applyEnabledState()
+                        }
+                    )) {
+                        ForEach(InputAssistTriggerSpeed.allCases) { speed in
+                            if let preset = speed.presetMilliseconds {
+                                Text("\(speed.title) \(preset)ms").tag(speed)
+                            } else {
+                                Text(speed.title).tag(speed)
+                            }
+                        }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                }
+
+                if settings.triggerSpeed == .custom {
+                    HStack(spacing: 10) {
+                        Slider(
+                            value: Binding(
+                                get: { Double(settings.customTriggerMilliseconds) },
+                                set: { newValue in
+                                    settings.customTriggerMilliseconds = Int(newValue)
+                                    coordinator.applyEnabledState()
+                                }
+                            ),
+                            in: Self.customTriggerRange,
+                            step: 50
+                        )
+                        Text("\(settings.triggerDelayMilliseconds)ms")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 54, alignment: .trailing)
+                    }
+                }
+
+                Text("句号、问号、感叹号、分号会提前触发；逗号不会切断翻译范围。")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+            }
+
+            Divider()
+                .padding(.vertical, 2)
+
             HStack {
                 Text("手动触发快捷键")
                     .font(.system(size: 12))
@@ -111,6 +180,9 @@ struct InputAssistSettingsPane: View {
         section("目标语言") {
             ForEach(Array(settings.targetLanguageCodes.enumerated()), id: \.element) { index, code in
                 HStack(spacing: 8) {
+                    Image(systemName: "line.3.horizontal")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
                     Text("\(index + 1)")
                         .font(.system(size: 11, design: .rounded))
                         .foregroundStyle(.secondary)
@@ -146,6 +218,19 @@ struct InputAssistSettingsPane: View {
                     .disabled(settings.targetLanguageCodes.count <= 1)
                 }
                 .padding(.vertical, 2)
+                .contentShape(Rectangle())
+                .onDrag {
+                    draggingIndex = index
+                    return NSItemProvider(object: code as NSString)
+                }
+                .onDrop(
+                    of: [.text],
+                    delegate: InputAssistLanguageDropDelegate(
+                        targetIndex: index,
+                        draggingIndex: $draggingIndex,
+                        onReorder: reorder
+                    )
+                )
             }
 
             HStack {
@@ -311,6 +396,15 @@ struct InputAssistSettingsPane: View {
         coordinator.applyEnabledState()
     }
 
+    private func reorder(from source: Int, to destination: Int) {
+        var codes = settings.targetLanguageCodes
+        guard codes.indices.contains(source), codes.indices.contains(destination) else { return }
+        guard source != destination else { return }
+        let moved = codes.remove(at: source)
+        codes.insert(moved, at: destination)
+        settings.targetLanguageCodes = codes
+    }
+
     private func move(from index: Int, by offset: Int) {
         var codes = settings.targetLanguageCodes
         let target = index + offset
@@ -324,5 +418,31 @@ struct InputAssistSettingsPane: View {
         let entries = await InputAssistTranslationCacheStore.shared.entryCount()
         let megabytes = Double(bytes) / (1024 * 1024)
         cacheUsageText = String(format: "%.1f MB（%d 条）", megabytes, entries)
+    }
+}
+
+
+/// 目标语言拖拽排序（PRD §10.2）。
+///
+/// 设置页整体是一个 ScrollView，塞不进 `List` 的 `.onMove`，
+/// 所以用 drag / drop 自己接一下，行为等价。
+private struct InputAssistLanguageDropDelegate: DropDelegate {
+    let targetIndex: Int
+    @Binding var draggingIndex: Int?
+    let onReorder: (Int, Int) -> Void
+
+    func dropEntered(info: DropInfo) {
+        guard let source = draggingIndex, source != targetIndex else { return }
+        onReorder(source, targetIndex)
+        draggingIndex = targetIndex
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        draggingIndex = nil
+        return true
     }
 }

@@ -7,6 +7,7 @@ import Foundation
 /// **不记录原文与译文正文**，只记录结构化元信息。
 struct InputAssistMetrics: Equatable {
     var manualTriggerCount = 0
+    var autoTriggerCount = 0
     var candidateShowCount = 0
     var candidateCommitCount = 0
     var candidateCopyCount = 0
@@ -33,6 +34,7 @@ final class InputAssistCoordinator: ObservableObject {
     private let hotkeyMonitor = InputAssistHotkeyMonitor()
     private let panelController = CandidatePanelController()
     private let applePool = InputAssistAppleTranslationPool()
+    private let autoTrigger = InputAssistAutoTriggerController()
     private lazy var candidateService = CandidateService(applePool: applePool)
 
     private var appSettings: AppSettings?
@@ -65,6 +67,20 @@ final class InputAssistCoordinator: ObservableObject {
         panelController.onDismiss = { [weak self] reason in
             self?.handleDismiss(reason: reason)
         }
+
+        autoTrigger.onTrigger = { [weak self] capture in
+            self?.handleAutoTrigger(capture)
+        }
+        autoTrigger.onInputActivity = { [weak self] in
+            // 用户还在打字，之前那个浮层记录的快照已经作废。
+            self?.panelController.dismiss(reason: .continuedTyping)
+        }
+        autoTrigger.onSourceInvalidated = { [weak self] in
+            self?.panelController.dismiss(reason: .caretMoved)
+        }
+        autoTrigger.isAutoTriggerAllowed = { [weak self] in
+            self?.isAutoTriggerAllowedForFrontmostApplication() ?? false
+        }
     }
 
     /// 由 App 启动 / 设置变化时调用。
@@ -82,6 +98,7 @@ final class InputAssistCoordinator: ObservableObject {
     func applyEnabledState() {
         guard settings.isEnabled else {
             hotkeyMonitor.unregister()
+            autoTrigger.stop()
             panelController.dismiss(reason: .featureDisabled)
             applePool.shutdown()
             lastStatusMessage = nil
@@ -90,12 +107,21 @@ final class InputAssistCoordinator: ObservableObject {
 
         guard isAccessibilityTrusted else {
             hotkeyMonitor.unregister()
+            autoTrigger.stop()
             lastStatusMessage = "需要辅助功能权限才能使用输入增强"
             return
         }
 
         hotkeyMonitor.register(settings.shortcut)
         applePool.prepare(slotCount: settings.targetLanguageCodes.count)
+
+        autoTrigger.debounceMilliseconds = settings.triggerDelayMilliseconds
+        if settings.isAutoTriggerEnabled {
+            autoTrigger.start()
+        } else {
+            autoTrigger.stop()
+        }
+
         lastStatusMessage = hotkeyMonitor.status.isActive
             ? nil
             : "快捷键 \(settings.shortcut.displayString) 注册失败，可能被其它应用占用"
@@ -103,6 +129,7 @@ final class InputAssistCoordinator: ObservableObject {
 
     func deactivate() {
         hotkeyMonitor.unregister()
+        autoTrigger.stop()
         translationTask?.cancel()
         translationTask = nil
         panelController.dismiss(reason: .featureDisabled)
@@ -115,6 +142,57 @@ final class InputAssistCoordinator: ObservableObject {
     func triggerManually() {
         handleManualTrigger()
     }
+
+    // MARK: - 自动触发
+
+    private func handleAutoTrigger(_ capture: InputAssistCapture) {
+        guard settings.isEnabled, settings.isAutoTriggerEnabled else { return }
+        guard let appSettings else { return }
+        guard !isReplacing else { return }
+
+        let identity = InputAssistAppIdentity.frontmost()
+        guard InputAssistAppFilter.allows(
+            identity,
+            scope: settings.appScope,
+            blocklist: settings.blocklist,
+            allowlist: settings.allowlist
+        ) else {
+            return
+        }
+
+        // 到这一步才知道这个输入面的真实能力，用它算出兼容等级再决定放不放行（PRD §46）。
+        let level = InputAssistAppCompatibility.level(
+            bundleIdentifier: identity?.bundleIdentifier,
+            capability: capture.capability,
+            hasPreciseCaretBounds: capture.hasPreciseCaretBounds
+        )
+        guard level.allowsAutoTrigger else {
+            log?.info("Input Assist 当前输入面只支持手动触发（等级 \(level.rawValue)）")
+            return
+        }
+
+        metrics.autoTriggerCount += 1
+        startSession(capture: capture, identity: identity, appSettings: appSettings)
+    }
+
+    /// 自动触发比手动触发更严格：除了黑白名单，还要求这个 App 的能力等级够得上。
+    private func isAutoTriggerAllowedForFrontmostApplication() -> Bool {
+        guard settings.isEnabled, settings.isAutoTriggerEnabled else { return false }
+        guard !isReplacing else { return false }
+
+        let identity = InputAssistAppIdentity.frontmost()
+        guard InputAssistAppFilter.allows(
+            identity,
+            scope: settings.appScope,
+            blocklist: settings.blocklist,
+            allowlist: settings.allowlist
+        ) else {
+            return false
+        }
+        return !InputAssistAppCompatibility.isManualOnly(identity?.bundleIdentifier)
+    }
+
+    // MARK: - 手动触发
 
     private func handleManualTrigger() {
         guard settings.isEnabled else { return }
@@ -210,7 +288,7 @@ final class InputAssistCoordinator: ObservableObject {
             log: log
         ) { [weak self] languageCode, state in
             guard let self, self.currentSession?.sessionID == sessionID else { return }
-            if case .translated(_, .cache, _) = state {
+            if case .translated(_, .cache, _, _) = state {
                 self.metrics.cacheHitCount += 1
             }
             self.panelController.updateRow(languageCode: languageCode, state: state)
@@ -228,6 +306,9 @@ final class InputAssistCoordinator: ObservableObject {
         }
 
         isReplacing = true
+        // 我们写回去的译文同样会触发 kAXValueChanged。不挡住的话，
+        // 自动触发会把它当成「用户又输入了新内容」，转头对着自己的译文再弹一次。
+        autoTrigger.suspend(for: 1.2)
         // 先收浮层再替换：浮层的按键 tap 还开着的话，
         // 合成的 ⌘V 虽然带了注入标记，但少一层交互总是更稳。
         panelController.dismiss(reason: .committed)
@@ -244,6 +325,9 @@ final class InputAssistCoordinator: ObservableObject {
             )
             self.currentSession = nil
             self.currentRequest = nil
+
+            // 替换完成后从当前光标重新起一轮，避免刚写进去的译文被算成新输入。
+            self.autoTrigger.resetBurst()
 
             switch outcome {
             case .replaced(let strategy):
@@ -306,6 +390,10 @@ final class InputAssistCoordinator: ObservableObject {
         }
 
         guard reason != .committed else { return }
+        if reason == .escape {
+            // 用户明确关掉了这次候选，同一段文字不该马上再弹一次。
+            autoTrigger.resetBurst()
+        }
         translationTask?.cancel()
         translationTask = nil
         currentSession = nil

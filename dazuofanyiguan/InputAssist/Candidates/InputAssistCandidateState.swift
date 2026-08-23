@@ -9,7 +9,12 @@ enum CandidateResultSource: String, Equatable {
 enum CandidateRowState: Equatable {
     /// 骨架态。浮层第一次出现时所有行都是它（PRD §12.1）。
     case loading
-    case translated(text: String, source: CandidateResultSource, latencyMilliseconds: Int)
+    case translated(
+        text: String,
+        source: CandidateResultSource,
+        latencyMilliseconds: Int,
+        engineTitle: String
+    )
     /// 单条失败不拖垮整个浮层，支持点击重试（PRD §19）。
     case failed(message: String)
     /// Apple 本地翻译缺语言包（PRD §20）。
@@ -28,7 +33,7 @@ struct CandidateRow: Equatable, Identifiable {
     }
 
     var translatedText: String? {
-        guard case .translated(let text, _, _) = state else { return nil }
+        guard case .translated(let text, _, _, _) = state else { return nil }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : text
     }

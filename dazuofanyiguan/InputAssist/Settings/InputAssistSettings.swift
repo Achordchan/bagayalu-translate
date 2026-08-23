@@ -51,6 +51,9 @@ final class InputAssistSettings: ObservableObject {
         static let appScope = "inputAssistAppScope"
         static let blocklist = "inputAssistBlocklist"
         static let allowlist = "inputAssistAllowlist"
+        static let autoTriggerEnabled = "inputAssistAutoTriggerEnabled"
+        static let triggerSpeed = "inputAssistTriggerSpeed"
+        static let customTriggerMilliseconds = "inputAssistCustomTriggerMs"
         static let showsCacheBadge = "inputAssistShowsCacheBadge"
         static let didOfferOnboarding = "inputAssistDidOfferOnboarding"
     }
@@ -67,6 +70,9 @@ final class InputAssistSettings: ObservableObject {
             Key.appScope: InputAssistAppScope.globalWithBlocklist.rawValue,
             Key.blocklist: InputAssistAppFilter.defaultBlocklist.joined(separator: "\n"),
             Key.allowlist: "",
+            Key.autoTriggerEnabled: true,
+            Key.triggerSpeed: InputAssistTriggerSpeed.standard.rawValue,
+            Key.customTriggerMilliseconds: 300,
             Key.showsCacheBadge: true,
             Key.didOfferOnboarding: false
         ])
@@ -129,6 +135,39 @@ final class InputAssistSettings: ObservableObject {
 
     var blocklist: [String] { InputAssistSettings.parseList(blocklistText) }
     var allowlist: [String] { InputAssistSettings.parseList(allowlistText) }
+
+    /// 自动触发（PRD §8）。只有在整个功能已经打开时才有意义，
+    /// 所以这里默认开着——真正的总开关是 `isEnabled`，它默认关闭。
+    var isAutoTriggerEnabled: Bool {
+        get { defaults.bool(forKey: Key.autoTriggerEnabled) }
+        set { write(newValue, forKey: Key.autoTriggerEnabled) }
+    }
+
+    var triggerSpeed: InputAssistTriggerSpeed {
+        get {
+            InputAssistTriggerSpeed(rawValue: defaults.string(forKey: Key.triggerSpeed) ?? "")
+                ?? .standard
+        }
+        set { write(newValue.rawValue, forKey: Key.triggerSpeed) }
+    }
+
+    var customTriggerMilliseconds: Int {
+        get { defaults.integer(forKey: Key.customTriggerMilliseconds) }
+        set {
+            let clamped = min(
+                max(newValue, InputAssistTriggerSpeed.customRange.lowerBound),
+                InputAssistTriggerSpeed.customRange.upperBound
+            )
+            write(clamped, forKey: Key.customTriggerMilliseconds)
+        }
+    }
+
+    var triggerDelayMilliseconds: Int {
+        InputAssistTriggerSpeed.milliseconds(
+            speed: triggerSpeed,
+            customMilliseconds: customTriggerMilliseconds
+        )
+    }
 
     /// 缓存命中的 ⚡ 标识，主要服务于早期验证（PRD §22）。
     var showsCacheBadge: Bool {

@@ -10,6 +10,7 @@ struct InputAssistTestView: View {
 
     @State private var draft = ""
     @FocusState private var isEditorFocused: Bool
+    @State private var cacheEntryCount = -1
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -29,21 +30,24 @@ struct InputAssistTestView: View {
         VStack(alignment: .leading, spacing: 4) {
             Text("输入增强测试")
                 .font(.system(size: 18, weight: .semibold))
-            Text("在下面的框里用中文输入法打一句话，确认上屏后按 \(settings.shortcut.displayString)。")
+            Text("在下面的框里用中文输入法打一句话。开了自动触发的话确认上屏后稍停就会出候选；也可以随时按 \(settings.shortcut.displayString) 手动触发。")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
         }
     }
 
     private var statusRow: some View {
-        HStack(spacing: 18) {
-            statusItem("辅助功能", isOK: coordinator.isAccessibilityTrusted)
-            statusItem("快捷键", isOK: coordinator.hotkeyStatus.isActive)
-            statusItem("已启用", isOK: settings.isEnabled)
-            statusItem(
-                "目标语言 \(settings.targetLanguageCodes.count)",
-                isOK: !settings.targetLanguageCodes.isEmpty
-            )
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 18) {
+                statusItem("辅助功能", isOK: coordinator.isAccessibilityTrusted)
+                statusItem("快捷键", isOK: coordinator.hotkeyStatus.isActive)
+                statusItem("自动触发", isOK: settings.isEnabled && settings.isAutoTriggerEnabled)
+                statusItem("翻译引擎", isOK: settings.isEnabled)
+                statusItem("缓存", isOK: cacheEntryCount >= 0)
+            }
+            Text(detailLine)
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(.tertiary)
         }
         .padding(.vertical, 8)
         .padding(.horizontal, 12)
@@ -52,6 +56,17 @@ struct InputAssistTestView: View {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(Color.secondary.opacity(0.08))
         )
+        .task(id: settings.isEnabled) {
+            cacheEntryCount = await InputAssistTranslationCacheStore.shared.entryCount()
+        }
+    }
+
+    private var detailLine: String {
+        let targets = settings.targetLanguageCodes.map { $0.uppercased() }.joined(separator: " / ")
+        let speed = settings.isAutoTriggerEnabled
+            ? "\(settings.triggerDelayMilliseconds)ms"
+            : "关闭"
+        return "目标语言 \(targets) · 触发速度 \(speed) · 缓存 \(max(0, cacheEntryCount)) 条"
     }
 
     private func statusItem(_ title: String, isOK: Bool) -> some View {
@@ -102,9 +117,9 @@ struct InputAssistTestView: View {
     private var metricsRow: some View {
         let metrics = coordinator.metrics
         return Text(
-            "触发 \(metrics.manualTriggerCount) · 展示 \(metrics.candidateShowCount) · "
-                + "替换 \(metrics.candidateCommitCount) · 缓存命中 \(metrics.cacheHitCount) · "
-                + "安全放弃 \(metrics.safeAbortCount)"
+            "手动 \(metrics.manualTriggerCount) · 自动 \(metrics.autoTriggerCount) · "
+                + "展示 \(metrics.candidateShowCount) · 替换 \(metrics.candidateCommitCount) · "
+                + "缓存命中 \(metrics.cacheHitCount) · 安全放弃 \(metrics.safeAbortCount)"
         )
         .font(.system(size: 10, design: .monospaced))
         .foregroundStyle(.tertiary)

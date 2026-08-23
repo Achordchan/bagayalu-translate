@@ -69,6 +69,7 @@ final class CandidateService {
                             targetLanguageCode: targetLanguageCode,
                             slotIndex: index,
                             apiKey: apiKey,
+                            allowsLanguagePackDownload: false,
                             log: log,
                             onRowUpdate: onRowUpdate
                         )
@@ -91,11 +92,13 @@ final class CandidateService {
             guard let self else { return }
             onRowUpdate(targetLanguageCode, .loading)
             let apiKey = self.openAIAPIKeyIfNeeded(for: request, log: log)
+            // 重试是用户主动点的：这时候才允许去触发系统的语言包下载（PRD §20）。
             await self.translateOne(
                 request: request,
                 targetLanguageCode: targetLanguageCode,
                 slotIndex: slotIndex,
                 apiKey: apiKey,
+                allowsLanguagePackDownload: true,
                 log: log,
                 onRowUpdate: onRowUpdate
             )
@@ -109,6 +112,7 @@ final class CandidateService {
         targetLanguageCode: String,
         slotIndex: Int,
         apiKey: String?,
+        allowsLanguagePackDownload: Bool,
         log: LogStore?,
         onRowUpdate: @escaping @MainActor (_ languageCode: String, _ state: CandidateRowState) -> Void
     ) async {
@@ -120,7 +124,8 @@ final class CandidateService {
             onRowUpdate(targetLanguageCode, .translated(
                 text: cached,
                 source: .cache,
-                latencyMilliseconds: milliseconds(since: started)
+                latencyMilliseconds: milliseconds(since: started),
+                engineTitle: request.engineType.title
             ))
             return
         }
@@ -162,8 +167,12 @@ final class CandidateService {
                 break
             case .downloadRequired:
                 // 缺语言包只影响这一行，其它语言继续（PRD §20）。
-                onRowUpdate(targetLanguageCode, .languagePackRequired)
-                return
+                // 首次不自动下载：那会弹系统对话框打断用户输入。
+                // 用户点了那一行才往下走，`prepareTranslation()` 会引导完成下载。
+                guard allowsLanguagePackDownload else {
+                    onRowUpdate(targetLanguageCode, .languagePackRequired)
+                    return
+                }
             case .unsupported(let message):
                 onRowUpdate(targetLanguageCode, .failed(message: message))
                 return
@@ -192,7 +201,8 @@ final class CandidateService {
             onRowUpdate(targetLanguageCode, .translated(
                 text: result.translatedText,
                 source: .network,
-                latencyMilliseconds: milliseconds(since: started)
+                latencyMilliseconds: milliseconds(since: started),
+                engineTitle: request.engineType.title
             ))
         } catch is CancellationError {
             return
