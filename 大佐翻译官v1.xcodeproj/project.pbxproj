@@ -410,7 +410,7 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 125;
 				DEVELOPMENT_ASSET_PATHS = "\"dazuofanyiguan/Preview Content\"";
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = S336CKXSUQ;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -440,7 +440,7 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 125;
 				DEVELOPMENT_ASSET_PATHS = "\"dazuofanyiguan/Preview Content\"";
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = S336CKXSUQ;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -528,6 +528,7 @@
 			};
 			name = Release;
 		};
+
 		55115C802EF4DD8F00FAF4C0 /* TestHost */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -591,6 +592,7 @@
 			};
 			name = TestHost;
 		};
+
 		55115C812EF4DD8F00FAF4C0 /* TestHost */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -601,7 +603,7 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 125;
 				DEVELOPMENT_ASSET_PATHS = "\"dazuofanyiguan/Preview Content\"";
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = S336CKXSUQ;
 				ENABLE_HARDENED_RUNTIME = NO;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -621,6 +623,7 @@
 			};
 			name = TestHost;
 		};
+
 		55115C822EF4DD8F00FAF4C0 /* TestHost */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -639,6 +642,7 @@
 			};
 			name = TestHost;
 		};
+
 		55115C832EF4DD8F00FAF4C0 /* TestHost */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {

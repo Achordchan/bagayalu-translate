@@ -29,6 +29,7 @@ enum InputAssistTextReplaceEngine {
     /// TypeTide 用 150ms、translate-kit 用 300ms，这里取中间值。
     static let pasteSettleNanoseconds: UInt64 = 250_000_000
     static let selectionSettleNanoseconds: UInt64 = 40_000_000
+    static let writeVerificationRetryNanoseconds: UInt64 = 30_000_000
 
     /// 某一刻读到的目标状态 + 对应的裁决。
     private struct Evaluation {
@@ -192,9 +193,8 @@ enum InputAssistTextReplaceEngine {
         //
         // 所以验证不了就干脆不写，直接走粘贴。这时选区还原封不动地圈着原文，
         // 粘贴正好替换掉它，只会发生一次插入。
-        let canVerifyWrite = valueBeforeWrite != nil
-
-        if canVerifyWrite,
+        // 拿不到写前的全文就没法验证结果，那就压根不走 AX 直写（理由见下面 case .unverifiable）。
+        if let valueBeforeWrite,
            InputAssistAXTextCapture.isSettable(element, kAXSelectedTextAttribute as String) {
             // `isSettable` 是跨进程 AX 查询，目标 App 忙的时候能卡上好几秒。
             // 这期间用户完全可能挪光标、换输入框、切 App，
@@ -213,12 +213,26 @@ enum InputAssistTextReplaceEngine {
                 kAXSelectedTextAttribute as CFString,
                 text as CFString
             )
-            if error == .success, didWriteTakeEffect(in: element, valueBeforeWrite: valueBeforeWrite) {
-                return .replaced(strategy: .axDirect)
+            if error == .success {
+                switch await verifyWrite(in: element, valueBeforeWrite: valueBeforeWrite) {
+                case .applied:
+                    return .replaced(strategy: .axDirect)
+
+                case .didNotApply:
+                    // Chromium 系会接受 set 然后悄悄忽略它。文字确实没动过，
+                    // 选区仍然圈着原文，往下走粘贴是安全的。
+                    break
+
+                case .unverifiable:
+                    // **这里绝不能往下走。**
+                    //
+                    // 调用返回了成功，只是读不回结果（目标 App 忙 / AX 超时 / 瞬时错误）。
+                    // 写很可能已经生效、选区已经塌缩——再补一次粘贴就是把译文插进去第二遍。
+                    // 以前的注释把「读回失败」错误地归进了「内容没动过」，是同一个坑的第三种成因。
+                    return .aborted(reason: .writeVerificationUnavailable)
+                }
             }
-            // 走到这里只有两种可能：调用失败，或者调用「成功」但内容没变
-            // （Chromium 系会接受 set 然后悄悄忽略它）。两种都没有动过文字，
-            // 选区仍然圈着原文，粘贴是安全的。
+            // error != .success：调用本身失败了，什么都没写进去，粘贴安全。
         }
         return await pasteReplace(
             text,
@@ -229,24 +243,37 @@ enum InputAssistTextReplaceEngine {
         )
     }
 
+    private enum WriteVerification {
+        /// 读回来了，而且确实变了。
+        case applied
+        /// 读回来了，内容一个字都没变——调用被目标 App 悄悄忽略了。
+        case didNotApply
+        /// 读不回来，无法判断。**这不等于「没生效」。**
+        case unverifiable
+    }
+
     /// `err == .success` 完全不能证明文字真的被改了——必须读回来和写之前比一比。
-    ///
-    /// 只在 `valueBeforeWrite` 非 nil 时调用；调用方已经保证了这一点。
     ///
     /// 「写之后和写之前不同」这个判据成立的前提是**译文和原文不相同**，
     /// 相同的情况已经在 `replace()` 里提前短路掉了（见 `.alreadyMatching`）。
-    private static func didWriteTakeEffect(
+    private static func verifyWrite(
         in element: AXUIElement,
-        valueBeforeWrite: String?
-    ) -> Bool {
-        guard let valueBeforeWrite else { return false }
-        guard let valueAfterWrite = InputAssistAXTextCapture.stringAttribute(
-            element,
-            kAXValueAttribute as String
-        ) else {
-            return false
+        valueBeforeWrite: String
+    ) async -> WriteVerification {
+        // 目标 App 正忙时这次读可能瞬时失败。重试一次，
+        // 免得把本来好好的替换误判成「验不了」而白白放弃。
+        for attempt in 0..<2 {
+            if let valueAfterWrite = InputAssistAXTextCapture.stringAttribute(
+                element,
+                kAXValueAttribute as String
+            ) {
+                return valueAfterWrite != valueBeforeWrite ? .applied : .didNotApply
+            }
+            if attempt == 0 {
+                try? await Task.sleep(nanoseconds: writeVerificationRetryNanoseconds)
+            }
         }
-        return valueAfterWrite != valueBeforeWrite
+        return .unverifiable
     }
 
     /// 合成 ⌘V 替换当前选区。
@@ -304,6 +331,16 @@ enum InputAssistTextReplaceEngine {
         ) {
             restoreIfUntouched(saved, expectedChangeCount: ourChangeCount, on: pasteboard)
             return .aborted(reason: reason)
+        }
+
+        // 最后一道：剪贴板里现在装的还是不是我们那份译文。
+        //
+        // 上面那几道校验每一条都是跨进程 AX 查询，加起来的耗时足够剪贴板管理器
+        // 或者用户再写一次剪贴板。不查这一下的话，⌘V 会把**别人刚写进来的东西**
+        // 粘到用户的原文位置上。
+        // 这里不还原：对方的内容比我们的快照新，覆盖回去等于毁掉它。
+        guard pasteboard.changeCount == ourChangeCount else {
+            return .failed(message: "剪贴板已被其它应用改写，已取消替换")
         }
 
         guard InputAssistKeyboardSynthesizer.press(

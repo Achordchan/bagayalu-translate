@@ -19,6 +19,8 @@ enum InputAssistReplacementSafetyGuard {
         case focusLost
         case focusedElementChanged
         case selectionChanged
+        /// AX 写调用返回成功，但读不回结果、无法证明到底生效没有。
+        case writeVerificationUnavailable
         case sourceTextChanged
         case sourceRangeUnavailable
     }

@@ -161,9 +161,14 @@ enum InputAssistSentenceBoundary {
     /// 结果是在一条 URL 中间弹候选、甚至替换掉其中一段。
     static func looksLikeBareDomain(_ text: String) -> Bool {
         guard !text.contains(where: { $0.isWhitespace }) else { return false }
-        // 只看路径 / 查询之前的主机名部分。
-        let host = text.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false)[0]
-        let labels = host.split(separator: ".", omittingEmptySubsequences: false)
+
+        // 主机名到 `/`、`?`、`#` 任意一个为止——只截 `/` 的话，
+        // `example.com?关键词`、`example.com#说明` 的顶级域会连着中文一起被取出来，
+        // 校验失败、于是又漏回自动翻译那条路上。
+        let host = text.prefix { $0 != "/" && $0 != "?" && $0 != "#" }
+        // 再去掉端口：`example.com:8080/产品` 的顶级域是 `com`，不是 `com:8080`。
+        let hostWithoutPort = host.prefix { $0 != ":" }
+        let labels = hostWithoutPort.split(separator: ".", omittingEmptySubsequences: false)
         guard labels.count >= 2 else { return false }
 
         // 顶级域必须是两个以上的 ASCII 字母：这样 "12.5" 这类小数不会被误判。

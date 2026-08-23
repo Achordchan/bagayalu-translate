@@ -1861,6 +1861,53 @@ struct InputAssistTests {
         ) == .applicationChanged)
     }
 
+    @Test func bareDomainStripsQueryFragmentAndPort() {
+        // 回归：只按 `/` 截主机名的话，`example.com?关键词` 的顶级域会变成
+        // `com?关键词`，ASCII 字母校验失败 → 判不出是 URL → 又漏回自动翻译那条路。
+        for url in [
+            "example.com?关键词",
+            "example.com#说明",
+            "example.com:8080/产品",
+            "shop.example.co:443?q=中文"
+        ] {
+            #expect(InputAssistSentenceBoundary.looksLikeBareDomain(url), "\(url) 应识别为域名")
+            #expect(!InputAssistSentenceBoundary.looksTranslatable(url), "\(url) 不该可翻译")
+        }
+    }
+
+    @Test func writeVerificationDistinguishesUnverifiableFromNoChange() {
+        // 回归：AX 写返回 .success 之后读不回 kAXValue（目标 App 忙 / 超时 / 瞬时错误），
+        // 旧实现把这种情况当成「内容没动过」继续走粘贴兜底——
+        // 可写很可能已经生效、选区已经塌缩，于是译文被插进去第二遍。
+        //
+        // 「读不回来」和「读回来但没变」必须是两种结论：前者要中止，后者才能粘贴。
+        #expect(InputAssistReplacementSafetyGuard.AbortReason.writeVerificationUnavailable.rawValue
+            == "writeVerificationUnavailable")
+        #expect(InputAssistReplacementSafetyGuard.AbortReason.writeVerificationUnavailable
+            != .sourceTextChanged)
+    }
+
+    @MainActor
+    @Test func clipboardMustStillHoldOurTranslationRightBeforePasting() {
+        // 回归：记下 ourChangeCount 之后、按 ⌘V 之前还要跑好几次跨进程 AX 查询，
+        // 那段时间剪贴板管理器完全可能再写一次。不查这一下，
+        // ⌘V 会把别人刚写进来的东西粘到用户的原文位置上。
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("InputAssistTests.\(UUID().uuidString)"))
+        defer { pasteboard.releaseGlobally() }
+
+        pasteboard.clearContents()
+        pasteboard.setString("我们放进去的译文", forType: .string)
+        let ourChangeCount = pasteboard.changeCount
+
+        // 校验期间第三方改写了剪贴板。
+        pasteboard.clearContents()
+        pasteboard.setString("剪贴板管理器写进来的东西", forType: .string)
+
+        #expect(pasteboard.changeCount != ourChangeCount)
+        // 而且这时不能还原——对方的内容比我们的快照新。
+        #expect(pasteboard.string(forType: .string) == "剪贴板管理器写进来的东西")
+    }
+
     // MARK: - Apple 并行槽位（PRD §18）
 
     @MainActor
