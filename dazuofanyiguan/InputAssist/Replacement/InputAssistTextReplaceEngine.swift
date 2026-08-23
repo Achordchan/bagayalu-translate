@@ -220,32 +220,35 @@ enum InputAssistTextReplaceEngine {
                 return .aborted(reason: reason)
             }
 
-            let error = AXUIElementSetAttributeValue(
+            // 返回码只当参考，**不当判据**。
+            //
+            // `.cannotComplete` 表示跨进程消息没能完成——那说明**我们没拿到可靠回复**，
+            // 不等于目标进程没收到、更不等于它没写。拿它当"肯定没写"直接去粘贴，
+            // 遇上「写已生效但回复超时」就会把译文插进去第二遍。
+            // 所以无论返回什么，一律以实际读回的状态为准。
+            _ = AXUIElementSetAttributeValue(
                 element,
                 kAXSelectedTextAttribute as CFString,
                 text as CFString
             )
-            if error == .success {
-                let verification = await verifyWrite(
-                    in: element,
-                    valueBeforeWrite: valueBeforeWrite,
-                    expectedValueAfterWrite: expectedValueAfterWrite
-                )
-                if verification == .applied {
-                    return .replaced(strategy: .axDirect)
-                }
-                // **验不了就绝不能往下走。**
-                //
-                // 调用返回了成功，只是读不回结果、或者全文变成了第三种样子
-                // （目标 App 忙 / AX 超时 / 这期间用户又打了字）。
-                // 写很可能已经生效、选区已经塌缩——再补一次粘贴就是把译文插进去第二遍。
-                guard verification.allowsPasteFallback else {
-                    return .aborted(reason: .writeVerificationUnavailable)
-                }
-                // 到这里只剩 .didNotApply：Chromium 系会接受 set 然后悄悄忽略它，
-                // 文字确实一个字没动、选区仍然圈着原文，往下走粘贴是安全的。
+
+            let verification = await verifyWrite(
+                in: element,
+                valueBeforeWrite: valueBeforeWrite,
+                expectedValueAfterWrite: expectedValueAfterWrite
+            )
+            if verification == .applied {
+                return .replaced(strategy: .axDirect)
             }
-            // error != .success：调用本身失败了，什么都没写进去，粘贴安全。
+            // **验不了就绝不能往下走。** 读不回结果、或者全文变成了第三种样子
+            // （目标 App 忙 / AX 超时 / 这期间用户又打了字）——
+            // 写都可能已经生效、选区已经塌缩，再补一次粘贴就是插第二遍。
+            guard verification.allowsPasteFallback else {
+                return .aborted(reason: .writeVerificationUnavailable)
+            }
+            // 到这里只剩 .didNotApply，而且是**连续两次**都读到原样：
+            // Chromium 系会接受 set 然后悄悄忽略它。文字确实一个字没动、
+            // 选区仍然圈着原文，往下走粘贴是安全的。
         }
         return await pasteReplace(
             text,
@@ -285,6 +288,24 @@ enum InputAssistTextReplaceEngine {
         /// **只有「确认没生效」才允许退到粘贴。**
         /// 验不了就中止——否则写其实成功了的话，粘贴会把译文插进去第二遍。
         var allowsPasteFallback: Bool { self == .didNotApply }
+
+        /// 两次读回的最终裁决。纯函数，可直接单测。
+        ///
+        /// **只读一次就下结论是不安全的**：有的 App 是异步落地的，
+        /// 写下去之后立刻读还是写之前的样子（stale-before）。
+        /// 只凭这一次就判 `.didNotApply` 并马上补 ⌘V，
+        /// 等原来那次 AX 写随后落地，译文就出现了两遍。
+        ///
+        /// 所以只有**连续两次都精确读到「和写之前一模一样」**，
+        /// 才敢断定这次写确实没生效、粘贴是安全的。
+        static func resolve(
+            first: WriteVerification,
+            second: WriteVerification
+        ) -> WriteVerification {
+            if first == .applied || second == .applied { return .applied }
+            if first == .didNotApply, second == .didNotApply { return .didNotApply }
+            return .unverifiable
+        }
     }
 
     /// 发 ⌘V 之前的最后一道不变式：剪贴板里装的还是不是我们那份译文。
@@ -303,24 +324,25 @@ enum InputAssistTextReplaceEngine {
         valueBeforeWrite: String,
         expectedValueAfterWrite: String
     ) async -> WriteVerification {
-        // 目标 App 正忙时这次读可能瞬时失败。重试一次，
-        // 免得把本来好好的替换误判成「验不了」而白白放弃。
-        for attempt in 0..<2 {
-            if let valueAfterWrite = InputAssistAXTextCapture.stringAttribute(
-                element,
-                kAXValueAttribute as String
-            ) {
-                return WriteVerification.classify(
-                    valueAfterWrite: valueAfterWrite,
-                    valueBeforeWrite: valueBeforeWrite,
-                    expectedValueAfterWrite: expectedValueAfterWrite
-                )
-            }
-            if attempt == 0 {
-                try? await Task.sleep(nanoseconds: writeVerificationRetryNanoseconds)
-            }
+        func read() -> WriteVerification {
+            WriteVerification.classify(
+                valueAfterWrite: InputAssistAXTextCapture.stringAttribute(
+                    element,
+                    kAXValueAttribute as String
+                ),
+                valueBeforeWrite: valueBeforeWrite,
+                expectedValueAfterWrite: expectedValueAfterWrite
+            )
         }
-        return .unverifiable
+
+        let first = read()
+        // 已经精确读到期望值就没必要再等——结论不会更好。
+        if first == .applied { return .applied }
+
+        // 沉降一下再读第二次。这一等既覆盖「刚才读失败」，
+        // 也覆盖更危险的「异步落地、刚才读到的还是写之前的样子」。
+        try? await Task.sleep(nanoseconds: writeVerificationRetryNanoseconds)
+        return WriteVerification.resolve(first: first, second: read())
     }
 
     /// 合成 ⌘V 替换当前选区。

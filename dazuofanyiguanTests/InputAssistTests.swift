@@ -1949,6 +1949,40 @@ struct InputAssistTests {
         ))
     }
 
+    @Test func staleBeforeOnTheFirstReadMustNotAuthorizePaste() {
+        // 回归：有的 App 是异步落地的——写下去之后立刻读，还是写之前的样子。
+        // 只凭这一次就判 .didNotApply 并马上补 ⌘V，
+        // 等原来那次 AX 写随后落地，译文就出现了两遍。
+        //
+        // 只有连续两次都精确读到「和写之前一模一样」，才敢放行粘贴。
+        typealias Verification = InputAssistTextReplaceEngine.WriteVerification
+
+        // 第一次读到 before、第二次才看到期望值 → 是异步生效，成功，绝不能粘贴。
+        #expect(Verification.resolve(first: .didNotApply, second: .applied) == .applied)
+
+        // 两次都是 before → 确实没生效，可以粘贴。
+        let stable = Verification.resolve(first: .didNotApply, second: .didNotApply)
+        #expect(stable == .didNotApply)
+        #expect(stable.allowsPasteFallback)
+
+        // 只要有一次读不到 / 是第三种样子，就不许粘贴。
+        for pair in [
+            (Verification.didNotApply, Verification.unverifiable),
+            (Verification.unverifiable, Verification.didNotApply),
+            (Verification.unverifiable, Verification.unverifiable)
+        ] {
+            let resolved = Verification.resolve(first: pair.0, second: pair.1)
+            #expect(resolved == .unverifiable, "\(pair)")
+            #expect(!resolved.allowsPasteFallback, "\(pair)")
+        }
+    }
+
+    @Test func aSuccessfulFirstReadShortCircuitsWithoutWaiting() {
+        typealias Verification = InputAssistTextReplaceEngine.WriteVerification
+        #expect(Verification.resolve(first: .applied, second: .unverifiable) == .applied)
+        #expect(Verification.resolve(first: .applied, second: .didNotApply) == .applied)
+    }
+
     @Test func expectedValueAfterWriteIsSplicedByUTF16Range() {
         let text = "前面内容我们可以提供后面"
         let range = InputAssistTextRange(location: 4, length: 6)
