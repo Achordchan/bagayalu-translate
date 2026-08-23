@@ -59,6 +59,23 @@ enum InputAssistTextReplaceEngine {
             guard translatedText != session.sourceText else {
                 return .replaced(strategy: .alreadyMatching)
             }
+
+            // **必须在 selectRange 之前比。**
+            //
+            // `selectRange` 会把用户当前的选区直接覆盖掉，之后再怎么校验，
+            // 验的都只是「我刚设的那个选区还在不在」——用户其实早就把光标挪走了
+            // 这件事永远发现不了。
+            //
+            // 光靠「浮层会在光标移动时自动收起」也不够：有些 App 根本不发
+            // AXSelectedTextChanged；关掉自动触发时压根没有人在监听选区；
+            // 点击关闭浮层还是异步的，和紧接着的 Enter 之间存在竞态。
+            if let selectedRangeAtCapture = session.selectedRangeAtCapture {
+                guard let selectionBeforeWrite = InputAssistAXTextCapture.selectedRange(element),
+                      selectionBeforeWrite == selectedRangeAtCapture else {
+                    return .aborted(reason: .selectionChanged)
+                }
+            }
+
             guard selectRange(range, in: element) else {
                 // 选不中就绝不往下走：位置没确认时粘贴等于往随机位置写。
                 return .failed(message: "无法选中要替换的文本范围")
@@ -222,8 +239,7 @@ enum InputAssistTextReplaceEngine {
         // 合成的 ⌘V 是发给**此刻**的前台 App 的，这是整个功能里最危险的一个动作。
         // 调用方虽然刚校验过，但那是几步之前的事——把这条不变式做成自守，
         // 而不是指望每个调用路径都记得先查一遍。
-        guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier
-            == expectedBundleIdentifier else {
+        guard isFrontmostApplication(expectedBundleIdentifier) else {
             return .aborted(reason: .applicationChanged)
         }
 
@@ -233,6 +249,16 @@ enum InputAssistTextReplaceEngine {
         pasteboard.setString(text, forType: .string)
         // 记下「剪贴板里现在是我们放的东西」这个版本号。
         let ourChangeCount = pasteboard.changeCount
+
+        // 再查一次，而且必须是**紧贴着 press 的最后一件事**。
+        //
+        // 上面那道 guard 到这里之间隔着一次剪贴板深拷贝——用户剪贴板里要是躺着
+        // 一张大图或者 PDF，把每个 item 的每种类型都 materialize 一遍是要花时间的。
+        // 那段时间足够用户切走一个 App，⌘V 就贴到别人那里去了。
+        guard isFrontmostApplication(expectedBundleIdentifier) else {
+            InputAssistPasteboardSnapshot.restore(saved, to: pasteboard)
+            return .aborted(reason: .applicationChanged)
+        }
 
         guard InputAssistKeyboardSynthesizer.press(
             InputAssistKeyboardSynthesizer.vKeyCode,
@@ -245,6 +271,10 @@ enum InputAssistTextReplaceEngine {
         try? await Task.sleep(nanoseconds: pasteSettleNanoseconds)
         restoreIfUntouched(saved, expectedChangeCount: ourChangeCount, on: pasteboard)
         return .replaced(strategy: .pasteFallback)
+    }
+
+    static func isFrontmostApplication(_ bundleIdentifier: String?) -> Bool {
+        NSWorkspace.shared.frontmostApplication?.bundleIdentifier == bundleIdentifier
     }
 
     /// 只在剪贴板里还是我们放进去的那份译文时才还原。

@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import Combine
 import Foundation
 import Testing
@@ -1646,6 +1647,75 @@ struct InputAssistTests {
         for text in ["OpenAI", "SQ16", "OK"] {
             #expect(text == text, "\(text) 译文与原文相同时必须视为无需改动")
         }
+    }
+
+    // MARK: - Codex 第六 / 七轮 review 的回归
+
+    @Test func caretMustBeComparedBeforeSelectRangeOverwritesIt() {
+        // 回归：`selectRange` 会把用户当前的选区直接覆盖掉。
+        // 在它之后再校验，验的只是「我刚设的那个选区还在不在」——
+        // 用户其实早就把光标挪走了这件事永远发现不了。
+        //
+        // 所以取词时必须把当时的选区记下来（session.selectedRangeAtCapture），
+        // 在 selectRange **之前**比对。
+        // "前面内容我们可以提供后面还有很多别的内容在这里" 里，「我们可以提供」在 [4, 10)。
+        let atCapture = InputAssistTextRange(location: 10, length: 0)
+        let afterUserClickedElsewhere = InputAssistTextRange(location: 20, length: 0)
+        let sourceRange = InputAssistTextRange(location: 4, length: 6)
+
+        // 关键点：这两个范围不相等，而且都不等于 sourceRange——
+        // 也就是说光比对 sourceRange 里的文本是发现不了光标移动的。
+        #expect(atCapture != afterUserClickedElsewhere)
+        #expect(atCapture != sourceRange)
+        #expect(afterUserClickedElsewhere != sourceRange)
+
+        // 文本没被改过，所以 validate 照样放行——这条不变式只能靠比对选区拿到。
+        let verdict = InputAssistReplacementSafetyGuard.validate(
+            expectedSourceText: "我们可以提供",
+            sourceRange: sourceRange,
+            currentElementValue: "前面内容我们可以提供后面还有很多别的内容在这里",
+            currentSelectedText: "",
+            hasFocusedElement: true,
+            isFocusedElementUnchanged: true,
+            isFrontmostApplicationUnchanged: true,
+            isSecureEventInputEnabled: false
+        )
+        #expect(verdict == .replaceRange(sourceRange))
+    }
+
+    @Test func selectionAtCaptureIsCarriedIntoTheSession() {
+        // 光记在 capture 里没用，必须一路带进 session，替换时才拿得到。
+        let element = AXUIElementCreateSystemWide()
+        let selection = InputAssistTextRange(location: 3, length: 2)
+        let capture = InputAssistCapture(
+            element: element,
+            sourceText: "好的",
+            sourceRange: InputAssistTextRange(location: 3, length: 2),
+            elementValue: "前面好的",
+            context: "前面好的",
+            capability: .axDirect,
+            role: "AXTextArea",
+            anchorRect: .zero,
+            hasPreciseCaretBounds: true,
+            selectedRangeAtCapture: selection
+        )
+        let session = CandidateSession(
+            appBundleIdentifier: "com.example.app",
+            capture: capture,
+            detectedSourceLanguageCode: "zh-CN"
+        )
+        #expect(session.selectedRangeAtCapture == selection)
+    }
+
+    @MainActor
+    @Test func frontmostApplicationCheckIsAvailableRightBeforePosting() {
+        // 回归：前台 App 的检查必须紧贴着 press，中间隔着剪贴板深拷贝就来不及了——
+        // 剪贴板里躺着一张大图时，把每种类型都 materialize 一遍是要花时间的。
+        //
+        // 这里只验判定函数本身：不存在的 bundle id 必定为 false，
+        // 因此它可以安全地放在 press 前面当最后一道闸。
+        #expect(!InputAssistTextReplaceEngine.isFrontmostApplication("com.example.definitely-not-frontmost"))
+        #expect(!InputAssistTextReplaceEngine.isFrontmostApplication(nil))
     }
 
     // MARK: - Apple 并行槽位（PRD §18）

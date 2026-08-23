@@ -21,6 +21,12 @@ struct InputAssistCapture {
     /// 锚点是不是精确的插入点（PRD §16.1 Level 1）。
     /// 只拿到控件位置或鼠标位置时为 false，对应能力等级要降一档。
     let hasPreciseCaretBounds: Bool
+    /// 取词那一刻控件的选区 / 光标位置。
+    ///
+    /// 替换前要拿它和当时的实际选区比一比。少了这一条的话，
+    /// `selectRange` 会先把用户的光标覆盖掉，之后再怎么校验都只是在验证
+    /// 「我刚设的那个选区还在不在」，永远发现不了用户其实已经把光标挪走了。
+    let selectedRangeAtCapture: InputAssistTextRange?
 }
 
 /// 跨 App 的 AX 文本读取。
@@ -210,7 +216,8 @@ enum InputAssistAXTextCapture {
                 capability: capability,
                 role: role,
                 anchorRect: anchor.rect,
-                hasPreciseCaretBounds: anchor.isPrecise
+                hasPreciseCaretBounds: anchor.isPrecise,
+                selectedRangeAtCapture: selectedRange
             )
         }
 
@@ -237,7 +244,8 @@ enum InputAssistAXTextCapture {
             capability: capability,
             role: role,
             anchorRect: anchor.rect,
-            hasPreciseCaretBounds: anchor.isPrecise
+            hasPreciseCaretBounds: anchor.isPrecise,
+            selectedRangeAtCapture: selectedRange
         )
     }
 
@@ -259,8 +267,9 @@ enum InputAssistAXTextCapture {
         let capability = capability(of: element)
         guard capability != .unavailable else { return nil }
 
+        let currentSelection = selectedRange(element)
         guard let value = stringAttribute(element, kAXValueAttribute as String),
-              let caret = selectedRange(element)?.location,
+              let caret = currentSelection?.location,
               let range = InputAssistSentenceBoundary.autoTriggerSourceRange(
                   in: value,
                   burstStartUTF16Offset: burstStartUTF16Offset,
@@ -282,7 +291,8 @@ enum InputAssistAXTextCapture {
             capability: capability,
             role: role,
             anchorRect: anchor.rect,
-            hasPreciseCaretBounds: anchor.isPrecise
+            hasPreciseCaretBounds: anchor.isPrecise,
+            selectedRangeAtCapture: currentSelection
         )
     }
 

@@ -14,6 +14,8 @@ struct CandidateSession {
     let context: String
     let capability: InputAssistSurfaceCapability
     let anchorRect: CGRect
+    /// 取词那一刻的选区 / 光标位置，替换前要比对（见 InputAssistCapture 的注释）。
+    let selectedRangeAtCapture: InputAssistTextRange?
     let detectedSourceLanguageCode: String?
     let createdAt: Date
 
@@ -33,6 +35,7 @@ struct CandidateSession {
         self.context = capture.context
         self.capability = capture.capability
         self.anchorRect = capture.anchorRect
+        self.selectedRangeAtCapture = capture.selectedRangeAtCapture
         self.detectedSourceLanguageCode = detectedSourceLanguageCode
         self.createdAt = createdAt
     }
