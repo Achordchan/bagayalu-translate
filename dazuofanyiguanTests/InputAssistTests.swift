@@ -1475,6 +1475,99 @@ struct InputAssistTests {
         #expect(afterFocusSwitch == .abort(reason: .focusedElementChanged))
     }
 
+    // MARK: - Codex 第四轮 review 的回归
+
+    @Test func systemScreenshotShortcutsAreNeverSwallowedAsCandidateDigits() {
+        // 回归：⌘⇧3 / ⌘⇧4 / ⌘⇧5 是系统截图快捷键。
+        // 旧实现只看「有没有按 ⌘」，于是把它们当成 ⌘3 / ⌘4 / ⌘5——
+        // 用户想截图，结果截不成，还顺手把对应语言的译文替换了进去。
+        let committable: Set<Int> = [0, 1, 2, 3, 4, 5]
+        let digitKeyCodesFor3And4And5 = [20, 21, 23]
+
+        for keyCode in digitKeyCodesFor3And4And5 {
+            let decision = InputAssistKeyRouter.decide(
+                for: InputAssistKeyEvent(keyCode: keyCode, hasCommand: true, hasShift: true),
+                candidateCount: 6,
+                selectedIndex: 0,
+                committableIndices: committable
+            )
+            #expect(decision?.action == .dismissPassingEventThrough, "⌘⇧ keyCode \(keyCode)")
+            #expect(decision?.swallowsEvent == false, "⌘⇧ keyCode \(keyCode) 绝不能被吞掉")
+        }
+    }
+
+    @Test func commandDigitsRequireCommandToBeTheOnlyModifier() {
+        let committable: Set<Int> = [0, 1, 2]
+
+        // ⌘1 照常生效。
+        let plain = InputAssistKeyRouter.decide(
+            for: InputAssistKeyEvent(keyCode: 18, hasCommand: true),
+            candidateCount: 3,
+            selectedIndex: 0,
+            committableIndices: committable
+        )
+        #expect(plain?.action == .commitIndex(0))
+
+        // 加上任意其它修饰键就不再是我们的快捷键。
+        for extra in ["shift", "option", "control"] {
+            let decision = InputAssistKeyRouter.decide(
+                for: InputAssistKeyEvent(
+                    keyCode: 18,
+                    hasCommand: true,
+                    hasOption: extra == "option",
+                    hasControl: extra == "control",
+                    hasShift: extra == "shift"
+                ),
+                candidateCount: 3,
+                selectedIndex: 0,
+                committableIndices: committable
+            )
+            #expect(decision?.action == .dismissPassingEventThrough, "⌘+\(extra)+1")
+            #expect(decision?.swallowsEvent == false, "⌘+\(extra)+1 不能被吞掉")
+        }
+    }
+
+    @Test func commandCAlsoRequiresCommandToBeTheOnlyModifier() {
+        // ⌘⇧C 在不少 App 里是别的功能，不能被我们抢走。
+        let decision = InputAssistKeyRouter.decide(
+            for: InputAssistKeyEvent(
+                keyCode: InputAssistKeyRouter.cKey,
+                hasCommand: true,
+                hasShift: true
+            ),
+            candidateCount: 1,
+            selectedIndex: 0,
+            committableIndices: [0]
+        )
+        #expect(decision?.action == .dismissPassingEventThrough)
+        #expect(decision?.swallowsEvent == false)
+    }
+
+    @Test func sameElementSelectionChangeIsNotCoveredByTheTextComparison() {
+        // 回归：40ms 沉降期间用户在**同一个控件**里点了一下，
+        // 把我们刚设好的选区挪走或收成插入点。
+        //
+        // 这时文本本身没被改过，所以 validate 仍然会给出 .replaceRange——
+        // 它只证明「原文还在原来的位置」，并不证明「现在选中的就是它」。
+        // 也就是说这条不变式没法靠 validate 拿到，必须在引擎里单独查一次选区。
+        let range = InputAssistTextRange(location: 0, length: 2)
+        let verdict = InputAssistReplacementSafetyGuard.validate(
+            expectedSourceText: "好的",
+            sourceRange: range,
+            currentElementValue: "好的，另外还有一句",
+            currentSelectedText: "",
+            hasFocusedElement: true,
+            isFocusedElementUnchanged: true,
+            isFrontmostApplicationUnchanged: true,
+            isSecureEventInputEnabled: false
+        )
+        #expect(verdict == .replaceRange(range))
+
+        // 引擎那一侧要比对的就是这个：设好的范围 vs 此刻真正选中的范围。
+        #expect(range != InputAssistTextRange(location: 5, length: 0))
+        #expect(range == InputAssistTextRange(location: 0, length: 2))
+    }
+
     // MARK: - Apple 并行槽位（PRD §18）
 
     @MainActor

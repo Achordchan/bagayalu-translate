@@ -18,6 +18,7 @@ enum InputAssistReplacementSafetyGuard {
         case applicationChanged
         case focusLost
         case focusedElementChanged
+        case selectionChanged
         case sourceTextChanged
         case sourceRangeUnavailable
     }

@@ -493,6 +493,8 @@ final class InputAssistCoordinator: ObservableObject {
             return "输入框已失去焦点，已取消替换"
         case .focusedElementChanged:
             return "焦点已切换到别的输入框，已取消替换"
+        case .selectionChanged:
+            return "选区已变化，已取消替换"
         case .sourceTextChanged:
             return "原文已被修改，已取消替换"
         case .sourceRangeUnavailable:

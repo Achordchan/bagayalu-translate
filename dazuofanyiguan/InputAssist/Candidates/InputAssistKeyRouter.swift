@@ -138,7 +138,13 @@ enum InputAssistKeyRouter {
         selectedIndex: Int,
         committableIndices: Set<Int>
     ) -> InputAssistKeyDecision? {
-        if let digitIndex = digitKeyCodes.firstIndex(of: event.keyCode) {
+        // ⌘ 必须是**唯一**的修饰键。
+        //
+        // 否则 ⌘⇧3 / ⌘⇧4 / ⌘⇧5 这些系统截图快捷键会被当成 ⌘3 / ⌘4 / ⌘5 吞掉，
+        // 用户想截个图，结果截不成、还顺手把对应语言的译文替换了进去。
+        let hasOnlyCommand = !event.hasShift && !event.hasOption && !event.hasControl
+
+        if hasOnlyCommand, let digitIndex = digitKeyCodes.firstIndex(of: event.keyCode) {
             // ⌘4 但只有 3 个候选：这多半是原 App 自己的快捷键，别抢也别关浮层。
             guard digitIndex < candidateCount else { return nil }
             guard committableIndices.contains(digitIndex) else { return nil }
@@ -148,7 +154,7 @@ enum InputAssistKeyRouter {
             )
         }
 
-        if event.keyCode == cKey {
+        if hasOnlyCommand, event.keyCode == cKey {
             guard committableIndices.contains(selectedIndex) else { return nil }
             return InputAssistKeyDecision(action: .copySelection, swallowsEvent: true)
         }

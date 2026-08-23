@@ -69,6 +69,16 @@ enum InputAssistTextReplaceEngine {
             if case .abort(let reason) = settled.verdict {
                 return .aborted(reason: reason)
             }
+
+            // 光是「原文还在原来的位置」不够——那只证明文本没被改过。
+            // 用户可能在同一个控件里点了一下，把我们刚设好的选区挪走或者收成了插入点；
+            // 这时候写 kAXSelectedText 改的是**新选区**，粘贴则会落在**新光标**处。
+            // 所以必须确认这一刻选中的仍然正是我们圈出来的那一段。
+            guard let selectionNow = InputAssistAXTextCapture.selectedRange(settledElement),
+                  selectionNow == range else {
+                return .aborted(reason: .selectionChanged)
+            }
+
             return await writeSelection(
                 translatedText,
                 in: settledElement,
