@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// 输入增强测试页（PRD §48）。
@@ -23,14 +24,22 @@ struct InputAssistTestView: View {
         }
         .padding(20)
         .frame(minWidth: 520, minHeight: 460)
+        .background(
+            // 把自己的窗口登记给协调器：只有它是 key window 时才允许监听本进程，
+            // 否则设置页黑名单编辑器里的每一次输入都会被当成待翻译内容。
+            WindowAccessor { window in
+                coordinator.registerTestSurfaceWindow(window)
+            }
+        )
         .onAppear { isEditorFocused = true }
+        .onDisappear { coordinator.registerTestSurfaceWindow(nil) }
     }
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("输入增强测试")
                 .font(.system(size: 18, weight: .semibold))
-            Text("在下面的框里用中文输入法打一句话。开了自动触发的话确认上屏后稍停就会出候选；也可以随时按 \(settings.shortcut.displayString) 手动触发。")
+            Text("在下面的框里用中文输入法打一句话。开了自动触发的话确认上屏后稍停就会出候选；也可以随时按 \(settings.shortcut.displayString) 手动触发。自动触发只在这个窗口是当前窗口时对本应用生效。")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
         }

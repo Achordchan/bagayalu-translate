@@ -149,17 +149,33 @@ enum InputAssistTextReplaceEngine {
         let saved = InputAssistPasteboardSnapshot.snapshot(from: pasteboard)
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
+        // 记下「剪贴板里现在是我们放的东西」这个版本号。
+        let ourChangeCount = pasteboard.changeCount
 
         guard InputAssistKeyboardSynthesizer.press(
             InputAssistKeyboardSynthesizer.vKeyCode,
             command: true
         ) else {
-            InputAssistPasteboardSnapshot.restore(saved, to: pasteboard)
+            restoreIfUntouched(saved, expectedChangeCount: ourChangeCount, on: pasteboard)
             return .failed(message: "无法合成粘贴事件")
         }
 
         try? await Task.sleep(nanoseconds: pasteSettleNanoseconds)
-        InputAssistPasteboardSnapshot.restore(saved, to: pasteboard)
+        restoreIfUntouched(saved, expectedChangeCount: ourChangeCount, on: pasteboard)
         return .replaced(strategy: .pasteFallback)
+    }
+
+    /// 只在剪贴板里还是我们放进去的那份译文时才还原。
+    ///
+    /// 等待粘贴落地的这 250ms 里用户完全可能复制了别的东西（剪贴板管理器也会写）。
+    /// 无条件还原会把用户刚复制的内容悄悄换回旧快照——
+    /// 替换成功了、剪贴板却被毁了，比不还原糟得多。
+    static func restoreIfUntouched(
+        _ items: [NSPasteboardItem],
+        expectedChangeCount: Int,
+        on pasteboard: NSPasteboard
+    ) {
+        guard pasteboard.changeCount == expectedChangeCount else { return }
+        InputAssistPasteboardSnapshot.restore(items, to: pasteboard)
     }
 }

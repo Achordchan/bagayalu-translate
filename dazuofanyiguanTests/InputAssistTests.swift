@@ -1,3 +1,4 @@
+import AppKit
 import Combine
 import Foundation
 import Testing
@@ -1099,6 +1100,136 @@ struct InputAssistTests {
 
         #expect(InputAssistCompatibilityLevel.full > InputAssistCompatibilityLevel.degraded)
         #expect(InputAssistCompatibilityLevel.disabled < InputAssistCompatibilityLevel.manualOnly)
+    }
+
+    // MARK: - Codex 第一轮 review 的回归
+
+    @MainActor
+    @Test func enablingWithoutPermissionRecoversOncePermissionArrives() throws {
+        // 回归：在没有辅助功能权限时打开开关，`applyEnabledState()` 会提前返回；
+        // 此后如果没人再调它，用户去系统设置授权完回来，
+        // 开关显示「已开启」但快捷键和监听一个都没注册上。
+        let suiteName = "InputAssistTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let settings = InputAssistSettings(defaults: defaults)
+        var isTrusted = false
+        let coordinator = InputAssistCoordinator(
+            settings: settings,
+            isAccessibilityTrustedProvider: { isTrusted }
+        )
+        defer { coordinator.deactivate() }
+
+        settings.isEnabled = true
+        coordinator.applyEnabledState()
+        #expect(coordinator.lastStatusMessage == "需要辅助功能权限才能使用输入增强")
+        #expect(!coordinator.hotkeyStatus.isActive)
+
+        // 用户在系统设置里授权，切回 App。
+        isTrusted = true
+        coordinator.reapplyEnabledStateIfPermissionArrived()
+
+        // 快捷键有没有真的抢到手要看运行环境（可能被别的 App 占了），
+        // 但「还在提示缺权限」这件事必须消失——那正是这条 bug 的表征。
+        #expect(coordinator.lastStatusMessage != "需要辅助功能权限才能使用输入增强")
+    }
+
+    @MainActor
+    @Test func permissionRecheckDoesNotRebuildAnAlreadyRunningSetup() throws {
+        // 每次切回 App 都重新装配的话，会把常驻的 AXObserver 和快捷键反复拆建。
+        // 只在「开着但没跑起来」这一种情况下才重来。
+        let suiteName = "InputAssistTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let settings = InputAssistSettings(defaults: defaults)
+        let coordinator = InputAssistCoordinator(
+            settings: settings,
+            isAccessibilityTrustedProvider: { true }
+        )
+        defer { coordinator.deactivate() }
+
+        // 功能没开时，重新检查不该把它偷偷打开。
+        #expect(!settings.isEnabled)
+        coordinator.reapplyEnabledStateIfPermissionArrived()
+        #expect(!coordinator.hotkeyStatus.isActive)
+    }
+
+    @MainActor
+    @Test func ownApplicationIsObservableOnlyWhileTheTestWindowIsKey() throws {
+        // 回归：测试页在 PRD §48 里要求能就地验证自动触发，
+        // 但又不能让设置页黑名单编辑器里的输入也被当成待翻译内容。
+        let suiteName = "InputAssistTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let coordinator = InputAssistCoordinator(
+            settings: InputAssistSettings(defaults: defaults),
+            isAccessibilityTrustedProvider: { false }
+        )
+        defer { coordinator.deactivate() }
+
+        // 没登记窗口 → 永远不监听自己。
+        #expect(!coordinator.isTestSurfaceActive)
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 10, height: 10),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        // 程序化创建的 NSWindow 默认 isReleasedWhenClosed = true，
+        // close() 会在 ARC 还持有引用时把它释放掉，直接把测试进程带崩。
+        window.isReleasedWhenClosed = false
+        defer { window.orderOut(nil) }
+
+        coordinator.registerTestSurfaceWindow(window)
+        // 登记了但它不是 key window → 仍然不监听。
+        #expect(!coordinator.isTestSurfaceActive)
+
+        coordinator.registerTestSurfaceWindow(nil)
+        #expect(!coordinator.isTestSurfaceActive)
+    }
+
+    @MainActor
+    @Test func pasteFallbackKeepsAClipboardTheUserChangedMeanwhile() {
+        // 回归：等待粘贴落地的那 250ms 里用户可能复制了别的东西，
+        // 无条件还原会把它悄悄换回旧快照。
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("InputAssistTests.\(UUID().uuidString)"))
+        defer { pasteboard.releaseGlobally() }
+
+        pasteboard.clearContents()
+        pasteboard.setString("用户原本复制的内容", forType: .string)
+        let snapshot = InputAssistPasteboardSnapshot.snapshot(from: pasteboard)
+
+        // 我们放进去译文。
+        pasteboard.clearContents()
+        pasteboard.setString("We can provide a 16-ton marine crane.", forType: .string)
+        let ourChangeCount = pasteboard.changeCount
+
+        // 没人动过 → 应该还原。
+        InputAssistTextReplaceEngine.restoreIfUntouched(
+            snapshot,
+            expectedChangeCount: ourChangeCount,
+            on: pasteboard
+        )
+        #expect(pasteboard.string(forType: .string) == "用户原本复制的内容")
+
+        // 再来一次，这次中途用户复制了别的东西。
+        pasteboard.clearContents()
+        pasteboard.setString("译文", forType: .string)
+        let secondChangeCount = pasteboard.changeCount
+
+        pasteboard.clearContents()
+        pasteboard.setString("用户刚刚复制的新内容", forType: .string)
+
+        InputAssistTextReplaceEngine.restoreIfUntouched(
+            snapshot,
+            expectedChangeCount: secondChangeCount,
+            on: pasteboard
+        )
+        #expect(pasteboard.string(forType: .string) == "用户刚刚复制的新内容")
     }
 
     // MARK: - Apple 并行槽位（PRD §18）

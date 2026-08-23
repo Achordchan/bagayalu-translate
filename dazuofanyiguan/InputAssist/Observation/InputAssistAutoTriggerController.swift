@@ -63,6 +63,15 @@ final class InputAssistAutoTriggerController {
     /// 允不允许在当前 App 自动触发，由外部（黑白名单 + 能力等级）决定。
     var isAutoTriggerAllowed: (() -> Bool)?
 
+    /// 允不允许监听我们自己这个进程（只对输入增强测试页开放，见 PRD §48）。
+    var isOwnApplicationObservationAllowed: (() -> Bool)? {
+        didSet {
+            focusObserver.isOwnApplicationObservationAllowed = { [weak self] in
+                self?.isOwnApplicationObservationAllowed?() ?? false
+            }
+        }
+    }
+
     init() {
         focusObserver.onFocusedElementChanged = { [weak self] element in
             self?.handleFocusChanged(to: element)

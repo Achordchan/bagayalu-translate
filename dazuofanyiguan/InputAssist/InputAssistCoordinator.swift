@@ -41,16 +41,29 @@ final class InputAssistCoordinator: ObservableObject {
     private var log: LogStore?
     private var toast: ToastCenter?
 
+    /// 可注入，方便单测驱动「权限从无到有」这条路径。
+    private let isAccessibilityTrustedProvider: () -> Bool
+    private var didObserveActivation = false
+    /// 输入增强测试页所在的窗口。只有它是 key window 时才允许监听我们自己的进程。
+    private weak var testSurfaceWindow: NSWindow?
+
     private var currentSession: CandidateSession?
     private var currentRequest: CandidateTranslationRequest?
     private var translationTask: Task<Void, Never>?
+    /// 单条重试是独立任务，也必须跟着 session 一起取消，
+    /// 否则浮层关掉之后它还在继续发请求（OpenAI 那边是要计费的）。
+    private var retryTasks: [Task<Void, Never>] = []
     private var isReplacing = false
 
     var hotkeyStatus: InputAssistHotkeyStatus { hotkeyMonitor.status }
-    var isAccessibilityTrusted: Bool { AXIsProcessTrusted() }
+    var isAccessibilityTrusted: Bool { isAccessibilityTrustedProvider() }
 
-    init(settings: InputAssistSettings) {
+    init(
+        settings: InputAssistSettings,
+        isAccessibilityTrustedProvider: @escaping () -> Bool = { AXIsProcessTrusted() }
+    ) {
         self.settings = settings
+        self.isAccessibilityTrustedProvider = isAccessibilityTrustedProvider
 
         hotkeyMonitor.onTrigger = { [weak self] in
             self?.handleManualTrigger()
@@ -81,6 +94,23 @@ final class InputAssistCoordinator: ObservableObject {
         autoTrigger.isAutoTriggerAllowed = { [weak self] in
             self?.isAutoTriggerAllowedForFrontmostApplication() ?? false
         }
+        autoTrigger.isOwnApplicationObservationAllowed = { [weak self] in
+            self?.isTestSurfaceActive ?? false
+        }
+    }
+
+    /// PRD §48 要求测试页能就地验证自动触发，所以它得把自己的窗口登记进来。
+    func registerTestSurfaceWindow(_ window: NSWindow?) {
+        testSurfaceWindow = window
+    }
+
+    /// 只认「测试窗口正是当前 key window」这一种情况。
+    ///
+    /// 光看「测试窗口开着」不够——用户可能同时开着设置页在编辑黑名单，
+    /// 那里的每一次输入都会被当成待翻译内容。
+    var isTestSurfaceActive: Bool {
+        guard let testSurfaceWindow else { return false }
+        return NSApp.keyWindow === testSurfaceWindow
     }
 
     /// 由 App 启动 / 设置变化时调用。
@@ -92,6 +122,36 @@ final class InputAssistCoordinator: ObservableObject {
         self.appSettings = appSettings
         self.log = log
         self.toast = toast
+        observeApplicationActivationIfNeeded()
+        applyEnabledState()
+    }
+
+    /// 用户去系统设置里授权辅助功能，回到 App 时必须重新装配一次。
+    ///
+    /// 否则会卡在一个很别扭的状态：开关显示「已开启」、权限也给了，
+    /// 但快捷键和监听都没注册上——因为开启的那一刻还没有权限，
+    /// `applyEnabledState()` 提前返回了，此后再没有人调它。
+    /// 只能靠用户自己把开关关了再开，或者重启 App 才能恢复。
+    private func observeApplicationActivationIfNeeded() {
+        guard !didObserveActivation else { return }
+        didObserveActivation = true
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.reapplyEnabledStateIfPermissionArrived()
+            }
+        }
+    }
+
+    /// 只在「开着但因为缺权限没跑起来」这一种情况下重新装配，
+    /// 不要每次切回 App 都把快捷键和 AXObserver 拆了重建。
+    func reapplyEnabledStateIfPermissionArrived() {
+        guard settings.isEnabled else { return }
+        guard isAccessibilityTrusted else { return }
+        guard !hotkeyMonitor.status.isActive else { return }
         applyEnabledState()
     }
 
@@ -130,8 +190,7 @@ final class InputAssistCoordinator: ObservableObject {
     func deactivate() {
         hotkeyMonitor.unregister()
         autoTrigger.stop()
-        translationTask?.cancel()
-        translationTask = nil
+        cancelInFlightTranslations()
         panelController.dismiss(reason: .featureDisabled)
         applePool.shutdown()
     }
@@ -231,8 +290,7 @@ final class InputAssistCoordinator: ObservableObject {
         appSettings: AppSettings
     ) {
         // 上一轮还开着就先收掉，避免两个 session 同时指向同一个控件。
-        translationTask?.cancel()
-        translationTask = nil
+        cancelInFlightTranslations()
         if panelController.isVisible {
             panelController.dismiss(reason: .replacedByNewSession)
         }
@@ -312,8 +370,7 @@ final class InputAssistCoordinator: ObservableObject {
         // 先收浮层再替换：浮层的按键 tap 还开着的话，
         // 合成的 ⌘V 虽然带了注入标记，但少一层交互总是更稳。
         panelController.dismiss(reason: .committed)
-        translationTask?.cancel()
-        translationTask = nil
+        cancelInFlightTranslations()
 
         Task { @MainActor [weak self] in
             guard let self else { return }
@@ -368,7 +425,7 @@ final class InputAssistCoordinator: ObservableObject {
             return
         }
         let sessionID = session.sessionID
-        _ = candidateService.retry(
+        let task = candidateService.retry(
             request: request,
             targetLanguageCode: languageCode,
             slotIndex: index,
@@ -377,6 +434,8 @@ final class InputAssistCoordinator: ObservableObject {
             guard let self, self.currentSession?.sessionID == sessionID else { return }
             self.panelController.updateRow(languageCode: code, state: state)
         }
+        retryTasks.removeAll { $0.isCancelled }
+        retryTasks.append(task)
     }
 
     private func handleDismiss(reason: CandidateDismissReason) {
@@ -394,11 +453,19 @@ final class InputAssistCoordinator: ObservableObject {
             // 用户明确关掉了这次候选，同一段文字不该马上再弹一次。
             autoTrigger.resetBurst()
         }
-        translationTask?.cancel()
-        translationTask = nil
+        cancelInFlightTranslations()
         currentSession = nil
         currentRequest = nil
         applePool.cancelAll()
+    }
+
+    private func cancelInFlightTranslations() {
+        translationTask?.cancel()
+        translationTask = nil
+        for task in retryTasks {
+            task.cancel()
+        }
+        retryTasks.removeAll()
     }
 
     private static func abortMessage(

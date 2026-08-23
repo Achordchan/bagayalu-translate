@@ -25,6 +25,13 @@ final class InputAssistFocusObserver {
     /// 光标 / 选区变了。
     var onSelectionChanged: ((AXUIElement) -> Void)?
 
+    /// 允不允许监听我们自己这个进程。
+    ///
+    /// 默认不允许——否则用户在主窗口原文框或设置页黑名单编辑器里打字都会触发。
+    /// 唯一的例外是输入增强测试页：PRD §48 要求它能就地验证自动触发，
+    /// 由外部在「测试窗口是当前 key window」时放行。
+    var isOwnApplicationObservationAllowed: () -> Bool = { false }
+
     private(set) var isRunning = false
     private(set) var focusedElement: AXUIElement?
 
@@ -32,6 +39,7 @@ final class InputAssistFocusObserver {
     private var observedApplicationElement: AXUIElement?
     private var observedProcessIdentifier: pid_t?
     private var workspaceObserver: (any NSObjectProtocol)?
+    private var keyWindowObserver: (any NSObjectProtocol)?
 
     private static let focusChangedNotification = kAXFocusedUIElementChangedNotification as CFString
     private static let valueChangedNotification = kAXValueChangedNotification as CFString
@@ -47,10 +55,21 @@ final class InputAssistFocusObserver {
             queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated {
-                self?.attachToFrontmostApplication()
+                self?.refreshAttachment()
             }
         }
-        attachToFrontmostApplication()
+        // 在自己 App 内部换窗口不会触发 didActivateApplication，
+        // 但「现在 key 的是不是测试窗口」恰恰会因此改变，所以也要跟。
+        keyWindowObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didBecomeKeyNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.refreshAttachment()
+            }
+        }
+        refreshAttachment()
     }
 
     func stop() {
@@ -61,6 +80,10 @@ final class InputAssistFocusObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(workspaceObserver)
         }
         workspaceObserver = nil
+        if let keyWindowObserver {
+            NotificationCenter.default.removeObserver(keyWindowObserver)
+        }
+        keyWindowObserver = nil
         detachObserver()
         focusedElement = nil
     }
@@ -77,12 +100,17 @@ final class InputAssistFocusObserver {
 
     // MARK: - Private
 
-    private func attachToFrontmostApplication() {
+    private func refreshAttachment() {
         guard isRunning else { return }
-        guard let application = NSWorkspace.shared.frontmostApplication,
-              application.bundleIdentifier != Bundle.main.bundleIdentifier
-        else {
-            // 前台是我们自己（比如用户打开了设置页），不监听。
+        guard let application = NSWorkspace.shared.frontmostApplication else {
+            detachObserver()
+            updateFocusedElement(nil)
+            return
+        }
+
+        let isOwnApplication = application.bundleIdentifier == Bundle.main.bundleIdentifier
+        if isOwnApplication, !isOwnApplicationObservationAllowed() {
+            // 前台是我们自己，而且不是测试页：不监听。
             detachObserver()
             updateFocusedElement(nil)
             return
