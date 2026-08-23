@@ -83,6 +83,19 @@ enum InputAssistKeyRouter {
             )
         }
 
+        // 候选操作只认**没有任何修饰键**的按键。
+        //
+        // 最要命的是 ⇧Enter：聊天软件里那是「换行但不发送」，
+        // 当成普通 Enter 处理就会替换掉用户的文字，而他只是想另起一行。
+        // ⌥↑/⌥↓（按段落移动）、⇧↑/⇧↓（扩展选区）同理，
+        // 那是宿主 App 的编辑操作，不是在选候选。
+        guard !event.hasShift, !event.hasOption else {
+            return InputAssistKeyDecision(
+                action: .dismissPassingEventThrough,
+                swallowsEvent: false
+            )
+        }
+
         switch event.keyCode {
         case escape:
             return InputAssistKeyDecision(action: .dismiss, swallowsEvent: true)

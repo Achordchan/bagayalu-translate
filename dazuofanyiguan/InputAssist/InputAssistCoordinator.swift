@@ -14,6 +14,7 @@ struct InputAssistMetrics: Equatable {
     var cacheHitCount = 0
     var axReplaceCount = 0
     var pasteFallbackCount = 0
+    var alreadyMatchingCount = 0
     var safeAbortCount = 0
     var dismissByEscapeCount = 0
     var dismissByTypingCount = 0
@@ -405,6 +406,7 @@ final class InputAssistCoordinator: ObservableObject {
                 switch strategy {
                 case .axDirect: self.metrics.axReplaceCount += 1
                 case .pasteFallback: self.metrics.pasteFallbackCount += 1
+                case .alreadyMatching: self.metrics.alreadyMatchingCount += 1
                 }
                 self.log?.info("Input Assist 替换完成（\(strategy.rawValue)）")
 

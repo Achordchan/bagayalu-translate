@@ -5,6 +5,8 @@ import Foundation
 enum InputAssistReplacementStrategy: String, Equatable {
     case axDirect
     case pasteFallback
+    /// 译文和原文一模一样，目标位置本来就已经是想要的内容，什么都不用做。
+    case alreadyMatching
 }
 
 enum InputAssistReplacementOutcome: Equatable {
@@ -50,6 +52,13 @@ enum InputAssistTextReplaceEngine {
             return .aborted(reason: reason)
 
         case .replaceRange(let range):
+            // 译文和原文完全相同（产品名、型号、引擎原样返回…）时不要动它。
+            // 走下去的话：AX 写入「成功」但全文毫无变化，
+            // 「有没有生效」的判断只能报失败，接着补一次粘贴——
+            // 而此时选区已经塌缩，同样的文字会被插进去第二遍。
+            guard translatedText != session.sourceText else {
+                return .replaced(strategy: .alreadyMatching)
+            }
             guard selectRange(range, in: element) else {
                 // 选不中就绝不往下走：位置没确认时粘贴等于往随机位置写。
                 return .failed(message: "无法选中要替换的文本范围")
@@ -86,6 +95,9 @@ enum InputAssistTextReplaceEngine {
             )
 
         case .replaceSelection:
+            guard translatedText != session.sourceText else {
+                return .replaced(strategy: .alreadyMatching)
+            }
             return await writeSelection(
                 translatedText,
                 in: element,
@@ -176,6 +188,9 @@ enum InputAssistTextReplaceEngine {
     /// `err == .success` 完全不能证明文字真的被改了——必须读回来和写之前比一比。
     ///
     /// 只在 `valueBeforeWrite` 非 nil 时调用；调用方已经保证了这一点。
+    ///
+    /// 「写之后和写之前不同」这个判据成立的前提是**译文和原文不相同**，
+    /// 相同的情况已经在 `replace()` 里提前短路掉了（见 `.alreadyMatching`）。
     private static func didWriteTakeEffect(
         in element: AXUIElement,
         valueBeforeWrite: String?

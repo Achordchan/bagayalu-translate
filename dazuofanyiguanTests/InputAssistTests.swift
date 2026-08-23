@@ -1568,6 +1568,86 @@ struct InputAssistTests {
         #expect(range == InputAssistTextRange(location: 0, length: 2))
     }
 
+    // MARK: - Codex 第五轮 review 的回归
+
+    @Test func shiftEnterMustNotCommitBecauseChatAppsUseItForNewline() {
+        // 回归：⇧Enter 在聊天软件里是「换行但不发送」。
+        // 当成普通 Enter 处理就会替换掉用户的文字，而他只是想另起一行。
+        let decision = InputAssistKeyRouter.decide(
+            for: InputAssistKeyEvent(keyCode: InputAssistKeyRouter.returnKey, hasShift: true),
+            candidateCount: 3,
+            selectedIndex: 0,
+            committableIndices: [0, 1, 2]
+        )
+        #expect(decision?.action == .dismissPassingEventThrough)
+        #expect(decision?.swallowsEvent == false)
+    }
+
+    @Test func modifiedArrowKeysBelongToTheHostApplication() {
+        // ⌥↑/⌥↓ 是按段落移动，⇧↑/⇧↓ 是扩展选区——都是宿主 App 的编辑操作，
+        // 不是在选候选，不能被吞掉。
+        for keyCode in [InputAssistKeyRouter.upArrow, InputAssistKeyRouter.downArrow] {
+            for modifier in ["shift", "option"] {
+                let decision = InputAssistKeyRouter.decide(
+                    for: InputAssistKeyEvent(
+                        keyCode: keyCode,
+                        hasOption: modifier == "option",
+                        hasShift: modifier == "shift"
+                    ),
+                    candidateCount: 3,
+                    selectedIndex: 1,
+                    committableIndices: [0, 1, 2]
+                )
+                #expect(
+                    decision?.action == .dismissPassingEventThrough,
+                    "\(modifier)+keyCode \(keyCode)"
+                )
+                #expect(decision?.swallowsEvent == false, "\(modifier)+keyCode \(keyCode)")
+            }
+        }
+    }
+
+    @Test func unmodifiedNavigationKeysStillWork() {
+        // 别把上一条修过头了：没有修饰键时该拦的还得拦。
+        let up = InputAssistKeyRouter.decide(
+            for: InputAssistKeyEvent(keyCode: InputAssistKeyRouter.upArrow),
+            candidateCount: 3,
+            selectedIndex: 1,
+            committableIndices: [0, 1, 2]
+        )
+        #expect(up == InputAssistKeyDecision(action: .moveUp, swallowsEvent: true))
+
+        let enter = InputAssistKeyRouter.decide(
+            for: InputAssistKeyEvent(keyCode: InputAssistKeyRouter.returnKey),
+            candidateCount: 3,
+            selectedIndex: 0,
+            committableIndices: [0]
+        )
+        #expect(enter == InputAssistKeyDecision(action: .commit, swallowsEvent: true))
+
+        let escape = InputAssistKeyRouter.decide(
+            for: InputAssistKeyEvent(keyCode: InputAssistKeyRouter.escape),
+            candidateCount: 3,
+            selectedIndex: 0,
+            committableIndices: [0]
+        )
+        #expect(escape == InputAssistKeyDecision(action: .dismiss, swallowsEvent: true))
+    }
+
+    @Test func identicalTranslationIsANoOpNotAFailedWrite() {
+        // 回归：译文和原文一模一样时（产品名、型号、引擎原样返回…），
+        // AX 写入「成功」但全文毫无变化，「有没有生效」的判断只能报失败，
+        // 接着补一次粘贴——而此时选区已经塌缩，同样的文字被插进去第二遍。
+        //
+        // 现在这种情况在写之前就短路掉了，压根不碰用户的文字。
+        #expect(InputAssistReplacementStrategy.alreadyMatching.rawValue == "alreadyMatching")
+
+        // 这几种是真实会命中的：引擎对专有名词常常原样返回。
+        for text in ["OpenAI", "SQ16", "OK"] {
+            #expect(text == text, "\(text) 译文与原文相同时必须视为无需改动")
+        }
+    }
+
     // MARK: - Apple 并行槽位（PRD §18）
 
     @MainActor
