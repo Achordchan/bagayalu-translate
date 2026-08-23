@@ -351,6 +351,7 @@ struct InputAssistTests {
             currentElementValue: value,
             currentSelectedText: nil,
             hasFocusedElement: true,
+            isFocusedElementUnchanged: true,
             isFrontmostApplicationUnchanged: true,
             isSecureEventInputEnabled: false
         )
@@ -366,6 +367,7 @@ struct InputAssistTests {
             currentElementValue: "我们不能提供16吨船吊",
             currentSelectedText: nil,
             hasFocusedElement: true,
+            isFocusedElementUnchanged: true,
             isFrontmostApplicationUnchanged: true,
             isSecureEventInputEnabled: false
         )
@@ -379,6 +381,7 @@ struct InputAssistTests {
             currentElementValue: "被删短了",
             currentSelectedText: nil,
             hasFocusedElement: true,
+            isFocusedElementUnchanged: true,
             isFrontmostApplicationUnchanged: true,
             isSecureEventInputEnabled: false
         )
@@ -394,6 +397,7 @@ struct InputAssistTests {
             currentElementValue: "好的",
             currentSelectedText: nil,
             hasFocusedElement: true,
+            isFocusedElementUnchanged: true,
             isFrontmostApplicationUnchanged: true,
             isSecureEventInputEnabled: true
         ) == .abort(reason: .secureInputActive))
@@ -404,6 +408,7 @@ struct InputAssistTests {
             currentElementValue: "好的",
             currentSelectedText: nil,
             hasFocusedElement: false,
+            isFocusedElementUnchanged: true,
             isFrontmostApplicationUnchanged: true,
             isSecureEventInputEnabled: false
         ) == .abort(reason: .focusLost))
@@ -414,6 +419,7 @@ struct InputAssistTests {
             currentElementValue: "好的",
             currentSelectedText: nil,
             hasFocusedElement: true,
+            isFocusedElementUnchanged: true,
             isFrontmostApplicationUnchanged: false,
             isSecureEventInputEnabled: false
         ) == .abort(reason: .applicationChanged))
@@ -426,6 +432,7 @@ struct InputAssistTests {
             currentElementValue: nil,
             currentSelectedText: "好的",
             hasFocusedElement: true,
+            isFocusedElementUnchanged: true,
             isFrontmostApplicationUnchanged: true,
             isSecureEventInputEnabled: false
         ) == .replaceSelection)
@@ -436,6 +443,7 @@ struct InputAssistTests {
             currentElementValue: nil,
             currentSelectedText: nil,
             hasFocusedElement: true,
+            isFocusedElementUnchanged: true,
             isFrontmostApplicationUnchanged: true,
             isSecureEventInputEnabled: false
         ) == .abort(reason: .sourceRangeUnavailable))
@@ -763,13 +771,15 @@ struct InputAssistTests {
 
     @Test func panelHeightScalesWithTheConfiguredLanguageCountFromTheStart() {
         let one = CandidatePanelLayout.panelSize(
-            rows: CandidateListState(languageCodes: ["en"]).rows,
+            rowCount: 1,
             selectedIndex: 0,
+            reservedLineCount: 1,
             showsDebugInfo: false
         )
         let three = CandidatePanelLayout.panelSize(
-            rows: CandidateListState(languageCodes: ["en", "es", "ru"]).rows,
+            rowCount: 3,
             selectedIndex: 0,
+            reservedLineCount: 1,
             showsDebugInfo: false
         )
         #expect(three.height > one.height)
@@ -778,33 +788,22 @@ struct InputAssistTests {
     }
 
     @Test func nonSelectedRowsNeverExceedTwoLinesAndSelectedRowStopsAtFour() {
-        let long = String(repeating: "word ", count: 200)
-        let row = CandidateRow(
-            languageCode: "en",
-            state: .translated(
-                text: long,
-                source: .network,
-                latencyMilliseconds: 10,
-                engineTitle: "Apple 本地翻译"
-            )
-        )
         #expect(
-            CandidatePanelLayout.lineCount(for: row, isSelected: false)
+            CandidatePanelLayout.lineCount(reservedLineCount: 99, isSelected: false)
                 == CandidatePanelLayout.normalRowMaximumLines
         )
         #expect(
-            CandidatePanelLayout.lineCount(for: row, isSelected: true)
+            CandidatePanelLayout.lineCount(reservedLineCount: 99, isSelected: true)
                 == CandidatePanelLayout.selectedRowMaximumLines
         )
+        #expect(CandidatePanelLayout.lineCount(reservedLineCount: 0, isSelected: true) == 1)
     }
 
-    @Test func skeletonAndFailureRowsOccupyASingleLine() {
-        let loading = CandidateRow(languageCode: "en", state: .loading)
-        let failed = CandidateRow(languageCode: "es", state: .failed(message: "boom"))
-        let missing = CandidateRow(languageCode: "ru", state: .languagePackRequired)
-        for row in [loading, failed, missing] {
-            #expect(CandidatePanelLayout.lineCount(for: row, isSelected: true) == 1)
-        }
+    @Test func shortSourceTextKeepsTheCompactSingleLinePanel() {
+        // PRD §10.5：单语言用紧凑单行样式。短句不能预留一堆空白。
+        #expect(CandidatePanelLayout.reservedLineCount(forSourceText: "好的") == 1)
+        #expect(CandidatePanelLayout.reservedLineCount(forSourceText: "我们可以提供16吨船吊") == 1)
+        #expect(CandidatePanelLayout.reservedLineCount(forSourceText: "") == 1)
     }
 
     // MARK: - 设置（PRD §6.1 / §47）
@@ -1230,6 +1229,126 @@ struct InputAssistTests {
             on: pasteboard
         )
         #expect(pasteboard.string(forType: .string) == "用户刚刚复制的新内容")
+    }
+
+    // MARK: - Codex 第二轮 review 的回归
+
+    @Test func replacementAbortsWhenFocusMovedToADifferentControl() {
+        // 回归：同一个 App 里换了个输入框、里面恰好是同样的文字
+        // （搜索框和输入框都写着「好的」），只比文本内容会把译文写进错误的控件。
+        let verdict = InputAssistReplacementSafetyGuard.validate(
+            expectedSourceText: "好的",
+            sourceRange: InputAssistTextRange(location: 0, length: 2),
+            currentElementValue: "好的",
+            currentSelectedText: "好的",
+            hasFocusedElement: true,
+            isFocusedElementUnchanged: false,
+            isFrontmostApplicationUnchanged: true,
+            isSecureEventInputEnabled: false
+        )
+        #expect(verdict == .abort(reason: .focusedElementChanged))
+    }
+
+    @Test func focusedElementCheckRunsBeforeTheTextComparison() {
+        // 焦点换了就该停手，不该先去比文本再说。
+        let verdict = InputAssistReplacementSafetyGuard.validate(
+            expectedSourceText: "我们可以提供",
+            sourceRange: nil,
+            currentElementValue: nil,
+            currentSelectedText: "完全不同的内容",
+            hasFocusedElement: true,
+            isFocusedElementUnchanged: false,
+            isFrontmostApplicationUnchanged: true,
+            isSecureEventInputEnabled: false
+        )
+        #expect(verdict == .abort(reason: .focusedElementChanged))
+    }
+
+    @Test func panelHeightIsFixedOnceTheSourceTextIsKnown() {
+        // 回归：旧实现里 loading 行占 1 行、译文行可能占 2–4 行，
+        // 于是每回来一个语言浮层就长高并重新定位一次，违反 PRD §12.2。
+        // 现在尺寸只由「几行 / 哪行高亮 / 预留几行 / 调试态」决定，与译文无关。
+        let reserved = CandidatePanelLayout.reservedLineCount(
+            forSourceText: "我们可以提供16吨船吊"
+        )
+        let atShowTime = CandidatePanelLayout.panelSize(
+            rowCount: 3,
+            selectedIndex: 0,
+            reservedLineCount: reserved,
+            showsDebugInfo: false
+        )
+        // 译文陆续返回不改变任何一个入参，所以尺寸必然不变。
+        let afterResultsArrive = CandidatePanelLayout.panelSize(
+            rowCount: 3,
+            selectedIndex: 0,
+            reservedLineCount: reserved,
+            showsDebugInfo: false
+        )
+        #expect(atShowTime == afterResultsArrive)
+    }
+
+    @Test func reservedHeightAccountsForChineseExpandingWhenTranslated() {
+        // 「我们可以提供16吨船吊」11 个字 → 英文 37 个字符。
+        // 预留高度必须按膨胀后的长度算，否则一出结果就得长高。
+        let chinese = String(repeating: "我们可以提供16吨船吊", count: 2)
+        let latin = String(repeating: "a", count: chinese.count)
+        #expect(
+            CandidatePanelLayout.reservedLineCount(forSourceText: chinese)
+                > CandidatePanelLayout.reservedLineCount(forSourceText: latin)
+        )
+        #expect(CandidatePanelLayout.containsCJK("我们"))
+        #expect(!CandidatePanelLayout.containsCJK("hello"))
+    }
+
+    @Test func selectedRowMayGrowButResultArrivalMayNot() {
+        let reserved = 4
+        let firstSelected = CandidatePanelLayout.panelSize(
+            rowCount: 3,
+            selectedIndex: 0,
+            reservedLineCount: reserved,
+            showsDebugInfo: false
+        )
+        let secondSelected = CandidatePanelLayout.panelSize(
+            rowCount: 3,
+            selectedIndex: 1,
+            reservedLineCount: reserved,
+            showsDebugInfo: false
+        )
+        // 换高亮行不改变总高度（高亮那一行的额外高度只是换了个位置）。
+        #expect(firstSelected == secondSelected)
+
+        // 但按住 ⌥ 看调试信息会变高——那是用户操作，允许。
+        let withDebug = CandidatePanelLayout.panelSize(
+            rowCount: 3,
+            selectedIndex: 0,
+            reservedLineCount: reserved,
+            showsDebugInfo: true
+        )
+        #expect(withDebug.height > firstSelected.height)
+    }
+
+    @MainActor
+    @Test func manualShortcutCanBeChangedWhenTheDefaultIsTaken() throws {
+        // 回归：⌥Space 很容易被别的 App 占掉，设置页原来只是把它当文本显示，
+        // 一旦注册失败用户没有任何补救手段。
+        let suiteName = "InputAssistTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let settings = InputAssistSettings(defaults: defaults)
+        #expect(settings.shortcut == InputAssistShortcut.default)
+        #expect(InputAssistShortcut.selectableOptions.contains(InputAssistShortcut.default))
+        #expect(InputAssistShortcut.selectableOptions.count >= 3)
+
+        let alternative = try #require(
+            InputAssistShortcut.selectableOptions.first { $0 != InputAssistShortcut.default }
+        )
+        settings.shortcut = alternative
+        #expect(settings.shortcut == alternative)
+
+        // 选项之间不能有重复，否则 Picker 的 tag 会撞车。
+        let identifiers = Set(InputAssistShortcut.selectableOptions.map(\.id))
+        #expect(identifiers.count == InputAssistShortcut.selectableOptions.count)
     }
 
     // MARK: - Apple 并行槽位（PRD §18）

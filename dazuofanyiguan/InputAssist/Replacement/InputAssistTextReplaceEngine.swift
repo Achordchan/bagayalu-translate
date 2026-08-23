@@ -47,6 +47,7 @@ enum InputAssistTextReplaceEngine {
             currentElementValue: currentValue,
             currentSelectedText: currentSelectedText,
             hasFocusedElement: currentElement != nil,
+            isFocusedElementUnchanged: currentElement.map { CFEqual($0, session.element) } ?? false,
             isFrontmostApplicationUnchanged: frontmostBundleID == session.appBundleIdentifier,
             isSecureEventInputEnabled: InputAssistSecureInputGuard.isSecureEventInputEnabled
         )
@@ -105,7 +106,19 @@ enum InputAssistTextReplaceEngine {
         in element: AXUIElement,
         valueBeforeWrite: String?
     ) async -> InputAssistReplacementOutcome {
-        if InputAssistAXTextCapture.isSettable(element, kAXSelectedTextAttribute as String) {
+        // 关键：**只有在能验证结果的前提下才尝试 AX 直写。**
+        //
+        // 读不到 kAXValue 就没有任何办法判断这次写有没有生效。
+        // 如果照写不误，就会掉进最糟的一种情况：写**成功**了、但验证不了，
+        // 于是又补一次 ⌘V——此时选区已经塌缩到插入点之后，
+        // 译文会被插进去第二遍，把用户的文字弄坏。
+        //
+        // 所以验证不了就干脆不写，直接走粘贴。这时选区还原封不动地圈着原文，
+        // 粘贴正好替换掉它，只会发生一次插入。
+        let canVerifyWrite = valueBeforeWrite != nil
+
+        if canVerifyWrite,
+           InputAssistAXTextCapture.isSettable(element, kAXSelectedTextAttribute as String) {
             let error = AXUIElementSetAttributeValue(
                 element,
                 kAXSelectedTextAttribute as CFString,
@@ -114,15 +127,16 @@ enum InputAssistTextReplaceEngine {
             if error == .success, didWriteTakeEffect(in: element, valueBeforeWrite: valueBeforeWrite) {
                 return .replaced(strategy: .axDirect)
             }
+            // 走到这里只有两种可能：调用失败，或者调用「成功」但内容没变
+            // （Chromium 系会接受 set 然后悄悄忽略它）。两种都没有动过文字，
+            // 选区仍然圈着原文，粘贴是安全的。
         }
         return await pasteReplace(text)
     }
 
-    /// Chromium 系会「接受」`AXUIElementSetAttributeValue` 然后悄悄忽略它，
     /// `err == .success` 完全不能证明文字真的被改了——必须读回来和写之前比一比。
     ///
-    /// 读不到 kAXValue 时（有些富文本控件不暴露）无法证伪，只能保守地当作没生效，
-    /// 转去走粘贴兜底：多贴一次的代价，远小于用户以为翻译了、实际什么都没发生。
+    /// 只在 `valueBeforeWrite` 非 nil 时调用；调用方已经保证了这一点。
     private static func didWriteTakeEffect(
         in element: AXUIElement,
         valueBeforeWrite: String?

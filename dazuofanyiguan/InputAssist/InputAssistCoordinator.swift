@@ -329,6 +329,7 @@ final class InputAssistCoordinator: ObservableObject {
 
         guard panelController.show(
             languageCodes: visibleTargets,
+            sourceText: capture.sourceText,
             anchorRect: capture.anchorRect,
             appearance: appSettings.appearance,
             showsCacheBadge: settings.showsCacheBadge
@@ -478,6 +479,8 @@ final class InputAssistCoordinator: ObservableObject {
             return "应用已切换，已取消替换"
         case .focusLost:
             return "输入框已失去焦点，已取消替换"
+        case .focusedElementChanged:
+            return "焦点已切换到别的输入框，已取消替换"
         case .sourceTextChanged:
             return "原文已被修改，已取消替换"
         case .sourceRangeUnavailable:

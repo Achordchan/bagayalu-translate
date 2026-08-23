@@ -158,18 +158,32 @@ struct InputAssistSettingsPane: View {
                 Text("手动触发快捷键")
                     .font(.system(size: 12))
                 Spacer()
-                Text(settings.shortcut.displayString)
-                    .font(.system(size: 12, weight: .medium, design: .rounded))
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 4)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(Color.secondary.opacity(0.12))
-                    )
+                Picker("", selection: Binding(
+                    get: { settings.shortcut },
+                    set: { newValue in
+                        settings.shortcut = newValue
+                        coordinator.applyEnabledState()
+                    }
+                )) {
+                    ForEach(InputAssistShortcut.selectableOptions) { option in
+                        Text(option.displayString).tag(option)
+                    }
+                }
+                .labelsHidden()
+                .fixedSize()
             }
             Text("有选中文字就翻译选区；没有选中就翻译光标前最近的一句。")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
+
+            if case .unavailable = coordinator.hotkeyStatus {
+                Label(
+                    "这个组合已经被别的应用占用，请换一个。",
+                    systemImage: "exclamationmark.triangle"
+                )
+                .font(.system(size: 11))
+                .foregroundStyle(.orange)
+            }
 
             Button("打开输入增强测试", action: onOpenTestWindow)
                 .padding(.top, 2)

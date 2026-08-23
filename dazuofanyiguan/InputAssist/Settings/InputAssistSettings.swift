@@ -3,7 +3,7 @@ import Foundation
 import SwiftUI
 
 /// 手动触发快捷键。
-struct InputAssistShortcut: Equatable {
+struct InputAssistShortcut: Hashable {
     var keyCode: Int
     var carbonModifiers: UInt32
 
@@ -30,9 +30,35 @@ struct InputAssistShortcut: Equatable {
         case kVK_ANSI_D: return "D"
         case kVK_ANSI_E: return "E"
         case kVK_ANSI_T: return "T"
+        case kVK_ANSI_G: return "G"
+        case kVK_ANSI_J: return "J"
         default: return "Key \(keyCode)"
         }
     }
+
+    /// 可选的快捷键组合。
+    ///
+    /// ⌥Space 是 PRD §47 的建议默认值，但它很容易被别的 App 占掉
+    /// （Alfred、部分输入法切换器都在抢），所以必须给用户换的余地——
+    /// 否则一旦注册失败，手动触发就彻底没法用了。
+    static let selectableOptions: [InputAssistShortcut] = [
+        InputAssistShortcut(keyCode: kVK_Space, carbonModifiers: UInt32(optionKey)),
+        InputAssistShortcut(keyCode: kVK_Space, carbonModifiers: UInt32(controlKey)),
+        InputAssistShortcut(
+            keyCode: kVK_Space,
+            carbonModifiers: UInt32(optionKey) | UInt32(shiftKey)
+        ),
+        InputAssistShortcut(keyCode: kVK_ANSI_T, carbonModifiers: UInt32(optionKey)),
+        InputAssistShortcut(keyCode: kVK_ANSI_G, carbonModifiers: UInt32(optionKey)),
+        InputAssistShortcut(
+            keyCode: kVK_ANSI_J,
+            carbonModifiers: UInt32(cmdKey) | UInt32(optionKey)
+        )
+    ]
+}
+
+extension InputAssistShortcut: Identifiable {
+    var id: String { "\(keyCode)-\(carbonModifiers)" }
 }
 
 /// Input Assist 的全部持久化配置（PRD §47）。

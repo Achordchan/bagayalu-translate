@@ -6,6 +6,8 @@ final class CandidatePanelModel: ObservableObject {
     @Published var state = CandidateListState(languageCodes: [])
     @Published var showsDebugInfo = false
     @Published var showsCacheBadge = true
+    /// 每行预留几行文字。浮层出现时从原文估算一次，之后不再变（PRD §12.2）。
+    @Published var reservedLineCount = 1
 
     var onCommitRow: ((Int) -> Void)?
     var onRetryRow: ((Int) -> Void)?
@@ -25,6 +27,7 @@ struct CandidatePanelView: View {
                 CandidateRowView(
                     row: row,
                     isSelected: index == model.state.selectedIndex,
+                    reservedLineCount: model.reservedLineCount,
                     showsDebugInfo: model.showsDebugInfo,
                     showsCacheBadge: model.showsCacheBadge,
                     commandIndex: index < 6 ? index + 1 : nil
@@ -49,6 +52,7 @@ struct CandidatePanelView: View {
 private struct CandidateRowView: View {
     let row: CandidateRow
     let isSelected: Bool
+    let reservedLineCount: Int
     let showsDebugInfo: Bool
     let showsCacheBadge: Bool
     let commandIndex: Int?
@@ -96,13 +100,14 @@ private struct CandidateRowView: View {
             CandidateSkeletonView()
 
         case .translated(let text, _, _, _):
+            // 超出预留高度的部分按 PRD §13.1 用 … 截断，
+            // 绝不让它把浮层撑高——高度在弹出时就定死了。
             Text(text)
                 .font(.system(size: 13))
-                .lineLimit(
-                    isSelected
-                        ? CandidatePanelLayout.selectedRowMaximumLines
-                        : CandidatePanelLayout.normalRowMaximumLines
-                )
+                .lineLimit(CandidatePanelLayout.lineCount(
+                    reservedLineCount: reservedLineCount,
+                    isSelected: isSelected
+                ))
                 .truncationMode(.tail)
                 .fixedSize(horizontal: false, vertical: true)
 

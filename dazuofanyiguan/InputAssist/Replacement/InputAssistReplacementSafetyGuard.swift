@@ -17,6 +17,7 @@ enum InputAssistReplacementSafetyGuard {
         case secureInputActive
         case applicationChanged
         case focusLost
+        case focusedElementChanged
         case sourceTextChanged
         case sourceRangeUnavailable
     }
@@ -32,6 +33,7 @@ enum InputAssistReplacementSafetyGuard {
         currentElementValue: String?,
         currentSelectedText: String?,
         hasFocusedElement: Bool,
+        isFocusedElementUnchanged: Bool,
         isFrontmostApplicationUnchanged: Bool,
         isSecureEventInputEnabled: Bool
     ) -> Verdict {
@@ -43,6 +45,12 @@ enum InputAssistReplacementSafetyGuard {
         }
         guard isFrontmostApplicationUnchanged else {
             return .abort(reason: .applicationChanged)
+        }
+        // 同一个 App 里换了个输入框也必须停手。
+        // 只比对文本内容是不够的：另一个控件里恰好有同样的文字并不罕见
+        // （搜索框和输入框都写着「好的」），那样译文就会写进完全错误的地方。
+        guard isFocusedElementUnchanged else {
+            return .abort(reason: .focusedElementChanged)
         }
 
         if let sourceRange, let currentElementValue {

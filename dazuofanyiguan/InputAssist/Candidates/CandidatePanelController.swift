@@ -72,6 +72,7 @@ final class CandidatePanelController {
     @discardableResult
     func show(
         languageCodes: [String],
+        sourceText: String,
         anchorRect: CGRect,
         appearance: AppAppearance,
         showsCacheBadge: Bool
@@ -79,16 +80,14 @@ final class CandidatePanelController {
         model.state = CandidateListState(languageCodes: languageCodes)
         model.showsDebugInfo = false
         model.showsCacheBadge = showsCacheBadge
+        // 从原文估一次行高就定死，之后翻译陆续返回都不会再改变尺寸（PRD §12.2）。
+        model.reservedLineCount = CandidatePanelLayout.reservedLineCount(forSourceText: sourceText)
         self.anchorRect = anchorRect
 
         panel.applyAppearance(appearance)
         panel.present(
             anchorRect: anchorRect,
-            contentSize: CandidatePanelLayout.panelSize(
-                rows: model.state.rows,
-                selectedIndex: model.state.selectedIndex,
-                showsDebugInfo: false
-            )
+            contentSize: currentPanelSize()
         )
         isVisible = true
 
@@ -102,8 +101,9 @@ final class CandidatePanelController {
 
     func updateRow(languageCode: String, state: CandidateRowState) {
         guard isVisible else { return }
-        guard model.state.update(languageCode: languageCode, state: state) else { return }
-        resizeToFitContent()
+        // 刻意不重新计算尺寸：行高在弹出时就定死了，
+        // 译文陆续返回不能让浮层长高或者重新定位（PRD §12.2）。
+        _ = model.state.update(languageCode: languageCode, state: state)
     }
 
     func dismiss(reason: CandidateDismissReason) {
@@ -133,15 +133,20 @@ final class CandidatePanelController {
 
     // MARK: - Private
 
-    /// 高亮行可以展开到 4 行，所以选中位置变化会改变高度；
-    /// 但行数在浮层出现时就定死了，不会随翻译陆续返回而一条条长出来（PRD §12.2）。
-    private func resizeToFitContent() {
-        guard isVisible else { return }
-        let size = CandidatePanelLayout.panelSize(
-            rows: model.state.rows,
+    private func currentPanelSize() -> CGSize {
+        CandidatePanelLayout.panelSize(
+            rowCount: model.state.count,
             selectedIndex: model.state.selectedIndex,
+            reservedLineCount: model.reservedLineCount,
             showsDebugInfo: model.showsDebugInfo
         )
+    }
+
+    /// 只有**用户操作**才会改变尺寸：移动高亮（高亮行可以展开到 4 行）、按住 ⌥ 看调试信息。
+    /// 翻译返回不走这里。
+    private func resizeToFitContent() {
+        guard isVisible else { return }
+        let size = currentPanelSize()
         guard panel.frame.size != size else { return }
         // 重新跑一遍定位而不是就地把顶边钉住：高亮行展开到 4 行时浮层会长高，
         // 就地生长会把它顶出屏幕下边缘，定位器会负责该翻上方就翻上方。
