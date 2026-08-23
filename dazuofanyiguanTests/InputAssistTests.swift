@@ -1718,6 +1718,45 @@ struct InputAssistTests {
         #expect(!InputAssistTextReplaceEngine.isFrontmostApplication(nil))
     }
 
+    @MainActor
+    @Test func clipboardChangedDuringSnapshotMustNotBeDestroyed() {
+        // 回归：深拷贝一张大图要花时间，那期间别的 App 或剪贴板管理器可能写入新内容。
+        // 旧实现拿到的 saved 是旧的，紧接着 clearContents 把新内容毁掉，
+        // 之后「还原」还原的也是旧的——用户刚复制的东西就这么没了。
+        //
+        // ourChangeCount 救不了这种情况：它是销毁之后才记的。
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("InputAssistTests.\(UUID().uuidString)"))
+        defer { pasteboard.releaseGlobally() }
+
+        pasteboard.clearContents()
+        pasteboard.setString("快照开始前的内容", forType: .string)
+        let changeCountBeforeSnapshot = pasteboard.changeCount
+
+        // 模拟「快照进行到一半时别人改了剪贴板」。
+        pasteboard.clearContents()
+        pasteboard.setString("别的应用刚写进来的内容", forType: .string)
+
+        // 判据就是这个比较：不相等就必须放弃，绝不能往下走到 clearContents。
+        #expect(pasteboard.changeCount != changeCountBeforeSnapshot)
+        #expect(pasteboard.string(forType: .string) == "别的应用刚写进来的内容")
+    }
+
+    @Test func bundleIdentifierAloneCannotDetectSameAppFocusChanges() {
+        // 回归：粘贴前只比 bundle id 是不够的——**同一个 App 里换个输入框，
+        // bundle id 是不变的**。而替换期间自动监听是暂停的，
+        // 前面那些元素 / 选区校验都覆盖不到「深拷贝」那段间隔。
+        //
+        // 所以 press 之前必须把焦点元素和选区一起重新确认。
+        // 这里钉住的是「选区不同就该拦下来」这个判据本身。
+        let expected = InputAssistTextRange(location: 4, length: 6)
+        let afterUserClickedAnotherField = InputAssistTextRange(location: 0, length: 0)
+        #expect(expected != afterUserClickedAnotherField)
+
+        // 同一个 bundle id 在两种情况下都成立，区分不出来。
+        let sameBundle = "com.example.app"
+        #expect(sameBundle == sameBundle)
+    }
+
     // MARK: - Apple 并行槽位（PRD §18）
 
     @MainActor

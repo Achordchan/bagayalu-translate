@@ -109,6 +109,7 @@ enum InputAssistTextReplaceEngine {
                 translatedText,
                 in: settledElement,
                 valueBeforeWrite: settled.value,
+                expectedSelectedRange: range,
                 expectedBundleIdentifier: session.appBundleIdentifier
             )
 
@@ -120,6 +121,7 @@ enum InputAssistTextReplaceEngine {
                 translatedText,
                 in: element,
                 valueBeforeWrite: initial.value,
+                expectedSelectedRange: InputAssistAXTextCapture.selectedRange(element),
                 expectedBundleIdentifier: session.appBundleIdentifier
             )
         }
@@ -175,6 +177,7 @@ enum InputAssistTextReplaceEngine {
         _ text: String,
         in element: AXUIElement,
         valueBeforeWrite: String?,
+        expectedSelectedRange: InputAssistTextRange?,
         expectedBundleIdentifier: String?
     ) async -> InputAssistReplacementOutcome {
         // 关键：**只有在能验证结果的前提下才尝试 AX 直写。**
@@ -202,7 +205,12 @@ enum InputAssistTextReplaceEngine {
             // （Chromium 系会接受 set 然后悄悄忽略它）。两种都没有动过文字，
             // 选区仍然圈着原文，粘贴是安全的。
         }
-        return await pasteReplace(text, expectedBundleIdentifier: expectedBundleIdentifier)
+        return await pasteReplace(
+            text,
+            in: element,
+            expectedSelectedRange: expectedSelectedRange,
+            expectedBundleIdentifier: expectedBundleIdentifier
+        )
     }
 
     /// `err == .success` 完全不能证明文字真的被改了——必须读回来和写之前比一比。
@@ -230,6 +238,8 @@ enum InputAssistTextReplaceEngine {
     /// 走粘贴而不是逐字重打，是为了尽量落进宿主 App 自己的 Undo 栈（PRD §28.1）。
     private static func pasteReplace(
         _ text: String,
+        in element: AXUIElement,
+        expectedSelectedRange: InputAssistTextRange?,
         expectedBundleIdentifier: String?
     ) async -> InputAssistReplacementOutcome {
         guard !InputAssistSecureInputGuard.isSecureEventInputEnabled else {
@@ -244,7 +254,18 @@ enum InputAssistTextReplaceEngine {
         }
 
         let pasteboard = NSPasteboard.general
+
+        // 深拷贝本身可能很慢（剪贴板里躺着大图或 PDF 时要把每个 item 的每种类型
+        // 都 materialize 一遍）。这段时间里别的 App 或剪贴板管理器完全可能写入新内容，
+        // 那样 saved 拿到的是旧的、甚至新旧混在一起的，
+        // 而紧接着的 clearContents 会把那份新内容直接毁掉。
+        // 注意 ourChangeCount 救不了这种情况——它是**销毁之后**才记的。
+        let changeCountBeforeSnapshot = pasteboard.changeCount
         let saved = InputAssistPasteboardSnapshot.snapshot(from: pasteboard)
+        guard pasteboard.changeCount == changeCountBeforeSnapshot else {
+            return .failed(message: "剪贴板正在被其它应用修改，已取消替换")
+        }
+
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
         // 记下「剪贴板里现在是我们放的东西」这个版本号。
@@ -254,8 +275,16 @@ enum InputAssistTextReplaceEngine {
         //
         // 上面那道 guard 到这里之间隔着一次剪贴板深拷贝——用户剪贴板里要是躺着
         // 一张大图或者 PDF，把每个 item 的每种类型都 materialize 一遍是要花时间的。
-        // 那段时间足够用户切走一个 App，⌘V 就贴到别人那里去了。
-        guard isFrontmostApplication(expectedBundleIdentifier) else {
+        //
+        // 而且光比 bundle id 不够：**同一个 App 里换个输入框，bundle id 是不变的**。
+        // 替换期间自动监听是暂停的，前面那些元素 / 选区校验都覆盖不到这段间隔，
+        // 所以这里要把焦点元素和选区一起重新确认一遍。
+        guard isFrontmostApplication(expectedBundleIdentifier),
+              let focusedNow = InputAssistAXTextCapture.focusedElement(),
+              CFEqual(focusedNow, element),
+              expectedSelectedRange == nil
+                || InputAssistAXTextCapture.selectedRange(element) == expectedSelectedRange
+        else {
             InputAssistPasteboardSnapshot.restore(saved, to: pasteboard)
             return .aborted(reason: .applicationChanged)
         }
