@@ -7,6 +7,8 @@ struct SettingsView: View {
     @Environment(\.logStore) private var log
     @EnvironmentObject private var hotkeyMonitor: GlobalHotkeyMonitor
     @EnvironmentObject private var updater: AppUpdaterController
+    @EnvironmentObject private var inputAssistSettings: InputAssistSettings
+    @EnvironmentObject private var inputAssistCoordinator: InputAssistCoordinator
 
     @StateObject private var windowBehavior = SettingsWindowBehavior()
 
@@ -162,6 +164,21 @@ struct SettingsView: View {
                 doubleCopyWindowMs: $settings.doubleCopyWindowMs,
                 hasAccessibilityPermission: hasAccessibilityPermission,
                 onOpenPermissionGuide: openPermissionGuide
+            )
+
+        case .inputAssist:
+            InputAssistSettingsPane(
+                settings: inputAssistSettings,
+                coordinator: inputAssistCoordinator,
+                hasAccessibilityPermission: hasAccessibilityPermission,
+                engineTitle: settings.engineType.title,
+                onOpenPermissionGuide: openPermissionGuide,
+                onOpenTestWindow: {
+                    NotificationCenter.default.post(
+                        name: .dazuofanyiguanOpenInputAssistTest,
+                        object: nil
+                    )
+                }
             )
 
         case .screenshot:

@@ -23,6 +23,8 @@ struct dazuofanyiguanApp: App {
     @StateObject private var appleTranslationCoordinator: AppleTranslationCoordinator
     @StateObject private var translatorVM: TranslatorViewModel
     @StateObject private var screenshotOCR: ScreenshotOCRCoordinator
+    @StateObject private var inputAssistSettings: InputAssistSettings
+    @StateObject private var inputAssistCoordinator: InputAssistCoordinator
 
     init() {
         LegacySandboxPreferencesMigration.migrateIfNeeded()
@@ -41,6 +43,12 @@ struct dazuofanyiguanApp: App {
             wrappedValue: ScreenshotOCRCoordinator(
                 appleTranslationCoordinator: screenshotAppleTranslationCoordinator
             )
+        )
+
+        let inputAssistSettings = InputAssistSettings()
+        _inputAssistSettings = StateObject(wrappedValue: inputAssistSettings)
+        _inputAssistCoordinator = StateObject(
+            wrappedValue: InputAssistCoordinator(settings: inputAssistSettings)
         )
     }
 
@@ -61,6 +69,20 @@ struct dazuofanyiguanApp: App {
                 .environmentObject(appleTranslationCoordinator)
                 .environmentObject(translatorVM)
                 .environmentObject(screenshotOCR)
+                .environmentObject(inputAssistSettings)
+                .environmentObject(inputAssistCoordinator)
+                .inputAssistTestWindowOpener()
+                .inputAssistOnboarding(
+                    settings: inputAssistSettings,
+                    coordinator: inputAssistCoordinator
+                )
+                .onAppear {
+                    inputAssistCoordinator.activate(
+                        appSettings: settings,
+                        log: log,
+                        toast: toast
+                    )
+                }
         }
         .defaultSize(
             width: AppWindowController.preferredContentSize.width,
@@ -78,6 +100,9 @@ struct dazuofanyiguanApp: App {
                 .environment(\.logStore, log)
                 .environmentObject(hotkeyMonitor)
                 .environmentObject(updater)
+                .environmentObject(inputAssistSettings)
+                .environmentObject(inputAssistCoordinator)
+                .inputAssistTestWindowOpener()
         }
 
         Window("控制台", id: "console") {
@@ -86,8 +111,24 @@ struct dazuofanyiguanApp: App {
                 .preferredColorScheme(settings.appearance.colorScheme)
         }
 
+        Window("输入增强测试", id: "inputAssistTest") {
+            InputAssistTestView(
+                settings: inputAssistSettings,
+                coordinator: inputAssistCoordinator
+            )
+            .preferredColorScheme(settings.appearance.colorScheme)
+        }
+
         MenuBarExtra("大佐翻译官", systemImage: "character.bubble") {
             Toggle("Mini 模式", isOn: $settings.miniModeEnabled)
+
+            Toggle("输入增强", isOn: Binding(
+                get: { inputAssistSettings.isEnabled },
+                set: { newValue in
+                    inputAssistSettings.isEnabled = newValue
+                    inputAssistCoordinator.applyEnabledState()
+                }
+            ))
 
             Divider()
 
@@ -185,6 +226,7 @@ extension Notification.Name {
     static let dazuofanyiguanClearInput = Notification.Name("dazuofanyiguan.clearInput")
     static let dazuofanyiguanCopyOutput = Notification.Name("dazuofanyiguan.copyOutput")
     static let dazuofanyiguanOpenPermissionGuide = Notification.Name("dazuofanyiguan.openPermissionGuide")
+    static let dazuofanyiguanOpenInputAssistTest = Notification.Name("dazuofanyiguan.openInputAssistTest")
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
