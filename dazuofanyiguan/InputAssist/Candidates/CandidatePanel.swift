@@ -6,6 +6,7 @@ final class CandidatePanelModel: ObservableObject {
     @Published var state = CandidateListState(languageCodes: [])
     @Published var showsDebugInfo = false
     @Published var showsCacheBadge = true
+    @Published var commitMode: InputAssistCommitMode = .copy
     /// 每行预留几行文字。浮层出现时从原文估算一次，之后不再变（PRD §12.2）。
     @Published var reservedLineCount = 1
 
@@ -41,6 +42,15 @@ struct CandidatePanelView: View {
                         model.onCommitRow?(index)
                     }
                 }
+            }
+
+            if model.commitMode == .copy {
+                Divider()
+                Label("当前应用将复制译文", systemImage: "doc.on.doc")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 8)
+                    .padding(.top, 3)
             }
         }
         .padding(.horizontal, CandidatePanelLayout.horizontalPadding)

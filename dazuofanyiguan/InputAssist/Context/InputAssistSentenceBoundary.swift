@@ -98,40 +98,6 @@ enum InputAssistSentenceBoundary {
         return String(context.suffix(characterLimit))
     }
 
-    /// 自动触发的替换范围（PRD §9.1 + §9.3）。
-    ///
-    /// 取「这轮输入的起点」和「当前句的起点」里**靠后**的那一个作为开头：
-    /// - 用输入起点，保证不会去改用户之前就写好的内容（§9.1「不得修改前文」）；
-    /// - 用句起点，保证不会一次跨掉好几个完整句子（§9.3）。
-    static func autoTriggerSourceRange(
-        in text: String,
-        burstStartUTF16Offset: Int,
-        caretUTF16Offset: Int
-    ) -> InputAssistTextRange? {
-        guard caretUTF16Offset > burstStartUTF16Offset else { return nil }
-
-        let sentenceStart = currentSentenceRange(
-            in: text,
-            caretUTF16Offset: caretUTF16Offset
-        )?.location ?? burstStartUTF16Offset
-        var start = max(burstStartUTF16Offset, sentenceStart)
-
-        // 起点落在空白上时往后挪，别把用户敲的空格一起替换掉。
-        while start < caretUTF16Offset {
-            guard let character = InputAssistAXTextCapture.substring(
-                of: text,
-                range: InputAssistTextRange(location: start, length: 1)
-            ) else {
-                break
-            }
-            guard character.allSatisfy({ $0.isWhitespace }) else { break }
-            start += 1
-        }
-
-        guard start < caretUTF16Offset else { return nil }
-        return InputAssistTextRange(location: start, length: caretUTF16Offset - start)
-    }
-
     /// 这段文字看起来值不值得翻译。
     ///
     /// 不设最小字数（PRD §9.4：「好的」「收到」必须支持），
@@ -156,9 +122,7 @@ enum InputAssistSentenceBoundary {
 
     /// 不带协议头的域名，例如 `example.com/产品`。
     ///
-    /// 这种写法很常见，而且**因为路径里可能带中文，会被自动触发当成"新增了中文"**——
-    /// 只判断 `http://` 前缀和 `://` 的话，正好把它漏掉，
-    /// 结果是在一条 URL 中间弹候选、甚至替换掉其中一段。
+    /// 选中这类结构化内容时不应把路径里的中文当成普通待翻译文本。
     static func looksLikeBareDomain(_ text: String) -> Bool {
         guard !text.contains(where: { $0.isWhitespace }) else { return false }
 

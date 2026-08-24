@@ -9,8 +9,8 @@ import Foundation
 enum InputAssistSurfaceCapability: Equatable {
     /// AX 能精确读写选区：直接替换，宿主 Undo 正常。
     case axDirect
-    /// AX 只能读、不能写：靠合成粘贴替换。
-    case pasteFallback
+    /// 能读选中文本，但无法精确验证写入：只复制译文。
+    case copyOnly
     /// 完全读不到：只能放弃。
     case unavailable
 }

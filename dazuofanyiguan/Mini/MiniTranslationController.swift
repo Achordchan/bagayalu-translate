@@ -95,6 +95,11 @@ final class MiniTranslationController: ObservableObject {
             targetLanguageCode: settings.targetLanguageCode
         )
         bubbleModel.showsSmartDirectionNotice = languagePair != configuredPair
+        bubbleModel.detectedSourceLanguageName = Self.sourceLanguageName(
+            for: trimmedText,
+            requestedSourceLanguageCode: languagePair.sourceLanguageCode,
+            targetLanguageCode: languagePair.targetLanguageCode
+        )
 
         requestTask?.cancel()
         autoDismissTask?.cancel()
@@ -164,7 +169,8 @@ final class MiniTranslationController: ObservableObject {
             contentSize: MiniTranslationLayout.contentSize(
                 for: bubbleModel.state,
                 fontSize: fontSize,
-                showsSmartDirectionNotice: bubbleModel.showsSmartDirectionNotice
+                showsSmartDirectionNotice: bubbleModel.showsSmartDirectionNotice,
+                showsDetectedLanguage: bubbleModel.detectedSourceLanguageName != nil
             )
         )
     }
@@ -214,6 +220,11 @@ final class MiniTranslationController: ObservableObject {
                 )
                 guard !Task.isCancelled, requestTracker.accepts(requestID) else {
                     return
+                }
+                // 引擎真正识别出来的语种比请求时的推断更可信，拿它盖掉。
+                if let reported = Self.usableLanguageCode(translation.detectedSourceLanguageCode) {
+                    bubbleModel.detectedSourceLanguageName =
+                        LanguagePreset.displayName(for: reported)
                 }
                 showCompletedResult(translation.translatedText)
             } catch is CancellationError {
@@ -270,10 +281,45 @@ final class MiniTranslationController: ObservableObject {
         }
     }
 
+    /// 页脚显示的原文语种。
+    ///
+    /// 优先用我们**实际请求**的源语言；那是 auto 时，用和
+    /// `AppleTranslationCoordinator` 同一套脚本兜底推出来的结果——
+    /// 显示的必须是真正送去翻译的那个语言，不然页脚写着一回事、引擎收到的是另一回事。
+    private static func sourceLanguageName(
+        for text: String,
+        requestedSourceLanguageCode: String,
+        targetLanguageCode: String
+    ) -> String? {
+        if let requested = usableLanguageCode(requestedSourceLanguageCode) {
+            return LanguagePreset.displayName(for: requested)
+        }
+        guard let fallback = LanguageScriptFallback.sourceLanguageCode(
+            for: text,
+            preferredChineseVariant: targetLanguageCode
+        ) else {
+            return nil
+        }
+        return LanguagePreset.displayName(for: fallback)
+    }
+
+    /// 能拿来显示的语言代码。auto / und / 空都不算。
+    private static func usableLanguageCode(_ code: String?) -> String? {
+        guard let trimmed = code?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty,
+              trimmed.caseInsensitiveCompare(LanguagePreset.auto.code) != .orderedSame,
+              trimmed.caseInsensitiveCompare("und") != .orderedSame
+        else {
+            return nil
+        }
+        return trimmed
+    }
+
     private func showStandaloneError(_ message: String) {
         requestTask?.cancel()
         requestTracker.invalidate()
         bubbleModel.showsSmartDirectionNotice = false
+        bubbleModel.detectedSourceLanguageName = nil
         anchorPoint = NSEvent.mouseLocation
         show(.error(message))
     }
@@ -285,7 +331,8 @@ final class MiniTranslationController: ObservableObject {
             contentSize: MiniTranslationLayout.contentSize(
                 for: state,
                 fontSize: bubbleModel.fontSize,
-                showsSmartDirectionNotice: bubbleModel.showsSmartDirectionNotice
+                showsSmartDirectionNotice: bubbleModel.showsSmartDirectionNotice,
+                showsDetectedLanguage: bubbleModel.detectedSourceLanguageName != nil
             )
         )
 
@@ -315,7 +362,8 @@ final class MiniTranslationController: ObservableObject {
         let contentSize = MiniTranslationLayout.contentSize(
             for: state,
             fontSize: bubbleModel.fontSize,
-            showsSmartDirectionNotice: bubbleModel.showsSmartDirectionNotice
+            showsSmartDirectionNotice: bubbleModel.showsSmartDirectionNotice,
+                showsDetectedLanguage: bubbleModel.detectedSourceLanguageName != nil
         )
         if panel.isVisible {
             if panel.frame.size != contentSize {

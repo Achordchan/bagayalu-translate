@@ -13,7 +13,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         switch self {
         case .general: return "通用"
         case .shortcuts: return "快捷翻译"
-        case .inputAssist: return "输入增强"
+        case .inputAssist: return "选区翻译"
         case .screenshot: return "截图翻译"
         case .help: return "帮助与关于"
         }
@@ -23,7 +23,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         switch self {
         case .general: return "选择翻译服务并调整应用外观"
         case .shortcuts: return "设置文字翻译的触发方式和 Mini 模式"
-        case .inputAssist: return "在任意输入框里用译文直接替换刚输入的文字"
+        case .inputAssist: return "选中文字后查看多语言候选，可安全替换或复制"
         case .screenshot: return "设置截图快捷键、权限和识别行为"
         case .help: return "查看常见问题、项目信息和联系方式"
         }

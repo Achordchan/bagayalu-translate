@@ -47,17 +47,13 @@ enum InputAssistAppScope: String, CaseIterable, Identifiable {
 
 /// 应用黑白名单（PRD §24 / §25）。纯匹配逻辑，可直接单测。
 enum InputAssistAppFilter {
-    /// 默认黑名单：终端、代码编辑器、密码类工具（PRD §24.1）。
+    /// 默认黑名单：终端和密码类工具。
     ///
     /// 这些场景要么文本不该被翻译，要么误替换的代价特别高，
     /// 所以即使用户选了「全局启用」也先默认排除掉。
     static let defaultBlocklist: [String] = [
         "com.apple.Terminal",
         "com.googlecode.iterm2",
-        "com.microsoft.VSCode",
-        "com.microsoft.VSCodeInsiders",
-        "com.apple.dt.Xcode",
-        "com.jetbrains.intellij",
         "com.apple.keychainaccess",
         "com.1password.1password",
         "com.agilebits.onepassword7",

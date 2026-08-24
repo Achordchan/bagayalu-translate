@@ -75,11 +75,13 @@ final class CandidatePanelController {
         sourceText: String,
         anchorRect: CGRect,
         appearance: AppAppearance,
-        showsCacheBadge: Bool
+        showsCacheBadge: Bool,
+        commitMode: InputAssistCommitMode
     ) -> Bool {
         model.state = CandidateListState(languageCodes: languageCodes)
         model.showsDebugInfo = false
         model.showsCacheBadge = showsCacheBadge
+        model.commitMode = commitMode
         // 从原文估一次行高就定死，之后翻译陆续返回都不会再改变尺寸（PRD §12.2）。
         model.reservedLineCount = CandidatePanelLayout.reservedLineCount(forSourceText: sourceText)
         self.anchorRect = anchorRect
@@ -138,7 +140,8 @@ final class CandidatePanelController {
             rowCount: model.state.count,
             selectedIndex: model.state.selectedIndex,
             reservedLineCount: model.reservedLineCount,
-            showsDebugInfo: model.showsDebugInfo
+            showsDebugInfo: model.showsDebugInfo,
+            showsCopyNotice: model.commitMode == .copy
         )
     }
 

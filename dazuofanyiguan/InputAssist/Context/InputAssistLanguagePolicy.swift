@@ -9,6 +9,30 @@ enum InputAssistLanguagePolicy {
     static let recommendedTargetCount = 3
     static let defaultTargetCodes = ["en"]
 
+    /// 选中文本为明确的汉字文本时，不盲信长文通用语言识别。
+    ///
+    /// 不能再把整段长文丢给通用语言识别后盲信结果：数字、型号、多个标点和
+    /// 中英混排会让 NLLanguageRecognizer 返回非中文或 nil，Apple Translation 随后检查错误的
+    /// 语言对，已安装的中文包也会被误报成“需要下载”。
+    static func selectionSourceLanguageCode(
+        for text: String,
+        detectedLanguageCode: String?
+    ) -> String? {
+        guard containsHan(text) else {
+            return detectedLanguageCode
+        }
+
+        if detectedLanguageCode == "zh-CN" || detectedLanguageCode == "zh-TW" {
+            return detectedLanguageCode
+        }
+
+        // 明确包含日文假名时保留日文识别；纯汉字 / 中英混排按本功能的中文输入语义处理。
+        if containsJapaneseKana(text), detectedLanguageCode == "ja" {
+            return detectedLanguageCode
+        }
+        return "zh-CN"
+    }
+
     /// 去重并截断到 6 个。
     ///
     /// 顺序严格按用户配置保留——PRD §10.3 明确禁止按使用频率重排，
@@ -63,6 +87,30 @@ enum InputAssistLanguagePolicy {
         code.trimmingCharacters(in: .whitespaces)
             .replacingOccurrences(of: "_", with: "-")
             .lowercased()
+    }
+
+    private static func containsJapaneseKana(_ text: String) -> Bool {
+        text.unicodeScalars.contains { scalar in
+            switch scalar.value {
+            case 0x3040...0x30FF:
+                return true
+            default:
+                return false
+            }
+        }
+    }
+
+    private static func containsHan(_ text: String) -> Bool {
+        text.unicodeScalars.contains { scalar in
+            switch scalar.value {
+            case 0x3400...0x4DBF,
+                 0x4E00...0x9FFF,
+                 0xF900...0xFAFF:
+                return true
+            default:
+                return false
+            }
+        }
     }
 
     private static func subtags(of code: String) -> (base: String, variant: String?) {

@@ -1,10 +1,7 @@
 import AppKit
 import Foundation
 
-/// 剪贴板快照 / 恢复（参考 TypeTide `Pasteboard.swift`，MIT）。
-///
-/// 必须按 `item.types` 逐类型深拷贝：只存 `string(forType:)` 的话，
-/// 用户剪贴板里原本的图片、富文本、文件引用在 fallback 之后就没了。
+/// 按类型深拷贝剪贴板，避免丢失图片、富文本或文件引用。
 enum InputAssistPasteboardSnapshot {
     static func snapshot(from pasteboard: NSPasteboard = .general) -> [NSPasteboardItem] {
         (pasteboard.pasteboardItems ?? []).map { item in

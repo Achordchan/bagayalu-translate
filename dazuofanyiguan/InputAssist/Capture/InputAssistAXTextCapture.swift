@@ -16,6 +16,8 @@ struct InputAssistCapture {
     let context: String
     let capability: InputAssistSurfaceCapability
     let role: String?
+    /// 是否可对明确选区执行受控粘贴替换。
+    let allowsEditorPaste: Bool
     /// 光标 / 选区在屏幕上的矩形（Cocoa 坐标），用于浮层定位。
     let anchorRect: CGRect
     /// 锚点是不是精确的插入点（PRD §16.1 Level 1）。
@@ -93,9 +95,17 @@ enum InputAssistAXTextCapture {
         }
         if stringAttribute(element, kAXValueAttribute as String) != nil
             || stringAttribute(element, kAXSelectedTextAttribute as String) != nil {
-            return .pasteFallback
+            return .copyOnly
         }
         return .unavailable
+    }
+
+    static func allowsEditorPaste(element: AXUIElement, role: String?) -> Bool {
+        if InputAssistCommitPolicy.isEditableRole(role) {
+            return true
+        }
+        return isSettable(element, kAXValueAttribute as String)
+            || isSettable(element, kAXSelectedTextRangeAttribute as String)
     }
 
     /// 光标或选区在屏幕上的位置。三级降级正好对应 PRD §16.1 的 Level 1/2/3。
@@ -176,11 +186,9 @@ enum InputAssistAXTextCapture {
         return CGRect(origin: origin, size: size)
     }
 
-    /// 手动触发的取词（PRD §26）：有选区就用选区，没有就取 caret 前最近一句。
-    ///
-    /// 全程只读 AX，不动剪贴板——手动模式下读不到就直接失败，
-    /// 比悄悄按一下 ⌘C 去猜用户选了什么安全得多。
-    static func captureForManualTrigger() -> InputAssistCapture? {
+    /// 只读取用户明确选中的文本；没有选区就返回 nil。
+    /// 全程只读 AX，不猜测光标前句子，不动剪贴板。
+    static func captureSelectedText() -> InputAssistCapture? {
         guard let element = focusedElement() else { return nil }
 
         let role = stringAttribute(element, kAXRoleAttribute as String)
@@ -199,101 +207,35 @@ enum InputAssistAXTextCapture {
         let elementValue = stringAttribute(element, kAXValueAttribute as String)
         let selectedRange = selectedRange(element)
 
-        if let selectedText = stringAttribute(element, kAXSelectedTextAttribute as String),
-           !selectedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            let range = selectedRange.flatMap { $0.length > 0 ? $0 : nil }
-            let context = elementValue.flatMap { value -> String? in
-                guard let range else { return nil }
-                return InputAssistSentenceBoundary.context(in: value, sourceRange: range)
-            } ?? selectedText
-            let anchor = anchorRect(element: element, range: range)
-            return InputAssistCapture(
-                element: element,
-                sourceText: selectedText,
-                sourceRange: range,
-                elementValue: elementValue,
-                context: context,
-                capability: capability,
-                role: role,
-                anchorRect: anchor.rect,
-                hasPreciseCaretBounds: anchor.isPrecise,
-                selectedRangeAtCapture: selectedRange
-            )
-        }
-
-        // 无选区 → caret 前最近一句（PRD §26.2）
-        guard let elementValue,
-              let caret = selectedRange?.location,
-              let sentence = InputAssistSentenceBoundary.currentSentenceRange(
-                  in: elementValue,
-                  caretUTF16Offset: caret
-              ),
-              let sourceText = substring(of: elementValue, range: sentence),
-              InputAssistSentenceBoundary.looksTranslatable(sourceText)
+        guard let selectedText = stringAttribute(element, kAXSelectedTextAttribute as String),
+              InputAssistSentenceBoundary.looksTranslatable(selectedText)
         else {
             return nil
         }
 
-        let anchor = anchorRect(element: element, range: sentence)
+        let range = selectedRange.flatMap { $0.length > 0 ? $0 : nil }
+        let context = elementValue.flatMap { value -> String? in
+            guard let range else { return nil }
+            return InputAssistSentenceBoundary.context(in: value, sourceRange: range)
+        } ?? selectedText
+        let anchor = anchorRect(element: element, range: range)
         return InputAssistCapture(
             element: element,
-            sourceText: sourceText,
-            sourceRange: sentence,
+            sourceText: selectedText,
+            sourceRange: range,
             elementValue: elementValue,
-            context: InputAssistSentenceBoundary.context(in: elementValue, sourceRange: sentence),
+            context: context,
             capability: capability,
             role: role,
+            allowsEditorPaste: allowsEditorPaste(element: element, role: role),
             anchorRect: anchor.rect,
             hasPreciseCaretBounds: anchor.isPrecise,
             selectedRangeAtCapture: selectedRange
         )
     }
 
-    /// 自动触发的取词：范围由「这轮输入的起点」和「当前句」共同决定。
-    static func captureForAutoTrigger(
-        element: AXUIElement,
-        burstStartUTF16Offset: Int
-    ) -> InputAssistCapture? {
-        let role = stringAttribute(element, kAXRoleAttribute as String)
-        let subrole = stringAttribute(element, kAXSubroleAttribute as String)
-        guard InputAssistSecureInputGuard.allowsAutomation(
-            role: role,
-            subrole: subrole,
-            isSecureEventInputEnabled: InputAssistSecureInputGuard.isSecureEventInputEnabled
-        ) else {
-            return nil
-        }
-
-        let capability = capability(of: element)
-        guard capability != .unavailable else { return nil }
-
-        let currentSelection = selectedRange(element)
-        guard let value = stringAttribute(element, kAXValueAttribute as String),
-              let caret = currentSelection?.location,
-              let range = InputAssistSentenceBoundary.autoTriggerSourceRange(
-                  in: value,
-                  burstStartUTF16Offset: burstStartUTF16Offset,
-                  caretUTF16Offset: caret
-              ),
-              let sourceText = substring(of: value, range: range),
-              InputAssistSentenceBoundary.looksTranslatable(sourceText)
-        else {
-            return nil
-        }
-
-        let anchor = anchorRect(element: element, range: range)
-        return InputAssistCapture(
-            element: element,
-            sourceText: sourceText,
-            sourceRange: range,
-            elementValue: value,
-            context: InputAssistSentenceBoundary.context(in: value, sourceRange: range),
-            capability: capability,
-            role: role,
-            anchorRect: anchor.rect,
-            hasPreciseCaretBounds: anchor.isPrecise,
-            selectedRangeAtCapture: currentSelection
-        )
+    static func captureForManualTrigger() -> InputAssistCapture? {
+        captureSelectedText()
     }
 
     /// 按 UTF-16 范围拼出「替换之后应该长什么样」。

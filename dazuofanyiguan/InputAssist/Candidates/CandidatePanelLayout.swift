@@ -10,6 +10,7 @@ enum CandidatePanelLayout {
     static let rowVerticalPadding: CGFloat = 5
     static let lineHeight: CGFloat = 18
     static let debugLineHeight: CGFloat = 14
+    static let copyNoticeHeight: CGFloat = 25
     /// 语言码那一列的宽度，纵向对齐用。
     static let languageColumnWidth: CGFloat = 34
 
@@ -67,7 +68,8 @@ enum CandidatePanelLayout {
         rowCount: Int,
         selectedIndex: Int,
         reservedLineCount: Int,
-        showsDebugInfo: Bool
+        showsDebugInfo: Bool,
+        showsCopyNotice: Bool = false
     ) -> CGSize {
         guard rowCount > 0 else {
             return CGSize(width: width, height: lineHeight + verticalPadding * 2)
@@ -80,7 +82,11 @@ enum CandidatePanelLayout {
             )
         }
         let spacing = rowSpacing * CGFloat(max(0, rowCount - 1))
-        return CGSize(width: width, height: rowsHeight + spacing + verticalPadding * 2)
+        let noticeHeight = showsCopyNotice ? copyNoticeHeight : 0
+        return CGSize(
+            width: width,
+            height: rowsHeight + spacing + verticalPadding * 2 + noticeHeight
+        )
     }
 
     static func containsCJK(_ text: String) -> Bool {

@@ -272,6 +272,30 @@ final class AppleTranslationCoordinator: ObservableObject {
             }
         }
 
+        // 通用语言识别弃权了。这里**不能**直接把 nil 交出去：
+        // 短语上 Apple 自己的自动识别同样会失败，然后弹出
+        // 「无法自动检测语言。请选择要翻译的语言。」那个选择器——
+        // 在 Mini 气泡里那是个死胡同。先用书写系统兜一层底。
+        if let fallbackCode = LanguageScriptFallback.sourceLanguageCode(
+            for: text,
+            preferredChineseVariant: targetLanguageCode
+        ) {
+            let fallbackLanguage = appleLanguage(for: fallbackCode)
+            let fallbackStatus = await availability.status(
+                from: fallbackLanguage,
+                to: targetLanguage
+            )
+            // 猜出来的语言对本身就不被支持时，说明这个兜底没帮上忙，
+            // 继续走原来的自动识别，别用一个必然抛错的语言对把路堵死。
+            if fallbackStatus != .unsupported {
+                return TranslationContext(
+                    sourceLanguage: fallbackLanguage,
+                    targetLanguage: targetLanguage,
+                    availabilityStatus: fallbackStatus
+                )
+            }
+        }
+
         let automaticStatus = (try? await availability.status(
             for: text,
             to: targetLanguage

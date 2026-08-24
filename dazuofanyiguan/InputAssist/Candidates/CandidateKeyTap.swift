@@ -122,11 +122,6 @@ final class CandidateKeyTap {
             return Unmanaged.passUnretained(event)
         }
 
-        // 我们自己合成的 ⌘V 不能再进一次裁决。
-        guard !InputAssistKeyboardSynthesizer.isInjectedByUs(event) else {
-            return Unmanaged.passUnretained(event)
-        }
-
         let flags = event.flags
         if type == .flagsChanged {
             flagsHandler?(

@@ -1,10 +1,7 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// 输入增强设置页（PRD §47）。
-///
-/// 这一版只放已经实现的能力。自动触发相关的开关等 Phase 3 真正做完再出现——
-/// 摆一个点了没反应的开关比没有这个开关更糟。
+/// 选中文本翻译设置页。
 struct InputAssistSettingsPane: View {
     @ObservedObject var settings: InputAssistSettings
     @ObservedObject var coordinator: InputAssistCoordinator
@@ -14,12 +11,8 @@ struct InputAssistSettingsPane: View {
     let onOpenPermissionGuide: () -> Void
     let onOpenTestWindow: () -> Void
 
-    @State private var cacheUsageText = "统计中…"
     @State private var draggingIndex: Int?
-
-    private static let customTriggerRange =
-        Double(InputAssistTriggerSpeed.customRange.lowerBound)
-            ... Double(InputAssistTriggerSpeed.customRange.upperBound)
+    @State private var cacheUsageText = "统计中…"
 
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
@@ -42,7 +35,7 @@ struct InputAssistSettingsPane: View {
 
     private var enableSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Toggle("启用输入增强", isOn: Binding(
+            Toggle("启用选区翻译", isOn: Binding(
                 get: { settings.isEnabled },
                 set: { newValue in
                     settings.isEnabled = newValue
@@ -51,7 +44,7 @@ struct InputAssistSettingsPane: View {
             ))
             .font(.system(size: 13, weight: .medium))
 
-            Text("用你习惯的中文输入法照常打字，确认上屏后按快捷键，就能用译文直接替换刚输入的内容。")
+            Text("选中文字后按快捷键查看翻译候选；支持精确写入的编辑器可原位替换，其它应用会复制译文。")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
 
@@ -74,7 +67,7 @@ struct InputAssistSettingsPane: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("需要辅助功能权限")
                     .font(.system(size: 12, weight: .medium))
-                Text("输入增强要读取当前输入框的文字并写回译文，必须先授权。")
+                Text("选区翻译要读取当前选中文字，并在可验证时原位替换，必须先授权。")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }
@@ -90,72 +83,8 @@ struct InputAssistSettingsPane: View {
 
     private var triggerSection: some View {
         section("触发") {
-            Toggle("自动触发", isOn: Binding(
-                get: { settings.isAutoTriggerEnabled },
-                set: { newValue in
-                    settings.isAutoTriggerEnabled = newValue
-                    coordinator.applyEnabledState()
-                }
-            ))
-            .font(.system(size: 12))
-
-            Text("中文确认上屏后自动给出候选。终端一类应用即使不在黑名单里也只支持手动触发。")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-
-            if settings.isAutoTriggerEnabled {
-                HStack(spacing: 10) {
-                    Text("触发速度")
-                        .font(.system(size: 12))
-                    Picker("", selection: Binding(
-                        get: { settings.triggerSpeed },
-                        set: { newValue in
-                            settings.triggerSpeed = newValue
-                            coordinator.applyEnabledState()
-                        }
-                    )) {
-                        ForEach(InputAssistTriggerSpeed.allCases) { speed in
-                            if let preset = speed.presetMilliseconds {
-                                Text("\(speed.title) \(preset)ms").tag(speed)
-                            } else {
-                                Text(speed.title).tag(speed)
-                            }
-                        }
-                    }
-                    .labelsHidden()
-                    .fixedSize()
-                }
-
-                if settings.triggerSpeed == .custom {
-                    HStack(spacing: 10) {
-                        Slider(
-                            value: Binding(
-                                get: { Double(settings.customTriggerMilliseconds) },
-                                set: { newValue in
-                                    settings.customTriggerMilliseconds = Int(newValue)
-                                    coordinator.applyEnabledState()
-                                }
-                            ),
-                            in: Self.customTriggerRange,
-                            step: 50
-                        )
-                        Text("\(settings.triggerDelayMilliseconds)ms")
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .frame(width: 54, alignment: .trailing)
-                    }
-                }
-
-                Text("句号、问号、感叹号、分号会提前触发；逗号不会切断翻译范围。")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
-            }
-
-            Divider()
-                .padding(.vertical, 2)
-
             HStack {
-                Text("手动触发快捷键")
+                Text("选区翻译快捷键")
                     .font(.system(size: 12))
                 Spacer()
                 Picker("", selection: Binding(
@@ -172,7 +101,23 @@ struct InputAssistSettingsPane: View {
                 .labelsHidden()
                 .fixedSize()
             }
-            Text("有选中文字就翻译选区；没有选中就翻译光标前最近的一句。")
+            Text("必须先选中文字。没有选区时不会猜测或修改光标附近的内容。")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+
+            Divider()
+                .padding(.vertical, 2)
+
+            Toggle("选中后自动显示候选（实验）", isOn: Binding(
+                get: { settings.isSelectionAutoShowEnabled },
+                set: { newValue in
+                    settings.isSelectionAutoShowEnabled = newValue
+                    coordinator.applyEnabledState()
+                }
+            ))
+            .font(.system(size: 12))
+
+            Text("默认关闭。开启后，鼠标或键盘完成选区约 180ms 后显示候选；无有效选区时不显示。")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
 
@@ -185,7 +130,7 @@ struct InputAssistSettingsPane: View {
                 .foregroundStyle(.orange)
             }
 
-            Button("打开输入增强测试", action: onOpenTestWindow)
+            Button("打开选区翻译测试", action: onOpenTestWindow)
                 .padding(.top, 2)
         }
     }
@@ -389,6 +334,11 @@ struct InputAssistSettingsPane: View {
                 .foregroundStyle(.tertiary)
         }
     }
+
+
+
+
+
 
     private var addableLanguages: [Language] {
         let existing = Set(settings.targetLanguageCodes.map { $0.lowercased() })

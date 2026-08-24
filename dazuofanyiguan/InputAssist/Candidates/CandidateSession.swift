@@ -13,6 +13,8 @@ struct CandidateSession {
     let elementValueAtCapture: String?
     let context: String
     let capability: InputAssistSurfaceCapability
+    let role: String?
+    let allowsEditorPaste: Bool
     let anchorRect: CGRect
     /// 取词那一刻的选区 / 光标位置，替换前要比对（见 InputAssistCapture 的注释）。
     let selectedRangeAtCapture: InputAssistTextRange?
@@ -34,6 +36,8 @@ struct CandidateSession {
         self.elementValueAtCapture = capture.elementValue
         self.context = capture.context
         self.capability = capture.capability
+        self.role = capture.role
+        self.allowsEditorPaste = capture.allowsEditorPaste
         self.anchorRect = capture.anchorRect
         self.selectedRangeAtCapture = capture.selectedRangeAtCapture
         self.detectedSourceLanguageCode = detectedSourceLanguageCode
