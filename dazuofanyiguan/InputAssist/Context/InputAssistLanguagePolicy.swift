@@ -19,25 +19,27 @@ enum InputAssistLanguagePolicy {
         detectedLanguageCode: String?
     ) -> String? {
         let scripts = TextScriptPresence(in: text)
-        guard scripts.containsHan else {
-            return detectedLanguageCode
-        }
 
+        // 识别器明确认定是中文时信它——简繁之分只有它能给。
         if detectedLanguageCode == "zh-CN" || detectedLanguageCode == "zh-TW" {
             return detectedLanguageCode
         }
 
-        // 明确包含日文假名时保留日文识别；纯汉字 / 中英混排按本功能的中文输入语义处理。
-        if scripts.containsKana, detectedLanguageCode == "ja" {
+        // 假名和谚文是**决定性**的：中文里不会出现它们。
+        //
+        // 这里刻意**不依赖识别器**。短文本上它经常弃权——`私の` 只有两个
+        // compact 字符，过不了 `LanguageDetectionService` 的字数门槛——
+        // 而那恰恰是脚本本身成为唯一可靠证据的时候。要求 `detected == "ja"`
+        // 才保留日文，等于在识别器最不可靠的地方去依赖它。
+        //
+        // 顺序与 `LanguageScriptFallback` 一致：假名 > 谚文 > 汉字。
+        if scripts.containsKana { return "ja" }
+        if scripts.containsHangul { return "ko" }
+
+        guard scripts.containsHan else {
             return detectedLanguageCode
         }
-        // 谚文同理：韩文里混着汉字（`한자漢字`）很常见，
-        // 不能因为出现汉字就把已经正确识别出来的韩文压成中文。
-        // 这和 `LanguageScriptFallback` 里「假名 / 谚文排在汉字前面」是同一条规则，
-        // 两处必须一致。
-        if scripts.containsHangul, detectedLanguageCode == "ko" {
-            return detectedLanguageCode
-        }
+        // 纯汉字 / 中英混排按本功能的中文输入语义处理。
         return "zh-CN"
     }
 

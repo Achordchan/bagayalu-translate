@@ -89,6 +89,24 @@ struct InputAssistTests {
 
     // MARK: - 含汉字的日韩文（Codex review #5）
 
+    @Test func kanaDecidesJapaneseEvenWhenRecognitionAbstains() {
+        // "私の" 只有两个 compact 字符，过不了 LanguageDetectionService 的字数门槛，
+        // 识别器弃权返回 nil。但假名是决定性的——中文里不会出现它。
+        // 要求 detected == "ja" 才保留日文，等于在识别器最不可靠的地方去依赖它。
+        #expect(
+            InputAssistLanguagePolicy.selectionSourceLanguageCode(
+                for: "私の",
+                detectedLanguageCode: nil
+            ) == "ja"
+        )
+        #expect(
+            InputAssistLanguagePolicy.selectionSourceLanguageCode(
+                for: "한자漢字",
+                detectedLanguageCode: nil
+            ) == "ko"
+        )
+    }
+
     @Test func koreanWithHanjaIsNotFlattenedToChinese() {
         // 韩文里混着汉字（한자漢字）很常见。只看"有没有汉字"会把已经正确
         // 识别出来的韩文压成中文，候选请求的源语言就是错的，
@@ -144,19 +162,47 @@ struct InputAssistTests {
     // MARK: - Chromium / Electron 取词
 
     @MainActor
-    @Test func chromiumAccessibilityIsRequestedAtMostOncePerProcess() {
+    @Test func aTransientFailureIsNeverCachedAsAConclusion() {
+        // 这条是要害：把 .cannotComplete（目标应用正忙 / 刚启动）当成永久结论，
+        // 等于把那个应用永久废掉——直到它或翻译官重启才会再试一次。
+        #expect(
+            InputAssistChromiumAccessibility.classify(.cannotComplete) == .transientFailure
+        )
+        #expect(
+            InputAssistChromiumAccessibility.classify(.apiDisabled) == .transientFailure
+        )
+        #expect(
+            InputAssistChromiumAccessibility.classify(.invalidUIElement) == .transientFailure
+        )
+        #expect(InputAssistChromiumAccessibility.classify(.failure) == .transientFailure)
+
+        // 只有这两类是真的"再试也一样"。
+        #expect(
+            InputAssistChromiumAccessibility.classify(.attributeUnsupported)
+                == .permanentlyUnsupported
+        )
+        #expect(
+            InputAssistChromiumAccessibility.classify(.notImplemented) == .permanentlyUnsupported
+        )
+
+        #expect(InputAssistChromiumAccessibility.classify(.success) == .enabled)
+    }
+
+    @MainActor
+    @Test func enablingIsNeverAnnouncedTwiceForTheSameProcess() {
         // 打开别人进程的 AX 树是有开销的，同一个应用不该反复去设。
+        // （本进程不是 Chromium，实际返回哪种错误由系统决定，
+        // 所以这里只断言与错误类型无关的那个不变式。）
         InputAssistChromiumAccessibility.reset()
         let pid = ProcessInfo.processInfo.processIdentifier
-
-        #expect(!InputAssistChromiumAccessibility.isEnabled(pid: pid))
-        _ = InputAssistChromiumAccessibility.enableIfNeeded(pid: pid)
-        #expect(InputAssistChromiumAccessibility.isEnabled(pid: pid))
-        // 第二次一定返回 false：调用方据此决定"重试没有意义"。
-        #expect(!InputAssistChromiumAccessibility.enableIfNeeded(pid: pid))
-
+        let first = InputAssistChromiumAccessibility.enableIfNeeded(pid: pid)
+        let second = InputAssistChromiumAccessibility.enableIfNeeded(pid: pid)
+        #expect(!(first && second))
+        if first {
+            #expect(InputAssistChromiumAccessibility.hasSettledResult(pid: pid))
+        }
         InputAssistChromiumAccessibility.reset()
-        #expect(!InputAssistChromiumAccessibility.isEnabled(pid: pid))
+        #expect(!InputAssistChromiumAccessibility.hasSettledResult(pid: pid))
     }
 
     @MainActor
