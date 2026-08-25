@@ -48,6 +48,8 @@ final class InputAssistCoordinator: ObservableObject {
     /// Chromium 打开 AX 树后的延迟重试。必须留住句柄——
     /// 它睡着的这 200ms 里用户完全可能从菜单栏把功能关掉。
     private var chromiumRetryTask: Task<Void, Never>?
+    /// 是否已经有一次重试在等对方建树。用户连按快捷键时靠它避免把在途的那次掐掉。
+    private var isChromiumRetryInFlight = false
     private var retryTasks: [Task<Void, Never>] = []
     private var isCommitting = false
 
@@ -119,6 +121,7 @@ final class InputAssistCoordinator: ObservableObject {
             selectionMonitor.stop()
             chromiumRetryTask?.cancel()
             chromiumRetryTask = nil
+            isChromiumRetryInFlight = false
             panelController.dismiss(reason: .featureDisabled)
             applePool.shutdown()
             lastStatusMessage = nil
@@ -154,6 +157,7 @@ final class InputAssistCoordinator: ObservableObject {
         selectionMonitor.stop()
         chromiumRetryTask?.cancel()
         chromiumRetryTask = nil
+        isChromiumRetryInFlight = false
         cancelInFlightTranslations()
         panelController.dismiss(reason: .featureDisabled)
         applePool.shutdown()
@@ -190,6 +194,15 @@ final class InputAssistCoordinator: ObservableObject {
 
         // 取不到不代表用户没选中。Chromium / Electron 应用要先被明确告知
         // 「有人要用辅助功能」才会把树建起来，在那之前这里必然是空的。
+
+        // 已经有一次重试在等对方建树时，**让它跑完**。
+        //
+        // 用户等不及连按两下的话，取消再新建只会更慢：第一次已经把这个进程记成
+        // "已打开"，新任务里 `enableIfNeeded` 直接返回 false，于是它既不等待
+        // 也不重试就退出了——浮层永远不会出现，用户得按第三次。
+        guard !isChromiumRetryInFlight else { return }
+
+        isChromiumRetryInFlight = true
         chromiumRetryTask?.cancel()
         chromiumRetryTask = Task { @MainActor [weak self] in
             await self?.retryAfterEnablingChromiumAccessibility(
@@ -208,13 +221,23 @@ final class InputAssistCoordinator: ObservableObject {
         identity: InputAssistAppIdentity?,
         appSettings: AppSettings
     ) async {
+        defer { isChromiumRetryInFlight = false }
+
         guard !isCommitting else { return }
-        guard let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier,
-              InputAssistChromiumAccessibility.enableIfNeeded(pid: pid)
-        else {
-            // 不是 Chromium 应用（属性不支持），或者这个应用已经打开过了。
-            // 两种情况重试都没有意义，问题不在这一层。
+        guard let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier else {
             toast?.show("请先选择要翻译的文字", style: .warning)
+            return
+        }
+        guard InputAssistChromiumAccessibility.enableIfNeeded(pid: pid) else {
+            // 这个应用已经开过了、或者根本不支持这个属性，重试没有意义。
+            // 但两者该说的话不一样：开过之后仍然读不到，说明是这个控件不暴露选中文本，
+            // 再叫用户"先选择文字"就是误导——他明明选了。
+            toast?.show(
+                InputAssistChromiumAccessibility.hasSettledResult(pid: pid)
+                    ? "当前应用没有提供选中文本，可能需要重新选择一次"
+                    : "请先选择要翻译的文字",
+                style: .warning
+            )
             return
         }
 
