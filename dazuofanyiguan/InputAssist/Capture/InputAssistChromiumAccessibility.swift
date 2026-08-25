@@ -56,16 +56,38 @@ enum InputAssistChromiumAccessibility {
         }
     }
 
+    /// 一个**具体进程**的身份。
+    ///
+    /// 只用 pid 是不够的：macOS 会回收 pid，而翻译官是常驻的。
+    /// 被缓存的应用退出后，新启动的 Chromium 应用可能拿到同一个 pid，
+    /// 于是被当成"已经处理过"，`AXManualAccessibility` 再也不会写下去，
+    /// 那个进程的取词——快捷键和自动显示两条路——就都永久不可用了。
+    /// 配上启动时间才能把两个进程区分开。
+    private struct ProcessKey: Hashable {
+        let pid: pid_t
+        let launchDate: Date?
+
+        init?(pid: pid_t) {
+            guard pid > 0 else { return nil }
+            self.pid = pid
+            self.launchDate = NSRunningApplication(processIdentifier: pid)?.launchDate
+        }
+    }
+
     /// 已经成功打开过的进程。只在取词失败时才去开，不对每个切换到的应用都动手：
     /// 这是在让**别人的进程**多干活，不该默认施加。
-    private static var enabledProcessIdentifiers = Set<pid_t>()
+    private static var enabledProcesses = Set<ProcessKey>()
     /// 明确不支持这个属性的进程（非 Chromium）。
-    private static var unsupportedProcessIdentifiers = Set<pid_t>()
+    private static var unsupportedProcesses = Set<ProcessKey>()
+    private static var didObserveTerminations = false
 
     /// 返回 true 表示这次确实新打开了一个应用的 AX 树，调用方应该等一下再重试取词。
     @discardableResult
     static func enableIfNeeded(pid: pid_t) -> Bool {
-        guard pid > 0, !hasSettledResult(pid: pid) else { return false }
+        observeTerminationsIfNeeded()
+        guard let key = ProcessKey(pid: pid), !hasSettledResult(pid: pid) else {
+            return false
+        }
 
         let application = AXUIElementCreateApplication(pid)
         let error = AXUIElementSetAttributeValue(
@@ -76,10 +98,10 @@ enum InputAssistChromiumAccessibility {
 
         switch classify(error) {
         case .enabled:
-            enabledProcessIdentifiers.insert(pid)
+            enabledProcesses.insert(key)
             return true
         case .permanentlyUnsupported:
-            unsupportedProcessIdentifiers.insert(pid)
+            unsupportedProcesses.insert(key)
             return false
         case .transientFailure:
             // 什么都不记，下次还要再试。
@@ -91,12 +113,41 @@ enum InputAssistChromiumAccessibility {
     ///
     /// 瞬时失败不算——那种情况下一次必须重试。
     static func hasSettledResult(pid: pid_t) -> Bool {
-        enabledProcessIdentifiers.contains(pid)
-            || unsupportedProcessIdentifiers.contains(pid)
+        guard let key = ProcessKey(pid: pid) else { return false }
+        return enabledProcesses.contains(key) || unsupportedProcesses.contains(key)
+    }
+
+    /// 进程退出时清掉它的记录。
+    ///
+    /// 启动时间那一层已经能区分被回收的 pid，这里是第二道：
+    /// 应用退出之后 `NSRunningApplication` 就查不到了，
+    /// 新旧两个进程的 `launchDate` 都会是 nil 而"相等"。
+    static func evict(pid: pid_t) {
+        enabledProcesses = enabledProcesses.filter { $0.pid != pid }
+        unsupportedProcesses = unsupportedProcesses.filter { $0.pid != pid }
+    }
+
+    private static func observeTerminationsIfNeeded() {
+        guard !didObserveTerminations else { return }
+        didObserveTerminations = true
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didTerminateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { notification in
+            MainActor.assumeIsolated {
+                guard let application = notification.userInfo?[
+                    NSWorkspace.applicationUserInfoKey
+                ] as? NSRunningApplication else {
+                    return
+                }
+                evict(pid: application.processIdentifier)
+            }
+        }
     }
 
     static func reset() {
-        enabledProcessIdentifiers.removeAll()
-        unsupportedProcessIdentifiers.removeAll()
+        enabledProcesses.removeAll()
+        unsupportedProcesses.removeAll()
     }
 }

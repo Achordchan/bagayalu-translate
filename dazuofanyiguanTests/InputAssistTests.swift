@@ -206,6 +206,26 @@ struct InputAssistTests {
     }
 
     @MainActor
+    @Test func aTerminatedProcessLosesItsCachedConclusion() {
+        // macOS 会回收 pid，而翻译官是常驻的。被缓存的应用退出后，
+        // 新启动的 Chromium 应用可能拿到同一个 pid——如果记录还在，
+        // AXManualAccessibility 再也不会写下去，那个进程的取词就永久不可用了。
+        InputAssistChromiumAccessibility.reset()
+        let pid = ProcessInfo.processInfo.processIdentifier
+
+        let announced = InputAssistChromiumAccessibility.enableIfNeeded(pid: pid)
+        if announced || InputAssistChromiumAccessibility.hasSettledResult(pid: pid) {
+            #expect(InputAssistChromiumAccessibility.hasSettledResult(pid: pid))
+            InputAssistChromiumAccessibility.evict(pid: pid)
+            #expect(!InputAssistChromiumAccessibility.hasSettledResult(pid: pid))
+        }
+
+        // 驱逐一个从没记过的 pid 不该出问题。
+        InputAssistChromiumAccessibility.evict(pid: 999_999)
+        InputAssistChromiumAccessibility.reset()
+    }
+
+    @MainActor
     @Test func invalidProcessIdentifierIsNeverTouched() {
         InputAssistChromiumAccessibility.reset()
         #expect(!InputAssistChromiumAccessibility.enableIfNeeded(pid: 0))
