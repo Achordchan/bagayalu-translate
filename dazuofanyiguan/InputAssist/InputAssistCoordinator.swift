@@ -366,7 +366,7 @@ final class InputAssistCoordinator: ObservableObject {
                     self.clearSessionIfCurrent(session)
                     return
                 }
-                if session.allowsEditorPaste {
+                if session.allowsEditorPaste, outcome.allowsPasteFallback {
                     let pasteOutcome = await InputAssistEditorPasteEngine.replace(
                         session: session,
                         with: translatedText
@@ -376,9 +376,12 @@ final class InputAssistCoordinator: ObservableObject {
                         return
                     }
                 }
+                // 写出去了但读不回来时，不能说"无法替换"——它可能已经生效了。
                 self.copyTranslatedText(
                     translatedText,
-                    message: "无法安全替换，译文已复制",
+                    message: outcome.allowsPasteFallback
+                        ? "无法安全替换，译文已复制"
+                        : "无法确认替换是否生效，译文已复制",
                     style: .warning,
                     anchorRect: session.anchorRect
                 )

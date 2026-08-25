@@ -85,10 +85,17 @@ enum InputAssistEditorPasteEngine {
               CFEqual(focused, session.element) else {
             return false
         }
-        if let expectedRange = session.selectedRangeAtCapture,
-           let currentRange = InputAssistAXTextCapture.selectedRange(focused),
-           currentRange != expectedRange {
-            return false
+        if let expectedRange = session.selectedRangeAtCapture {
+            // 读不回来就当作对不上，不能跳过这条检查。
+            //
+            // 下面只比对「选中文本是否还等于原文」。同一个控件里出现两处相同文字时
+            // （日志、表格、重复的短语），用户把选区挪到另一处，文本比对照样通过，
+            // ⌘V 就会打在错误的位置上。位置这一关只能靠 range，读不到就必须放弃。
+            guard let currentRange = InputAssistAXTextCapture.selectedRange(focused),
+                  currentRange == expectedRange
+            else {
+                return false
+            }
         }
         return InputAssistAXTextCapture.stringAttribute(
             focused,

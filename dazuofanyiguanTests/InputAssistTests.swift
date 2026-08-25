@@ -12,6 +12,49 @@ import Testing
 /// AppFilter / SecureInputGuard，外加浮层定位与布局。
 struct InputAssistTests {
 
+    // MARK: - 粘贴兜底的准入（Codex review #5 第二轮）
+
+    @Test func unverifiableWriteMustNotBeFollowedByAPaste() {
+        // AX 写调用已经发出去、但读不回结果时，无法证明它到底生效没有。
+        // 这时再合成一次 ⌘V，万一那次写其实成功了，译文会被插入两遍。
+        #expect(
+            !InputAssistReplacementOutcome
+                .aborted(reason: .writeVerificationUnavailable)
+                .allowsPasteFallback
+        )
+    }
+
+    @Test func everyOtherOutcomeStillAllowsThePasteFallback() {
+        // 其余 abort 都发生在动手写**之前**（选区变了、焦点没了、应用切了…），
+        // 没有任何文本被改过，兜底是安全的。
+        for reason in [
+            InputAssistReplacementSafetyGuard.AbortReason.secureInputActive,
+            .applicationChanged,
+            .focusLost,
+            .focusedElementChanged,
+            .selectionChanged,
+            .sourceTextChanged,
+            .sourceRangeUnavailable
+        ] {
+            #expect(
+                InputAssistReplacementOutcome.aborted(reason: reason).allowsPasteFallback,
+                "\(reason.rawValue) 发生在写入之前，不该挡掉粘贴兜底"
+            )
+        }
+
+        // .failed 是"读回来了、确认没生效"，正是最该走兜底的一类。
+        #expect(
+            InputAssistReplacementOutcome
+                .failed(message: "当前应用拒绝了原位替换")
+                .allowsPasteFallback
+        )
+        #expect(
+            InputAssistReplacementOutcome
+                .replaced(strategy: .axDirect)
+                .allowsPasteFallback
+        )
+    }
+
     // MARK: - 含汉字的日韩文（Codex review #5）
 
     @Test func koreanWithHanjaIsNotFlattenedToChinese() {

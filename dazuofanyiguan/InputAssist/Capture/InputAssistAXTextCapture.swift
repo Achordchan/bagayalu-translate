@@ -104,8 +104,15 @@ enum InputAssistAXTextCapture {
         if InputAssistCommitPolicy.isEditableRole(role) {
             return true
         }
+        // 只认真正表明"文本可改"的属性。
+        //
+        // **不能用 `kAXSelectedTextRange` 可写来推断**：只读的文本视图（日志窗、
+        // 只读代码预览）通常也允许辅助功能客户端移动选区——能挪光标不等于能改字。
+        // 据此判成 .editorPaste 会走进死胡同：⌘V 什么也改不了，而拿不到完整
+        // AX value 时粘贴引擎又无法证伪，只好报成功，于是 Enter 既没替换、
+        // 也不会退到复制兜底，用户看到的是"按了没反应"。
         return isSettable(element, kAXValueAttribute as String)
-            || isSettable(element, kAXSelectedTextRangeAttribute as String)
+            || isSettable(element, kAXSelectedTextAttribute as String)
     }
 
     /// 光标或选区在屏幕上的位置。三级降级正好对应 PRD §16.1 的 Level 1/2/3。

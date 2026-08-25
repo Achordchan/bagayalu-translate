@@ -13,6 +13,20 @@ enum InputAssistReplacementOutcome: Equatable {
     case replaced(strategy: InputAssistReplacementStrategy)
     case aborted(reason: InputAssistReplacementSafetyGuard.AbortReason)
     case failed(message: String)
+
+    /// 这次尝试之后，还能不能安全地再走一次粘贴兜底。
+    ///
+    /// 唯一不能的是 `.writeVerificationUnavailable`：AX 写调用**已经发出去了**，
+    /// 但读不回结果，无法证明到底生效没有。此时再合成一次 ⌘V，
+    /// 万一那次写其实成功了，译文就会被插入两遍——用户的文本被改坏，
+    /// 而且是在他明确要求"安全替换"的路径上。
+    ///
+    /// 其余情况要么根本没动手写（selectRange 失败、算不出 expected、
+    /// 各种 abort），要么已经读回来证实没生效（`.failed` 那条），兜底是安全的。
+    var allowsPasteFallback: Bool {
+        guard case .aborted(let reason) = self else { return true }
+        return reason != .writeVerificationUnavailable
+    }
 }
 
 /// 只执行可精确验证的 AX 原位替换。
