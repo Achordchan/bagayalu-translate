@@ -35,6 +35,10 @@ enum InputAssistLanguagePolicy {
         // 顺序与 `LanguageScriptFallback` 一致：假名 > 谚文 > 汉字。
         if scripts.containsKana { return "ja" }
         if scripts.containsHangul { return "ko" }
+        // 注音符号是明确的繁体信号（台湾用注音，大陆用拼音）。
+        // 与 `LanguageScriptFallback` 保持同一条规则——这两处的判定必须一致，
+        // 否则同一段文字在选区翻译和 Apple 引擎里会被认成不同的语言。
+        if scripts.containsBopomofo { return "zh-TW" }
 
         guard scripts.containsHan else {
             return detectedLanguageCode

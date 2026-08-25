@@ -36,7 +36,12 @@ enum LanguageScriptFallback {
 
         if scripts.containsKana { return "ja" }
         if scripts.containsHangul { return "ko" }
-        if scripts.containsHan || scripts.containsBopomofo {
+        // 注音符号自己就说明了简繁：台湾用注音，大陆用拼音。
+        // 不能和汉字合并处理——汉字是简繁通用的、只能靠目标语言去猜，
+        // 而注音是**明确**信号，猜没有必要，猜错还会让 Apple 选错语言模型。
+        if scripts.containsBopomofo { return "zh-TW" }
+        if scripts.containsHan {
+            // 汉字本身分不出简繁，只能参考目标语言。
             return normalizedChineseVariant(preferredChineseVariant)
         }
         if scripts.containsCyrillic { return "ru" }

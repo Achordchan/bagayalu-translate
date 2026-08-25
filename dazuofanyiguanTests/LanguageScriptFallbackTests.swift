@@ -38,6 +38,39 @@ struct LanguageScriptFallbackTests {
         #expect(LanguageScriptFallback.sourceLanguageCode(for: "Привет") == "ru")
     }
 
+    @Test func bopomofoIsATraditionalSignalOnItsOwn() {
+        // 注音符号自己就说明了简繁：台湾用注音，大陆用拼音。
+        // 和汉字合并处理的话，目标是英文时会退到 zh-CN——
+        // 等于把一段明确的繁体信号交成简体，Apple 可能因此选错语言模型。
+        #expect(LanguageScriptFallback.sourceLanguageCode(for: "ㄋㄧˇㄏㄠˇ") == "zh-TW")
+        // 注音混着汉字（台湾的注音标注读物）也一样按繁体。
+        #expect(LanguageScriptFallback.sourceLanguageCode(for: "你好ㄋㄧˇ") == "zh-TW")
+        // 目标语言不再影响它——猜没有必要。
+        #expect(
+            LanguageScriptFallback.sourceLanguageCode(
+                for: "ㄋㄧˇㄏㄠˇ",
+                preferredChineseVariant: "zh-CN"
+            ) == "zh-TW"
+        )
+        // 纯汉字仍然分不出简繁，继续参考目标语言。
+        #expect(
+            LanguageScriptFallback.sourceLanguageCode(
+                for: "设置",
+                preferredChineseVariant: "zh-TW"
+            ) == "zh-TW"
+        )
+    }
+
+    @Test func selectionPolicyAgreesWithTheFallbackOnBopomofo() {
+        // 两处判定必须一致，否则同一段文字在选区翻译和 Apple 引擎里会被认成不同语言。
+        #expect(
+            InputAssistLanguagePolicy.selectionSourceLanguageCode(
+                for: "ㄋㄧˇㄏㄠˇ",
+                detectedLanguageCode: nil
+            ) == "zh-TW"
+        )
+    }
+
     @Test func chineseVariantFollowsTheTargetWhenTheTargetIsChinese() {
         // 目标是繁体时，兜底的源语言也用繁体，别把简繁混起来。
         #expect(
