@@ -45,6 +45,9 @@ final class InputAssistCoordinator: ObservableObject {
     private var currentSession: CandidateSession?
     private var currentRequest: CandidateTranslationRequest?
     private var translationTask: Task<Void, Never>?
+    /// Chromium 打开 AX 树后的延迟重试。必须留住句柄——
+    /// 它睡着的这 200ms 里用户完全可能从菜单栏把功能关掉。
+    private var chromiumRetryTask: Task<Void, Never>?
     private var retryTasks: [Task<Void, Never>] = []
     private var isCommitting = false
 
@@ -114,6 +117,8 @@ final class InputAssistCoordinator: ObservableObject {
         guard settings.isEnabled else {
             hotkeyMonitor.unregister()
             selectionMonitor.stop()
+            chromiumRetryTask?.cancel()
+            chromiumRetryTask = nil
             panelController.dismiss(reason: .featureDisabled)
             applePool.shutdown()
             lastStatusMessage = nil
@@ -147,6 +152,8 @@ final class InputAssistCoordinator: ObservableObject {
     func deactivate() {
         hotkeyMonitor.unregister()
         selectionMonitor.stop()
+        chromiumRetryTask?.cancel()
+        chromiumRetryTask = nil
         cancelInFlightTranslations()
         panelController.dismiss(reason: .featureDisabled)
         applePool.shutdown()
@@ -183,7 +190,8 @@ final class InputAssistCoordinator: ObservableObject {
 
         // 取不到不代表用户没选中。Chromium / Electron 应用要先被明确告知
         // 「有人要用辅助功能」才会把树建起来，在那之前这里必然是空的。
-        Task { @MainActor [weak self] in
+        chromiumRetryTask?.cancel()
+        chromiumRetryTask = Task { @MainActor [weak self] in
             await self?.retryAfterEnablingChromiumAccessibility(
                 identity: identity,
                 appSettings: appSettings
@@ -218,6 +226,10 @@ final class InputAssistCoordinator: ObservableObject {
             nanoseconds: InputAssistChromiumAccessibility.settleNanoseconds
         )
 
+        guard !Task.isCancelled else { return }
+        // 这 200ms 里用户可能已经从菜单栏关掉了功能。
+        // 少了这一条，`applyEnabledState()` 已经收摊之后我们还会弹出浮层、发出翻译请求。
+        guard settings.isEnabled else { return }
         guard !isCommitting else { return }
         // 前台应用在这 200ms 里可能已经换掉了，那这次快照就不该再用。
         guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return }
