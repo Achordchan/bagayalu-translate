@@ -9,6 +9,59 @@ enum InputAssistLanguagePolicy {
     static let recommendedTargetCount = 3
     static let defaultTargetCodes = ["en"]
 
+    /// 选中文本为明确的汉字文本时，不盲信长文通用语言识别。
+    ///
+    /// 不能再把整段长文丢给通用语言识别后盲信结果：数字、型号、多个标点和
+    /// 中英混排会让 NLLanguageRecognizer 返回非中文或 nil，Apple Translation 随后检查错误的
+    /// 语言对，已安装的中文包也会被误报成“需要下载”。
+    static func selectionSourceLanguageCode(
+        for text: String,
+        detectedLanguageCode: String?
+    ) -> String? {
+        let scripts = TextScriptPresence(in: text)
+
+        // 识别器明确认定是中文时信它——简繁之分只有它能给。
+        if detectedLanguageCode == "zh-CN" || detectedLanguageCode == "zh-TW" {
+            return detectedLanguageCode
+        }
+
+        // 假名和谚文是**决定性**的：中文里不会出现它们。
+        //
+        // 这里刻意**不依赖识别器**。短文本上它经常弃权——`私の` 只有两个
+        // compact 字符，过不了 `LanguageDetectionService` 的字数门槛——
+        // 而那恰恰是脚本本身成为唯一可靠证据的时候。要求 `detected == "ja"`
+        // 才保留日文，等于在识别器最不可靠的地方去依赖它。
+        //
+        // 顺序与 `LanguageScriptFallback` 一致：假名 > 谚文 > 汉字。
+        if scripts.containsKana { return "ja" }
+        if scripts.containsHangul { return "ko" }
+        // 注音符号是明确的繁体信号（台湾用注音，大陆用拼音）。
+        // 与 `LanguageScriptFallback` 保持同一条规则——这两处的判定必须一致，
+        // 否则同一段文字在选区翻译和 Apple 引擎里会被认成不同的语言。
+        if scripts.containsBopomofo { return "zh-TW" }
+
+        guard scripts.containsHan else {
+            return detectedLanguageCode
+        }
+
+        // 纯汉字的日文 / 韩文（`東京大学`、`漢字`）没有假名和谚文可依，
+        // 只剩识别器的结论。这里保留它。
+        //
+        // 这不会让本函数原本要修的那个 bug 复发。那个 bug 的失败模式是
+        // 「数字、型号、多个标点和中英混排让识别器返回**非中文或 nil**」——
+        // 具体是 `en` 和 nil，不是 `ja`/`ko`。而且 `LanguageDetectionService`
+        // 要求置信度 ≥0.60 且与第二名相差 ≥0.15，能在汉字文本上给出 `ja`
+        // 说明它确实明显领先于中文。
+        //
+        // 除这两个之外的一切仍然按中文处理——`en` 那条有单测钉着。
+        if detectedLanguageCode == "ja" || detectedLanguageCode == "ko" {
+            return detectedLanguageCode
+        }
+
+        // 纯汉字 / 中英混排按本功能的中文输入语义处理。
+        return "zh-CN"
+    }
+
     /// 去重并截断到 6 个。
     ///
     /// 顺序严格按用户配置保留——PRD §10.3 明确禁止按使用频率重排，
@@ -64,6 +117,8 @@ enum InputAssistLanguagePolicy {
             .replacingOccurrences(of: "_", with: "-")
             .lowercased()
     }
+
+
 
     private static func subtags(of code: String) -> (base: String, variant: String?) {
         let parts = normalize(code).split(separator: "-", omittingEmptySubsequences: true)

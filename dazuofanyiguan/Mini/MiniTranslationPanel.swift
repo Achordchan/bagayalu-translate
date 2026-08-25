@@ -17,6 +17,12 @@ final class MiniTranslationBubbleModel: ObservableObject {
     @Published var state: MiniTranslationBubbleState = .translating
     @Published var fontSize: Double = 15
     @Published var showsSmartDirectionNotice = false
+    /// 识别到的原文语种，例如「英语」。识别不出来时为 nil，页脚那一行也就不出现。
+    @Published var detectedSourceLanguageName: String?
+
+    var showsFooter: Bool {
+        showsSmartDirectionNotice || detectedSourceLanguageName != nil
+    }
 
     var onDismiss: (() -> Void)?
     var onHoverChange: ((Bool) -> Void)?
@@ -26,8 +32,11 @@ struct MiniTranslationLayout {
     static func contentSize(
         for state: MiniTranslationBubbleState,
         fontSize: Double = 15,
-        showsSmartDirectionNotice: Bool = false
+        showsSmartDirectionNotice: Bool = false,
+        showsDetectedLanguage: Bool = false
     ) -> NSSize {
+        // 两者共用页脚同一行，所以高度只加一次。
+        let footerHeight: CGFloat = (showsSmartDirectionNotice || showsDetectedLanguage) ? 24 : 0
         let scale = AppTextFontSize.sanitized(fontSize) / AppTextFontSize.defaultValue
 
         switch state {
@@ -56,7 +65,7 @@ struct MiniTranslationLayout {
                 height: min(
                     420,
                     max(160, CGFloat(118 + Double(lines) * 20 * scale))
-                        + (showsSmartDirectionNotice ? 24 : 0)
+                        + footerHeight
                 )
             )
         }
@@ -361,12 +370,21 @@ private struct MiniTranslationBubbleView: View {
                 MiniTranslationResultView(text: text, fontSize: model.fontSize)
                     .help("拖动选择文字后按 Command+C 复制")
 
-                if model.showsSmartDirectionNotice {
+                if model.showsFooter {
                     HStack(spacing: 5) {
-                        Image(systemName: "sparkles")
-                            .font(.system(size: 9, weight: .medium))
-                        Text("智能翻译识别已介入")
-                            .font(.system(size: 10, weight: .medium))
+                        if model.showsSmartDirectionNotice {
+                            Image(systemName: "sparkles")
+                                .font(.system(size: 9, weight: .medium))
+                            Text("智能翻译识别已介入")
+                                .font(.system(size: 10, weight: .medium))
+                        }
+
+                        Spacer(minLength: 0)
+
+                        if let languageName = model.detectedSourceLanguageName {
+                            Text("原文 \(languageName)")
+                                .font(.system(size: 10, weight: .medium))
+                        }
                     }
                     .foregroundStyle(.tertiary)
                     .accessibilityElement(children: .combine)

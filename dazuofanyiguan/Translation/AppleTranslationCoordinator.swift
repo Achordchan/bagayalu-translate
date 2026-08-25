@@ -257,7 +257,8 @@ final class AppleTranslationCoordinator: ObservableObject {
             )
         }
 
-        if let detection = languageDetectionService.detectLanguage(in: text) {
+        let detection = languageDetectionService.detectLanguage(in: text)
+        if let detection {
             let detectedLanguage = appleLanguage(for: detection.languageCode)
             let detectedStatus = await availability.status(
                 from: detectedLanguage,
@@ -268,6 +269,36 @@ final class AppleTranslationCoordinator: ObservableObject {
                     sourceLanguage: detectedLanguage,
                     targetLanguage: targetLanguage,
                     availabilityStatus: detectedStatus
+                )
+            }
+        }
+
+        // 通用语言识别弃权了。这里**不能**直接把 nil 交出去：
+        // 短语上 Apple 自己的自动识别同样会失败，然后弹出
+        // 「无法自动检测语言。请选择要翻译的语言。」那个选择器——
+        // 在 Mini 气泡里那是个死胡同。先用书写系统兜一层底。
+        //
+        // **只在弃权时兜底**（`detection == nil`）。识别出来了、但那个语言对
+        // 不被支持，是完全另一回事：那时该如实报「不支持」，
+        // 而不是换一个「支持的」语言硬翻。比如一段被高置信度识别出的加泰罗尼亚语，
+        // 脚本兜底会给出 en（Latin），于是它被当成英语翻译——
+        // **用错误的源语言翻出来的结果比一句「不支持」糟得多，因为用户看不出它是错的。**
+        if detection == nil, let fallbackCode = LanguageScriptFallback.sourceLanguageCode(
+            for: text,
+            preferredChineseVariant: targetLanguageCode
+        ) {
+            let fallbackLanguage = appleLanguage(for: fallbackCode)
+            let fallbackStatus = await availability.status(
+                from: fallbackLanguage,
+                to: targetLanguage
+            )
+            // 猜出来的语言对本身就不被支持时，说明这个兜底没帮上忙，
+            // 继续走原来的自动识别，别用一个必然抛错的语言对把路堵死。
+            if fallbackStatus != .unsupported {
+                return TranslationContext(
+                    sourceLanguage: fallbackLanguage,
+                    targetLanguage: targetLanguage,
+                    availabilityStatus: fallbackStatus
                 )
             }
         }

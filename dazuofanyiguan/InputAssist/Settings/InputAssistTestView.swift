@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// 输入增强测试页（PRD §48）。
+/// 选区翻译测试页。
 ///
 /// 用户开完权限、配好语言之后，应该能立刻在这里验证一遍，
 /// 而不是先跑去微信里试、试不出来又不知道是哪一环出了问题。
@@ -9,7 +9,7 @@ struct InputAssistTestView: View {
     @ObservedObject var settings: InputAssistSettings
     @ObservedObject var coordinator: InputAssistCoordinator
 
-    @State private var draft = ""
+    @State private var draft = "我们可以提供16吨船吊"
     @FocusState private var isEditorFocused: Bool
     @State private var cacheEntryCount = -1
 
@@ -24,24 +24,24 @@ struct InputAssistTestView: View {
         }
         .padding(20)
         .frame(minWidth: 520, minHeight: 460)
-        .background(
-            // 把自己的窗口登记给协调器：只有它是 key window 时才允许监听本进程，
-            // 否则设置页黑名单编辑器里的每一次输入都会被当成待翻译内容。
-            WindowAccessor { window in
-                coordinator.registerTestSurfaceWindow(window)
-            }
-        )
         .onAppear { isEditorFocused = true }
-        .onDisappear { coordinator.registerTestSurfaceWindow(nil) }
     }
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("输入增强测试")
+            Text("选区翻译测试")
                 .font(.system(size: 18, weight: .semibold))
-            Text("在下面的框里用中文输入法打一句话。开了自动触发的话确认上屏后稍停就会出候选；也可以随时按 \(settings.shortcut.displayString) 手动触发。自动触发只在这个窗口是当前窗口时对本应用生效。")
+            Text("选中下面的文字，然后按 \(settings.shortcut.displayString) 查看翻译候选。没有选区时不会触发。")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
+            // 全局事件监听收不到本应用自己的鼠标键盘事件，所以选区自动显示
+            // 在这个窗口里不会触发。下面的状态栏只是在报「设置开没开」，
+            // 不说明它在这里可用——不写清楚的话，在这里试不出来的人
+            // 会以为整个功能坏了。
+            Text("「选中自动」只在其它应用里生效：系统的全局事件监听收不到本应用自己的鼠标键盘事件。在这个窗口请用快捷键测试。")
+                .font(.system(size: 11))
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -50,7 +50,10 @@ struct InputAssistTestView: View {
             HStack(spacing: 18) {
                 statusItem("辅助功能", isOK: coordinator.isAccessibilityTrusted)
                 statusItem("快捷键", isOK: coordinator.hotkeyStatus.isActive)
-                statusItem("自动触发", isOK: settings.isEnabled && settings.isAutoTriggerEnabled)
+                statusItem(
+                    "选中自动（其它应用）",
+                    isOK: settings.isEnabled && settings.isSelectionAutoShowEnabled
+                )
                 statusItem("翻译引擎", isOK: settings.isEnabled)
                 statusItem("缓存", isOK: cacheEntryCount >= 0)
             }
@@ -72,10 +75,8 @@ struct InputAssistTestView: View {
 
     private var detailLine: String {
         let targets = settings.targetLanguageCodes.map { $0.uppercased() }.joined(separator: " / ")
-        let speed = settings.isAutoTriggerEnabled
-            ? "\(settings.triggerDelayMilliseconds)ms"
-            : "关闭"
-        return "目标语言 \(targets) · 触发速度 \(speed) · 缓存 \(max(0, cacheEntryCount)) 条"
+        let autoShow = settings.isSelectionAutoShowEnabled ? "开启" : "关闭"
+        return "目标语言 \(targets) · 选中自动 \(autoShow) · 缓存 \(max(0, cacheEntryCount)) 条"
     }
 
     private func statusItem(_ title: String, isOK: Bool) -> some View {
@@ -126,7 +127,7 @@ struct InputAssistTestView: View {
     private var metricsRow: some View {
         let metrics = coordinator.metrics
         return Text(
-            "手动 \(metrics.manualTriggerCount) · 自动 \(metrics.autoTriggerCount) · "
+            "快捷键 \(metrics.shortcutTriggerCount) · 选中自动 \(metrics.selectionAutoShowCount) · "
                 + "展示 \(metrics.candidateShowCount) · 替换 \(metrics.candidateCommitCount) · "
                 + "缓存命中 \(metrics.cacheHitCount) · 安全放弃 \(metrics.safeAbortCount)"
         )

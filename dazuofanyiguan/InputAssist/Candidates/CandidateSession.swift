@@ -13,11 +13,23 @@ struct CandidateSession {
     let elementValueAtCapture: String?
     let context: String
     let capability: InputAssistSurfaceCapability
+    let role: String?
+    let allowsEditorPaste: Bool
     let anchorRect: CGRect
     /// 取词那一刻的选区 / 光标位置，替换前要比对（见 InputAssistCapture 的注释）。
     let selectedRangeAtCapture: InputAssistTextRange?
     let detectedSourceLanguageCode: String?
     let createdAt: Date
+
+    /// 这个会话是不是就为**这一段**选区开的。
+    ///
+    /// 用来防止两条延迟路径为同一段选区各开一次：自动显示等 180ms、
+    /// 快捷键的 Chromium 重试等 200ms，谁先到都可能已经开好了浮层。
+    func matchesSelection(of capture: InputAssistCapture) -> Bool {
+        CFEqual(element, capture.element)
+            && sourceText == capture.sourceText
+            && sourceRange == capture.sourceRange
+    }
 
     init(
         sessionID: UUID = UUID(),
@@ -34,6 +46,8 @@ struct CandidateSession {
         self.elementValueAtCapture = capture.elementValue
         self.context = capture.context
         self.capability = capture.capability
+        self.role = capture.role
+        self.allowsEditorPaste = capture.allowsEditorPaste
         self.anchorRect = capture.anchorRect
         self.selectedRangeAtCapture = capture.selectedRangeAtCapture
         self.detectedSourceLanguageCode = detectedSourceLanguageCode

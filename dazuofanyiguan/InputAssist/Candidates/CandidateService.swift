@@ -166,6 +166,10 @@ final class CandidateService {
             case .installed:
                 break
             case .downloadRequired:
+                log?.warn(
+                    "Input Assist Apple 语言模型未安装："
+                        + "\(request.sourceLanguageCode) -> \(targetLanguageCode)"
+                )
                 // 缺语言包只影响这一行，其它语言继续（PRD §20）。
                 // 首次不自动下载：那会弹系统对话框打断用户输入。
                 // 用户点了那一行才往下走，`prepareTranslation()` 会引导完成下载。

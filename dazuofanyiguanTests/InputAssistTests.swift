@@ -12,6 +12,345 @@ import Testing
 /// AppFilter / SecureInputGuard，外加浮层定位与布局。
 struct InputAssistTests {
 
+    // MARK: - 自动取词的去重（Codex review #5 第四轮）
+
+    @MainActor
+    @Test func aNewSelectionGestureClearsTheDedupFingerprint() {
+        // 关掉浮层后原样重新划选同一段文字，必须能再次触发。
+        // 拖选过程中只有 mouseDown 和 mouseUp，中间不会有一次"空选区"取词
+        // 来自动清掉指纹，所以要靠 mouseDown 显式清。
+        let monitor = InputAssistSelectionMonitor()
+        let element = AXUIElementCreateSystemWide()
+        let capture = InputAssistCapture(
+            element: element,
+            sourceText: "hello",
+            sourceRange: InputAssistTextRange(location: 0, length: 5),
+            elementValue: "hello",
+            context: "hello",
+            capability: .axDirect,
+            role: "AXTextArea",
+            allowsEditorPaste: true,
+            anchorRect: .zero,
+            hasPreciseCaretBounds: true,
+            selectedRangeAtCapture: nil
+        )
+
+        #expect(monitor.registerSelection(capture))
+        #expect(!monitor.registerSelection(capture))
+
+        // 新的划选手势开始 —— 同一段选区重新变得可用。
+        monitor.resetSelection()
+        #expect(monitor.registerSelection(capture))
+    }
+
+    @MainActor
+    @Test func aSelectionAlreadyHandledIsNotPickedUpAgain() {
+        // Esc 关掉浮层时，key-down 被 CandidateKeyTap 吃掉，key-up 会漏到
+        // 选区监听的全局监听器。如果这段选区没被记过，浮层会立刻自己弹回来。
+        let monitor = InputAssistSelectionMonitor()
+        let element = AXUIElementCreateSystemWide()
+        func capture(_ text: String) -> InputAssistCapture {
+            InputAssistCapture(
+                element: element,
+                sourceText: text,
+                sourceRange: InputAssistTextRange(location: 0, length: text.utf16.count),
+                elementValue: text,
+                context: text,
+                capability: .axDirect,
+                role: "AXTextArea",
+                allowsEditorPaste: true,
+                anchorRect: .zero,
+                hasPreciseCaretBounds: true,
+                selectedRangeAtCapture: nil
+            )
+        }
+
+        // 第一次是新选区。
+        #expect(monitor.registerSelection(capture("hello")))
+        // 同一段选区再来一次就该被跳过——这正是快捷键打开浮层后按 Esc 的情形。
+        #expect(!monitor.registerSelection(capture("hello")))
+        // 换了内容才算新选区。
+        #expect(monitor.registerSelection(capture("world")))
+    }
+
+    // MARK: - 粘贴兜底的准入（Codex review #5 第二轮）
+
+    @Test func unverifiableWriteMustNotBeFollowedByAPaste() {
+        // AX 写调用已经发出去、但读不回结果时，无法证明它到底生效没有。
+        // 这时再合成一次 ⌘V，万一那次写其实成功了，译文会被插入两遍。
+        #expect(
+            !InputAssistReplacementOutcome
+                .aborted(reason: .writeVerificationUnavailable)
+                .allowsPasteFallback
+        )
+    }
+
+    @Test func clipboardContentionMustNotBeFollowedByACopy() {
+        // 粘贴引擎遇到剪贴板争用时刻意不覆盖那份新内容。
+        // 如果协调器接着走复制兜底，clearContents() 会把引擎特意保护的东西
+        // 亲手毁掉——前脚保护后脚清掉，比一开始就不保护还糟。
+        #expect(
+            InputAssistReplacementOutcome
+                .aborted(reason: .clipboardBusy)
+                .preservesForeignClipboard
+        )
+        // 其余任何结果都不该挡掉复制兜底——译文拿不到才是更常见的损失。
+        for reason in [
+            InputAssistReplacementSafetyGuard.AbortReason.secureInputActive,
+            .applicationChanged,
+            .focusLost,
+            .focusedElementChanged,
+            .selectionChanged,
+            .sourceTextChanged,
+            .sourceRangeUnavailable,
+            .writeVerificationUnavailable
+        ] {
+            #expect(
+                !InputAssistReplacementOutcome
+                    .aborted(reason: reason)
+                    .preservesForeignClipboard,
+                "\(reason.rawValue) 与剪贴板无关，不该挡掉复制兜底"
+            )
+        }
+        #expect(
+            !InputAssistReplacementOutcome
+                .failed(message: "编辑器未接受译文替换")
+                .preservesForeignClipboard
+        )
+    }
+
+    @Test func everyOtherOutcomeStillAllowsThePasteFallback() {
+        // 其余 abort 都发生在动手写**之前**（选区变了、焦点没了、应用切了…），
+        // 没有任何文本被改过，兜底是安全的。
+        for reason in [
+            InputAssistReplacementSafetyGuard.AbortReason.secureInputActive,
+            .applicationChanged,
+            .focusLost,
+            .focusedElementChanged,
+            .selectionChanged,
+            .sourceTextChanged,
+            .sourceRangeUnavailable,
+            .clipboardBusy
+        ] {
+            #expect(
+                InputAssistReplacementOutcome.aborted(reason: reason).allowsPasteFallback,
+                "\(reason.rawValue) 发生在写入之前，不该挡掉粘贴兜底"
+            )
+        }
+
+        // .failed 是"读回来了、确认没生效"，正是最该走兜底的一类。
+        #expect(
+            InputAssistReplacementOutcome
+                .failed(message: "当前应用拒绝了原位替换")
+                .allowsPasteFallback
+        )
+        #expect(
+            InputAssistReplacementOutcome
+                .replaced(strategy: .axDirect)
+                .allowsPasteFallback
+        )
+    }
+
+    // MARK: - 含汉字的日韩文（Codex review #5）
+
+    @Test func kanaDecidesJapaneseEvenWhenRecognitionAbstains() {
+        // "私の" 只有两个 compact 字符，过不了 LanguageDetectionService 的字数门槛，
+        // 识别器弃权返回 nil。但假名是决定性的——中文里不会出现它。
+        // 要求 detected == "ja" 才保留日文，等于在识别器最不可靠的地方去依赖它。
+        #expect(
+            InputAssistLanguagePolicy.selectionSourceLanguageCode(
+                for: "私の",
+                detectedLanguageCode: nil
+            ) == "ja"
+        )
+        #expect(
+            InputAssistLanguagePolicy.selectionSourceLanguageCode(
+                for: "한자漢字",
+                detectedLanguageCode: nil
+            ) == "ko"
+        )
+    }
+
+    @Test func koreanWithHanjaIsNotFlattenedToChinese() {
+        // 韩文里混着汉字（한자漢字）很常见。只看"有没有汉字"会把已经正确
+        // 识别出来的韩文压成中文，候选请求的源语言就是错的，
+        // 还会连带把错误的目标行过滤掉。
+        #expect(
+            InputAssistLanguagePolicy.selectionSourceLanguageCode(
+                for: "한자漢字",
+                detectedLanguageCode: "ko"
+            ) == "ko"
+        )
+    }
+
+    @Test func japaneseWithKanjiStillKeepsJapanese() {
+        #expect(
+            InputAssistLanguagePolicy.selectionSourceLanguageCode(
+                for: "日本語の漢字",
+                detectedLanguageCode: "ja"
+            ) == "ja"
+        )
+        // 半角片假名也算假名——共享的 TextScriptPresence 比原来那份私有实现多覆盖这一段。
+        #expect(
+            InputAssistLanguagePolicy.selectionSourceLanguageCode(
+                for: "漢字ｶﾀｶﾅ",
+                detectedLanguageCode: "ja"
+            ) == "ja"
+        )
+    }
+
+    @Test func hanOnlyJapaneseAndKoreanKeepTheirDetectedLanguage() {
+        // 纯汉字的日文 / 韩文没有假名和谚文可依，只剩识别器的结论。
+        #expect(
+            InputAssistLanguagePolicy.selectionSourceLanguageCode(
+                for: "東京大学",
+                detectedLanguageCode: "ja"
+            ) == "ja"
+        )
+        #expect(
+            InputAssistLanguagePolicy.selectionSourceLanguageCode(
+                for: "漢字",
+                detectedLanguageCode: "ko"
+            ) == "ko"
+        )
+    }
+
+    @Test func chineseTextStillOverridesAWrongDetection() {
+        // 这条是这个函数原本要解决的问题，不能因为上面几条被破坏：
+        // 中英混排 / 数字型号会让识别器返回**非中文或 nil**（具体是 en 和 nil），
+        // 那时仍然按中文处理，否则已安装的中文包会被 Apple 误报成"需要下载"。
+        // 保留 ja / ko 是刻意划出的例外，不能扩大到 en。
+        #expect(
+            InputAssistLanguagePolicy.selectionSourceLanguageCode(
+                for: "这是 iPhone 15 Pro 的说明",
+                detectedLanguageCode: "en"
+            ) == "zh-CN"
+        )
+        #expect(
+            InputAssistLanguagePolicy.selectionSourceLanguageCode(
+                for: "纯中文",
+                detectedLanguageCode: nil
+            ) == "zh-CN"
+        )
+        // 没有汉字时原样放行。
+        #expect(
+            InputAssistLanguagePolicy.selectionSourceLanguageCode(
+                for: "hello",
+                detectedLanguageCode: "en"
+            ) == "en"
+        )
+    }
+
+    // MARK: - 两条延迟路径的会话去重（Codex review #5 第十三轮）
+
+    @Test func aSessionRecognisesTheSelectionItWasOpenedFor() {
+        // 自动显示等 180ms、快捷键的 Chromium 重试等 200ms。树在这中间建好的话
+        // 两条路会为同一段选区各开一次会话：浮层闪一下，同一段文字翻两遍，
+        // OpenAI 那条路还会多发一次计费请求。
+        let element = AXUIElementCreateSystemWide()
+        func capture(_ text: String, location: Int) -> InputAssistCapture {
+            InputAssistCapture(
+                element: element,
+                sourceText: text,
+                sourceRange: InputAssistTextRange(location: location, length: text.utf16.count),
+                elementValue: text,
+                context: text,
+                capability: .axDirect,
+                role: "AXTextArea",
+                allowsEditorPaste: true,
+                anchorRect: .zero,
+                hasPreciseCaretBounds: true,
+                selectedRangeAtCapture: nil
+            )
+        }
+
+        let session = CandidateSession(
+            appBundleIdentifier: "com.example.app",
+            capture: capture("hello", location: 0),
+            detectedSourceLanguageCode: "en"
+        )
+
+        // 同一段选区：第二条路必须让开。
+        #expect(session.matchesSelection(of: capture("hello", location: 0)))
+        // 内容变了，是新选区。
+        #expect(!session.matchesSelection(of: capture("world", location: 0)))
+        // 内容相同但位置不同——同一控件里的另一处相同文字，也是新选区。
+        #expect(!session.matchesSelection(of: capture("hello", location: 20)))
+    }
+
+    // MARK: - Chromium / Electron 取词
+
+    @MainActor
+    @Test func aTransientFailureIsNeverCachedAsAConclusion() {
+        // 这条是要害：把 .cannotComplete（目标应用正忙 / 刚启动）当成永久结论，
+        // 等于把那个应用永久废掉——直到它或翻译官重启才会再试一次。
+        #expect(
+            InputAssistChromiumAccessibility.classify(.cannotComplete) == .transientFailure
+        )
+        #expect(
+            InputAssistChromiumAccessibility.classify(.apiDisabled) == .transientFailure
+        )
+        #expect(
+            InputAssistChromiumAccessibility.classify(.invalidUIElement) == .transientFailure
+        )
+        #expect(InputAssistChromiumAccessibility.classify(.failure) == .transientFailure)
+
+        // 只有这两类是真的"再试也一样"。
+        #expect(
+            InputAssistChromiumAccessibility.classify(.attributeUnsupported)
+                == .permanentlyUnsupported
+        )
+        #expect(
+            InputAssistChromiumAccessibility.classify(.notImplemented) == .permanentlyUnsupported
+        )
+
+        #expect(InputAssistChromiumAccessibility.classify(.success) == .enabled)
+    }
+
+    @MainActor
+    @Test func enablingIsNeverAnnouncedTwiceForTheSameProcess() {
+        // 打开别人进程的 AX 树是有开销的，同一个应用不该反复去设。
+        // （本进程不是 Chromium，实际返回哪种错误由系统决定，
+        // 所以这里只断言与错误类型无关的那个不变式。）
+        InputAssistChromiumAccessibility.reset()
+        let pid = ProcessInfo.processInfo.processIdentifier
+        let first = InputAssistChromiumAccessibility.enableIfNeeded(pid: pid)
+        let second = InputAssistChromiumAccessibility.enableIfNeeded(pid: pid)
+        #expect(!(first && second))
+        if first {
+            #expect(InputAssistChromiumAccessibility.hasSettledResult(pid: pid))
+        }
+        InputAssistChromiumAccessibility.reset()
+        #expect(!InputAssistChromiumAccessibility.hasSettledResult(pid: pid))
+    }
+
+    @MainActor
+    @Test func aTerminatedProcessLosesItsCachedConclusion() {
+        // macOS 会回收 pid，而翻译官是常驻的。被缓存的应用退出后，
+        // 新启动的 Chromium 应用可能拿到同一个 pid——如果记录还在，
+        // AXManualAccessibility 再也不会写下去，那个进程的取词就永久不可用了。
+        InputAssistChromiumAccessibility.reset()
+        let pid = ProcessInfo.processInfo.processIdentifier
+
+        let announced = InputAssistChromiumAccessibility.enableIfNeeded(pid: pid)
+        if announced || InputAssistChromiumAccessibility.hasSettledResult(pid: pid) {
+            #expect(InputAssistChromiumAccessibility.hasSettledResult(pid: pid))
+            InputAssistChromiumAccessibility.evict(pid: pid)
+            #expect(!InputAssistChromiumAccessibility.hasSettledResult(pid: pid))
+        }
+
+        // 驱逐一个从没记过的 pid 不该出问题。
+        InputAssistChromiumAccessibility.evict(pid: 999_999)
+        InputAssistChromiumAccessibility.reset()
+    }
+
+    @MainActor
+    @Test func invalidProcessIdentifierIsNeverTouched() {
+        InputAssistChromiumAccessibility.reset()
+        #expect(!InputAssistChromiumAccessibility.enableIfNeeded(pid: 0))
+        #expect(!InputAssistChromiumAccessibility.enableIfNeeded(pid: -1))
+    }
+
     // MARK: - 目标语言（PRD §10）
 
     @Test func sameLanguageComparisonKeepsChineseVariantsApart() {
@@ -788,6 +1127,24 @@ struct InputAssistTests {
         #expect(three.width == CandidatePanelLayout.width)
     }
 
+    @Test func copyOnlyModeReservesSpaceForTheCapabilityNotice() {
+        let replace = CandidatePanelLayout.panelSize(
+            rowCount: 2,
+            selectedIndex: 0,
+            reservedLineCount: 1,
+            showsDebugInfo: false,
+            showsCopyNotice: false
+        )
+        let copy = CandidatePanelLayout.panelSize(
+            rowCount: 2,
+            selectedIndex: 0,
+            reservedLineCount: 1,
+            showsDebugInfo: false,
+            showsCopyNotice: true
+        )
+        #expect(copy.height == replace.height + CandidatePanelLayout.copyNoticeHeight)
+    }
+
     @Test func nonSelectedRowsNeverExceedTwoLinesAndSelectedRowStopsAtFour() {
         #expect(
             CandidatePanelLayout.lineCount(reservedLineCount: 99, isSelected: false)
@@ -868,238 +1225,30 @@ struct InputAssistTests {
         #expect(settings.appScope == .allowlistOnly)
     }
 
-    // MARK: - 自动触发判定（PRD §8）
+    // MARK: - 选区源语言
 
-    @Test func pinyinStillBeingComposedNeverTriggers() {
-        // 中文输入法开着、新出现的全是 ASCII 字母 = 还没上屏的拼音。
-        // 这时候弹出来翻译的会是 "women keyi"，不是「我们可以」。
-        for buffer in ["women keyi tigong", "nihao", "xi'an", "ni3hao3"] {
-            #expect(
-                InputAssistAutoTriggerPolicy.classify(
-                    newText: buffer,
-                    isCJKInputSourceActive: true
-                ) == .composing,
-                "\(buffer)"
-            )
-        }
+    @Test func selectedHanTextKeepsAChineseSourceAcrossLongPunctuatedText() {
+        let text = "您好！关于您昨天询问的设备，我们可以提供16吨船吊；如果需要技术参数、价格和交货周期，请随时联系我们。"
+
+        #expect(InputAssistLanguagePolicy.selectionSourceLanguageCode(
+            for: text,
+            detectedLanguageCode: nil
+        ) == "zh-CN")
+        #expect(InputAssistLanguagePolicy.selectionSourceLanguageCode(
+            for: text,
+            detectedLanguageCode: "fr"
+        ) == "zh-CN")
+        #expect(InputAssistLanguagePolicy.selectionSourceLanguageCode(
+            for: text,
+            detectedLanguageCode: "zh-TW"
+        ) == "zh-TW")
     }
 
-    @Test func sameAsciiTextIsJustEnglishWhenNoCJKInputSourceIsActive() {
-        // 英文输入法下的 "hello there" 不是组字缓冲，只是用户在打英文——
-        // 自动触发第一版只针对新增中文，直接跳过。
-        #expect(
-            InputAssistAutoTriggerPolicy.classify(
-                newText: "hello there",
-                isCJKInputSourceActive: false
-            ) == .skip(.noChineseText)
-        )
-    }
-
-    @Test func committedChineseWaitsForAPauseThenTriggers() {
-        #expect(
-            InputAssistAutoTriggerPolicy.classify(
-                newText: "我们可以提供16吨船吊",
-                isCJKInputSourceActive: true
-            ) == .waitForPause
-        )
-    }
-
-    @Test func strongPunctuationTriggersWithoutWaitingButCommasDoNot() {
-        for terminator in ["。", "！", "？", "；"] {
-            #expect(
-                InputAssistAutoTriggerPolicy.classify(
-                    newText: "我们可以提供16吨船吊\(terminator)",
-                    isCJKInputSourceActive: true
-                ) == .triggerImmediately,
-                "\(terminator)"
-            )
-        }
-        // 逗号是弱分隔，不得只因为它就切断翻译范围（PRD §8.1）。
-        for separator in ["，", "、"] {
-            #expect(
-                InputAssistAutoTriggerPolicy.classify(
-                    newText: "我们可以提供16吨船吊\(separator)",
-                    isCJKInputSourceActive: true
-                ) == .waitForPause,
-                "\(separator)"
-            )
-        }
-    }
-
-    @Test func mixedTextWithChineseStillTriggers() {
-        // PRD §8.3：混合文本允许触发。
-        #expect(
-            InputAssistAutoTriggerPolicy.classify(
-                newText: "SQ16 Marine Crane 价格是 12000 USD",
-                isCJKInputSourceActive: true
-            ) == .waitForPause
-        )
-    }
-
-    @Test func structuredAndOversizedInsertionsAreSkipped() {
-        #expect(
-            InputAssistAutoTriggerPolicy.classify(
-                newText: "https://example.com/产品",
-                isCJKInputSourceActive: true
-            ) == .skip(.looksStructured)
-        )
-        #expect(
-            InputAssistAutoTriggerPolicy.classify(
-                newText: "  \n ",
-                isCJKInputSourceActive: true
-            ) == .skip(.empty)
-        )
-        let pasted = String(repeating: "很长的一句话", count: 100)
-        #expect(
-            InputAssistAutoTriggerPolicy.classify(
-                newText: pasted,
-                isCJKInputSourceActive: true
-            ) == .skip(.tooLong)
-        )
-    }
-
-    @Test func triggerSpeedPresetsMatchThePRDAndCustomValuesAreClamped() {
-        #expect(InputAssistTriggerSpeed.fast.presetMilliseconds == 200)
-        #expect(InputAssistTriggerSpeed.standard.presetMilliseconds == 300)
-        #expect(InputAssistTriggerSpeed.steady.presetMilliseconds == 500)
-        #expect(InputAssistTriggerSpeed.custom.presetMilliseconds == nil)
-
-        #expect(
-            InputAssistTriggerSpeed.milliseconds(speed: .custom, customMilliseconds: 50) == 100
-        )
-        #expect(
-            InputAssistTriggerSpeed.milliseconds(speed: .custom, customMilliseconds: 5000) == 1000
-        )
-        #expect(
-            InputAssistTriggerSpeed.milliseconds(speed: .custom, customMilliseconds: 420) == 420
-        )
-        // 选了预设时自定义值不生效。
-        #expect(
-            InputAssistTriggerSpeed.milliseconds(speed: .fast, customMilliseconds: 999) == 200
-        )
-    }
-
-    @Test func cjkInputSourceDetectionLooksAtTheLanguageSubtag() {
-        #expect(InputAssistInputSourceMonitor.isCJKLanguage("zh-Hans"))
-        #expect(InputAssistInputSourceMonitor.isCJKLanguage("ja"))
-        #expect(InputAssistInputSourceMonitor.isCJKLanguage("ko"))
-        #expect(!InputAssistInputSourceMonitor.isCJKLanguage("en"))
-        #expect(!InputAssistInputSourceMonitor.isCJKLanguage("ru"))
-        #expect(InputAssistInputSourceMonitor.containsCJKLanguage(["en", "zh-Hant"]))
-        #expect(!InputAssistInputSourceMonitor.containsCJKLanguage(["en", "de"]))
-        #expect(!InputAssistInputSourceMonitor.containsCJKLanguage([]))
-    }
-
-    // MARK: - 自动触发的替换范围（PRD §9.1 + §9.3）
-
-    @Test func autoTriggerNeverTouchesTextTypedBeforeThisRound() {
-        // PRD §9.1 的例子：前文已有内容，这一轮只新增了最后一句。
-        let existing = "Hello John，关于你昨天问的设备，"
-        let value = existing + "我们可以提供16吨船吊"
-        let burstStart = existing.utf16.count
-
-        let range = InputAssistSentenceBoundary.autoTriggerSourceRange(
-            in: value,
-            burstStartUTF16Offset: burstStart,
-            caretUTF16Offset: value.utf16.count
-        )
-        #expect(
-            range.map { InputAssistAXTextCapture.substring(of: value, range: $0) }
-                == "我们可以提供16吨船吊"
-        )
-    }
-
-    @Test func autoTriggerStopsAtTheSentenceStartEvenWhenTheBurstStartedEarlier() {
-        // PRD §9.3：不得跨多个完整句子一次性替换。
-        let value = "第一句。第二句"
-        let range = InputAssistSentenceBoundary.autoTriggerSourceRange(
-            in: value,
-            burstStartUTF16Offset: 0,
-            caretUTF16Offset: value.utf16.count
-        )
-        #expect(range.map { InputAssistAXTextCapture.substring(of: value, range: $0) } == "第二句")
-    }
-
-    @Test func autoTriggerRangeSkipsLeadingWhitespace() {
-        let existing = "前面。"
-        let value = existing + "   我们可以提供"
-        let range = InputAssistSentenceBoundary.autoTriggerSourceRange(
-            in: value,
-            burstStartUTF16Offset: existing.utf16.count,
-            caretUTF16Offset: value.utf16.count
-        )
-        #expect(
-            range.map { InputAssistAXTextCapture.substring(of: value, range: $0) } == "我们可以提供"
-        )
-    }
-
-    @Test func autoTriggerRangeIsNilWhenTheCaretDidNotMoveForward() {
-        let value = "我们可以提供"
-        #expect(InputAssistSentenceBoundary.autoTriggerSourceRange(
-            in: value,
-            burstStartUTF16Offset: 6,
-            caretUTF16Offset: 6
-        ) == nil)
-        // 删到了起点之前。
-        #expect(InputAssistSentenceBoundary.autoTriggerSourceRange(
-            in: value,
-            burstStartUTF16Offset: 6,
-            caretUTF16Offset: 3
-        ) == nil)
-    }
-
-    // MARK: - 应用兼容等级（PRD §46 / §53）
-
-    @Test func compatibilityLevelFollowsTheSurfaceCapability() {
-        #expect(InputAssistAppCompatibility.level(
-            bundleIdentifier: "com.apple.TextEdit",
-            capability: .axDirect,
-            hasPreciseCaretBounds: true
-        ) == .full)
-
-        #expect(InputAssistAppCompatibility.level(
-            bundleIdentifier: "com.google.Chrome",
-            capability: .axDirect,
-            hasPreciseCaretBounds: false
-        ) == .degraded)
-
-        #expect(InputAssistAppCompatibility.level(
-            bundleIdentifier: "net.whatsapp.WhatsApp",
-            capability: .pasteFallback,
-            hasPreciseCaretBounds: false
-        ) == .degraded)
-
-        #expect(InputAssistAppCompatibility.level(
-            bundleIdentifier: "com.apple.TextEdit",
-            capability: .unavailable,
-            hasPreciseCaretBounds: true
-        ) == .disabled)
-    }
-
-    @Test func terminalsStayManualOnlyEvenWithFullAXSupport() {
-        // 终端即使 AX 读写都正常也不该被自动改写命令行（PRD §53）。
-        // 黑名单是第一道闸，这是第二道——用户把黑名单清空也不会放开自动触发。
-        #expect(InputAssistAppCompatibility.level(
-            bundleIdentifier: "com.apple.Terminal",
-            capability: .axDirect,
-            hasPreciseCaretBounds: true
-        ) == .manualOnly)
-        #expect(InputAssistAppCompatibility.isManualOnly("com.googlecode.iterm2"))
-        #expect(!InputAssistAppCompatibility.isManualOnly("com.apple.mail"))
-        #expect(!InputAssistAppCompatibility.isManualOnly(nil))
-    }
-
-    @Test func compatibilityLevelsGateTheRightTriggers() {
-        #expect(InputAssistCompatibilityLevel.full.allowsAutoTrigger)
-        #expect(InputAssistCompatibilityLevel.degraded.allowsAutoTrigger)
-        #expect(!InputAssistCompatibilityLevel.manualOnly.allowsAutoTrigger)
-        #expect(!InputAssistCompatibilityLevel.disabled.allowsAutoTrigger)
-
-        #expect(InputAssistCompatibilityLevel.manualOnly.allowsManualTrigger)
-        #expect(!InputAssistCompatibilityLevel.disabled.allowsManualTrigger)
-
-        #expect(InputAssistCompatibilityLevel.full > InputAssistCompatibilityLevel.degraded)
-        #expect(InputAssistCompatibilityLevel.disabled < InputAssistCompatibilityLevel.manualOnly)
+    @Test func selectedJapaneseTextWithKanaKeepsJapaneseDetection() {
+        #expect(InputAssistLanguagePolicy.selectionSourceLanguageCode(
+            for: "昨日の設備について、詳細を送ってください。",
+            detectedLanguageCode: "ja"
+        ) == "ja")
     }
 
     // MARK: - Codex 第一轮 review 的回归
@@ -1123,7 +1272,7 @@ struct InputAssistTests {
 
         settings.isEnabled = true
         coordinator.applyEnabledState()
-        #expect(coordinator.lastStatusMessage == "需要辅助功能权限才能使用输入增强")
+        #expect(coordinator.lastStatusMessage == "需要辅助功能权限才能读取和替换选中文本")
         #expect(!coordinator.hotkeyStatus.isActive)
 
         // 用户在系统设置里授权，切回 App。
@@ -1132,7 +1281,7 @@ struct InputAssistTests {
 
         // 快捷键有没有真的抢到手要看运行环境（可能被别的 App 占了），
         // 但「还在提示缺权限」这件事必须消失——那正是这条 bug 的表征。
-        #expect(coordinator.lastStatusMessage != "需要辅助功能权限才能使用输入增强")
+        #expect(coordinator.lastStatusMessage != "需要辅助功能权限才能读取和替换选中文本")
     }
 
     @MainActor
@@ -1157,79 +1306,65 @@ struct InputAssistTests {
     }
 
     @MainActor
-    @Test func ownApplicationIsObservableOnlyWhileTheTestWindowIsKey() throws {
-        // 回归：测试页在 PRD §48 里要求能就地验证自动触发，
-        // 但又不能让设置页黑名单编辑器里的输入也被当成待翻译内容。
+    @Test func selectionAutoShowIsExplicitAndDefaultsOff() throws {
         let suiteName = "InputAssistTests.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
-        let coordinator = InputAssistCoordinator(
-            settings: InputAssistSettings(defaults: defaults),
-            isAccessibilityTrustedProvider: { false }
-        )
-        defer { coordinator.deactivate() }
+        let settings = InputAssistSettings(defaults: defaults)
+        #expect(!settings.isSelectionAutoShowEnabled)
+        settings.isSelectionAutoShowEnabled = true
+        #expect(settings.isSelectionAutoShowEnabled)
+        #expect(InputAssistSelectionMonitor.settleNanoseconds == 180_000_000)
+    }
 
-        // 没登记窗口 → 永远不监听自己。
-        #expect(!coordinator.isTestSurfaceActive)
+    @Test func commitPolicyUsesAXThenEditablePasteThenCopy() {
+        #expect(InputAssistCommitPolicy.mode(
+            capability: .axDirect,
+            allowsEditorPaste: true,
+            hasSourceRange: true,
+            hasElementValue: true
+        ) == .axReplace)
 
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 10, height: 10),
-            styleMask: [.borderless],
-            backing: .buffered,
-            defer: false
-        )
-        // 程序化创建的 NSWindow 默认 isReleasedWhenClosed = true，
-        // close() 会在 ARC 还持有引用时把它释放掉，直接把测试进程带崩。
-        window.isReleasedWhenClosed = false
-        defer { window.orderOut(nil) }
+        #expect(InputAssistCommitPolicy.mode(
+            capability: .copyOnly,
+            allowsEditorPaste: true,
+            hasSourceRange: false,
+            hasElementValue: false
+        ) == .editorPaste)
 
-        coordinator.registerTestSurfaceWindow(window)
-        // 登记了但它不是 key window → 仍然不监听。
-        #expect(!coordinator.isTestSurfaceActive)
+        #expect(InputAssistCommitPolicy.mode(
+            capability: .copyOnly,
+            allowsEditorPaste: false,
+            hasSourceRange: false,
+            hasElementValue: false
+        ) == .copy)
 
-        coordinator.registerTestSurfaceWindow(nil)
-        #expect(!coordinator.isTestSurfaceActive)
     }
 
     @MainActor
-    @Test func pasteFallbackKeepsAClipboardTheUserChangedMeanwhile() {
-        // 回归：等待粘贴落地的那 250ms 里用户可能复制了别的东西，
-        // 无条件还原会把它悄悄换回旧快照。
-        let pasteboard = NSPasteboard(name: NSPasteboard.Name("InputAssistTests.\(UUID().uuidString)"))
+    @Test func editorPasteRestoreNeverOverwritesANewerClipboardValue() {
+        let pasteboard = NSPasteboard(
+            name: NSPasteboard.Name("InputAssistTests.\(UUID().uuidString)")
+        )
         defer { pasteboard.releaseGlobally() }
 
         pasteboard.clearContents()
-        pasteboard.setString("用户原本复制的内容", forType: .string)
+        pasteboard.setString("原剪贴板", forType: .string)
         let snapshot = InputAssistPasteboardSnapshot.snapshot(from: pasteboard)
 
-        // 我们放进去译文。
-        pasteboard.clearContents()
-        pasteboard.setString("We can provide a 16-ton marine crane.", forType: .string)
-        let ourChangeCount = pasteboard.changeCount
-
-        // 没人动过 → 应该还原。
-        InputAssistTextReplaceEngine.restoreIfUntouched(
-            snapshot,
-            expectedChangeCount: ourChangeCount,
-            on: pasteboard
-        )
-        #expect(pasteboard.string(forType: .string) == "用户原本复制的内容")
-
-        // 再来一次，这次中途用户复制了别的东西。
         pasteboard.clearContents()
         pasteboard.setString("译文", forType: .string)
-        let secondChangeCount = pasteboard.changeCount
+        let translationChangeCount = pasteboard.changeCount
 
         pasteboard.clearContents()
-        pasteboard.setString("用户刚刚复制的新内容", forType: .string)
-
-        InputAssistTextReplaceEngine.restoreIfUntouched(
+        pasteboard.setString("用户刚复制的新内容", forType: .string)
+        InputAssistEditorPasteEngine.restoreIfUntouched(
             snapshot,
-            expectedChangeCount: secondChangeCount,
-            on: pasteboard
+            expectedChangeCount: translationChangeCount,
+            pasteboard: pasteboard
         )
-        #expect(pasteboard.string(forType: .string) == "用户刚刚复制的新内容")
+        #expect(pasteboard.string(forType: .string) == "用户刚复制的新内容")
     }
 
     // MARK: - Codex 第二轮 review 的回归
@@ -1330,7 +1465,7 @@ struct InputAssistTests {
 
     @MainActor
     @Test func manualShortcutCanBeChangedWhenTheDefaultIsTaken() throws {
-        // 回归：⌥Space 很容易被别的 App 占掉，设置页原来只是把它当文本显示，
+        // 快捷键被其它 App 占用时，设置页必须能更换。
         // 一旦注册失败用户没有任何补救手段。
         let suiteName = "InputAssistTests.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suiteName))
@@ -1350,83 +1485,6 @@ struct InputAssistTests {
         // 选项之间不能有重复，否则 Picker 的 tag 会撞车。
         let identifiers = Set(InputAssistShortcut.selectableOptions.map(\.id))
         #expect(identifiers.count == InputAssistShortcut.selectableOptions.count)
-    }
-
-    // MARK: - Codex 第三轮 review 的回归
-
-    @Test func caretMovementIsDistinguishedFromTypingByValueLength() {
-        // 回归：只挡「往回删过起点」是不够的。在已有文字中间打完中文再按一下 →，
-        // 锚点还停在原处、待触发任务也还在，算出来的 source range 会一路延伸到光标，
-        // 把用户原本就有的文字圈进去。
-        //
-        // 但也不能一见光标前进就重置——打字本身就会让光标前进。
-        // 区分办法：伴随编辑的移动会改变全文长度，纯导航不会。
-
-        // 打字：全文变长，光标前进 → 算「跟着编辑走」。
-        #expect(InputAssistCaretMovement.classify(
-            previousValueUTF16Count: 10,
-            previousCaretUTF16Offset: 4,
-            currentValueUTF16Count: 12,
-            currentCaretUTF16Offset: 6
-        ) == .followsEdit)
-
-        // 按 →：全文长度不变，光标前进 → 导航，锚点作废。
-        #expect(InputAssistCaretMovement.classify(
-            previousValueUTF16Count: 12,
-            previousCaretUTF16Offset: 6,
-            currentValueUTF16Count: 12,
-            currentCaretUTF16Offset: 7
-        ) == .navigation)
-
-        // 按 ←：同样是导航。
-        #expect(InputAssistCaretMovement.classify(
-            previousValueUTF16Count: 12,
-            previousCaretUTF16Offset: 6,
-            currentValueUTF16Count: 12,
-            currentCaretUTF16Offset: 2
-        ) == .navigation)
-
-        // 删除：全文变短 → 跟着编辑走（是否越过起点由调用方另行判断）。
-        #expect(InputAssistCaretMovement.classify(
-            previousValueUTF16Count: 12,
-            previousCaretUTF16Offset: 6,
-            currentValueUTF16Count: 11,
-            currentCaretUTF16Offset: 5
-        ) == .followsEdit)
-
-        #expect(InputAssistCaretMovement.classify(
-            previousValueUTF16Count: 12,
-            previousCaretUTF16Offset: 6,
-            currentValueUTF16Count: 12,
-            currentCaretUTF16Offset: 6
-        ) == .unchanged)
-    }
-
-    @Test func forwardCaretMoveWouldHaveSweptInPreExistingText() {
-        // 把上面那个场景算成具体范围，说明为什么必须作废。
-        // 已有 "前面内容XXXX"，在第 4 位插入「你好」，然后按一下 →。
-        let value = "前面内容你好XXXX"
-        let burstStart = 4
-        let caretAfterTyping = 6
-        let caretAfterPressingRight = 7
-
-        let correct = InputAssistSentenceBoundary.autoTriggerSourceRange(
-            in: value,
-            burstStartUTF16Offset: burstStart,
-            caretUTF16Offset: caretAfterTyping
-        )
-        #expect(correct.map { InputAssistAXTextCapture.substring(of: value, range: $0) } == "你好")
-
-        // 光标前移之后如果还用同一个锚点，就会把原有的 "X" 也圈进来——
-        // 接受这个候选等于替换掉用户这轮根本没输入过的内容。
-        let contaminated = InputAssistSentenceBoundary.autoTriggerSourceRange(
-            in: value,
-            burstStartUTF16Offset: burstStart,
-            caretUTF16Offset: caretAfterPressingRight
-        )
-        #expect(
-            contaminated.map { InputAssistAXTextCapture.substring(of: value, range: $0) } == "你好X"
-        )
     }
 
     @Test func revalidationAfterTheSettleDelayCatchesAFocusSwitch() {
@@ -1695,6 +1753,7 @@ struct InputAssistTests {
             context: "前面好的",
             capability: .axDirect,
             role: "AXTextArea",
+            allowsEditorPaste: true,
             anchorRect: .zero,
             hasPreciseCaretBounds: true,
             selectedRangeAtCapture: selection
@@ -1705,6 +1764,7 @@ struct InputAssistTests {
             detectedSourceLanguageCode: "zh-CN"
         )
         #expect(session.selectedRangeAtCapture == selection)
+        #expect(session.allowsEditorPaste)
     }
 
     @MainActor
@@ -1785,38 +1845,9 @@ struct InputAssistTests {
         ))
     }
 
-    @MainActor
-    @Test func abortPathRestoresClipboardOnlyWhenUntouched() {
-        // 回归：press 前的几道 abort 分支原本是无条件 restore，
-        // 会把用户在这期间复制的新内容覆盖掉。
-        // press 失败和沉降路径早就用的是 restoreIfUntouched，abort 路径漏了。
-        let pasteboard = NSPasteboard(name: NSPasteboard.Name("InputAssistTests.\(UUID().uuidString)"))
-        defer { pasteboard.releaseGlobally() }
-
-        pasteboard.clearContents()
-        pasteboard.setString("用户原本的剪贴板", forType: .string)
-        let snapshot = InputAssistPasteboardSnapshot.snapshot(from: pasteboard)
-
-        pasteboard.clearContents()
-        pasteboard.setString("我们放进去的译文", forType: .string)
-        let ourChangeCount = pasteboard.changeCount
-
-        // 中途用户复制了新东西，然后某道检查失败要 abort。
-        pasteboard.clearContents()
-        pasteboard.setString("用户刚复制的新内容", forType: .string)
-
-        InputAssistTextReplaceEngine.restoreIfUntouched(
-            snapshot,
-            expectedChangeCount: ourChangeCount,
-            on: pasteboard
-        )
-        #expect(pasteboard.string(forType: .string) == "用户刚复制的新内容")
-    }
-
     @Test func bareDomainUrlsAreNotTranslatable() {
         // 回归：`example.com/产品` 既不带 http:// 前缀也不含 ://，旧实现判不出是 URL。
-        // 而它路径里带中文，会被自动触发当成「新增了中文」——
-        // 于是在一条 URL 中间弹候选，甚至替换掉其中一段。
+        // 而它路径里带中文，选中整条 URL 时也不应当成普通文本翻译。
         for url in [
             "example.com/产品",
             "example.com",
@@ -1880,7 +1911,7 @@ struct InputAssistTests {
     // 把三态分支删掉、把 .unverifiable 重新接回粘贴兜底，它们照样全绿，
     // 等于对本轮真正修的行为没有任何防护。
 
-    @Test func readBackFailureNeverFallsBackToPaste() {
+    @Test func readBackFailureIsUnverifiable() {
         // 回归：AX 写返回 .success 之后读不回 kAXValue（目标 App 忙 / 超时 / 瞬时错误）。
         // 写很可能已经生效、选区已经塌缩，这时再粘贴就是把译文插进去第二遍。
         let verification = InputAssistTextReplaceEngine.WriteVerification.classify(
@@ -1889,8 +1920,6 @@ struct InputAssistTests {
             expectedValueAfterWrite: "前面We can provide后面"
         )
         #expect(verification == .unverifiable)
-        // 这一条才是真正的不变式：验不了 → 绝不粘贴。
-        #expect(!verification.allowsPasteFallback)
     }
 
     @Test func onlyTheExactExpectedValueCountsAsASuccessfulWrite() {
@@ -1903,14 +1932,13 @@ struct InputAssistTests {
             expectedValueAfterWrite: expected
         ) == .applied)
 
-        // 一个字都没变 = 目标 App 悄悄忽略了这次调用，选区完好，可以粘贴。
+        // 一个字都没变 = 目标 App 忽略了这次原位写入。
         let ignored = InputAssistTextReplaceEngine.WriteVerification.classify(
             valueAfterWrite: before,
             valueBeforeWrite: before,
             expectedValueAfterWrite: expected
         )
         #expect(ignored == .didNotApply)
-        #expect(ignored.allowsPasteFallback)
     }
 
     @Test func aThirdStateMustNotBeMistakenForSuccess() {
@@ -1931,22 +1959,7 @@ struct InputAssistTests {
                 expectedValueAfterWrite: expected
             )
             #expect(verification == .unverifiable, "\(actual) 不该被判成写入成功")
-            #expect(!verification.allowsPasteFallback, "\(actual) 也不该退到粘贴")
         }
-    }
-
-    @Test func pasteIsNotPostedWhenTheClipboardChangedUnderUs() {
-        // 回归：记下 ourChangeCount 之后、按 ⌘V 之前还要跑好几次跨进程 AX 查询，
-        // 那段时间剪贴板管理器完全可能再写一次。
-        // 直接断言生产判定函数：版本号对不上就不许发按键。
-        #expect(InputAssistTextReplaceEngine.shouldPostPaste(
-            currentChangeCount: 42,
-            expectedChangeCount: 42
-        ))
-        #expect(!InputAssistTextReplaceEngine.shouldPostPaste(
-            currentChangeCount: 43,
-            expectedChangeCount: 42
-        ))
     }
 
     @Test func staleBeforeOnTheFirstReadMustNotAuthorizePaste() {
@@ -1960,10 +1973,9 @@ struct InputAssistTests {
         // 第一次读到 before、第二次才看到期望值 → 是异步生效，成功，绝不能粘贴。
         #expect(Verification.resolve(first: .didNotApply, second: .applied) == .applied)
 
-        // 两次都是 before → 确实没生效，可以粘贴。
+        // 两次都是 before → 确实没生效。
         let stable = Verification.resolve(first: .didNotApply, second: .didNotApply)
         #expect(stable == .didNotApply)
-        #expect(stable.allowsPasteFallback)
 
         // 只要有一次读不到 / 是第三种样子，就不许粘贴。
         for pair in [
@@ -1973,7 +1985,6 @@ struct InputAssistTests {
         ] {
             let resolved = Verification.resolve(first: pair.0, second: pair.1)
             #expect(resolved == .unverifiable, "\(pair)")
-            #expect(!resolved.allowsPasteFallback, "\(pair)")
         }
     }
 
@@ -2052,14 +2063,15 @@ struct InputAssistTests {
         pool.shutdown()
     }
 
-    @Test func defaultShortcutIsOptionSpace() {
-        #expect(InputAssistShortcut.default.displayString == "⌥Space")
+    @Test func defaultShortcutAvoidsTheGeminiOptionSpaceConflict() {
+        #expect(InputAssistShortcut.default.displayString == "⌥⇧Space")
     }
 
     @Test func defaultBlocklistCoversTheHighRiskApplications() {
         let blocklist = InputAssistAppFilter.defaultBlocklist
         #expect(blocklist.contains("com.apple.Terminal"))
-        #expect(blocklist.contains("com.apple.dt.Xcode"))
-        #expect(blocklist.contains("com.microsoft.VSCode"))
+        #expect(blocklist.contains("com.1password.1password"))
+        #expect(!blocklist.contains("com.apple.dt.Xcode"))
+        #expect(!blocklist.contains("com.microsoft.VSCode"))
     }
 }

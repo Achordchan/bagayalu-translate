@@ -111,7 +111,7 @@ struct dazuofanyiguanApp: App {
                 .preferredColorScheme(settings.appearance.colorScheme)
         }
 
-        Window("输入增强测试", id: "inputAssistTest") {
+        Window("选区翻译测试", id: "inputAssistTest") {
             InputAssistTestView(
                 settings: inputAssistSettings,
                 coordinator: inputAssistCoordinator
@@ -122,7 +122,7 @@ struct dazuofanyiguanApp: App {
         MenuBarExtra("大佐翻译官", systemImage: "character.bubble") {
             Toggle("Mini 模式", isOn: $settings.miniModeEnabled)
 
-            Toggle("输入增强", isOn: Binding(
+            Toggle("选区翻译", isOn: Binding(
                 get: { inputAssistSettings.isEnabled },
                 set: { newValue in
                     inputAssistSettings.isEnabled = newValue

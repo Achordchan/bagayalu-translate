@@ -7,10 +7,10 @@ struct InputAssistShortcut: Hashable {
     var keyCode: Int
     var carbonModifiers: UInt32
 
-    /// PRD §47 的建议默认值：⌥ Space。
+    /// 默认值：⌥⇧ Space。避开 Google Gemini、Alfred 等常见的 ⌥Space。
     static let `default` = InputAssistShortcut(
         keyCode: kVK_Space,
-        carbonModifiers: UInt32(optionKey)
+        carbonModifiers: UInt32(optionKey) | UInt32(shiftKey)
     )
 
     var displayString: String {
@@ -38,16 +38,11 @@ struct InputAssistShortcut: Hashable {
 
     /// 可选的快捷键组合。
     ///
-    /// ⌥Space 是 PRD §47 的建议默认值，但它很容易被别的 App 占掉
-    /// （Alfred、部分输入法切换器都在抢），所以必须给用户换的余地——
-    /// 否则一旦注册失败，手动触发就彻底没法用了。
+    /// 快捷键可以即时更换；系统或其它 App 占用时不应让功能失去入口。
     static let selectableOptions: [InputAssistShortcut] = [
+        .default,
         InputAssistShortcut(keyCode: kVK_Space, carbonModifiers: UInt32(optionKey)),
         InputAssistShortcut(keyCode: kVK_Space, carbonModifiers: UInt32(controlKey)),
-        InputAssistShortcut(
-            keyCode: kVK_Space,
-            carbonModifiers: UInt32(optionKey) | UInt32(shiftKey)
-        ),
         InputAssistShortcut(keyCode: kVK_ANSI_T, carbonModifiers: UInt32(optionKey)),
         InputAssistShortcut(keyCode: kVK_ANSI_G, carbonModifiers: UInt32(optionKey)),
         InputAssistShortcut(
@@ -77,9 +72,7 @@ final class InputAssistSettings: ObservableObject {
         static let appScope = "inputAssistAppScope"
         static let blocklist = "inputAssistBlocklist"
         static let allowlist = "inputAssistAllowlist"
-        static let autoTriggerEnabled = "inputAssistAutoTriggerEnabled"
-        static let triggerSpeed = "inputAssistTriggerSpeed"
-        static let customTriggerMilliseconds = "inputAssistCustomTriggerMs"
+        static let selectionAutoShowEnabled = "inputAssistSelectionAutoShowEnabled"
         static let showsCacheBadge = "inputAssistShowsCacheBadge"
         static let didOfferOnboarding = "inputAssistDidOfferOnboarding"
     }
@@ -96,9 +89,7 @@ final class InputAssistSettings: ObservableObject {
             Key.appScope: InputAssistAppScope.globalWithBlocklist.rawValue,
             Key.blocklist: InputAssistAppFilter.defaultBlocklist.joined(separator: "\n"),
             Key.allowlist: "",
-            Key.autoTriggerEnabled: true,
-            Key.triggerSpeed: InputAssistTriggerSpeed.standard.rawValue,
-            Key.customTriggerMilliseconds: 300,
+            Key.selectionAutoShowEnabled: false,
             Key.showsCacheBadge: true,
             Key.didOfferOnboarding: false
         ])
@@ -162,37 +153,10 @@ final class InputAssistSettings: ObservableObject {
     var blocklist: [String] { InputAssistSettings.parseList(blocklistText) }
     var allowlist: [String] { InputAssistSettings.parseList(allowlistText) }
 
-    /// 自动触发（PRD §8）。只有在整个功能已经打开时才有意义，
-    /// 所以这里默认开着——真正的总开关是 `isEnabled`，它默认关闭。
-    var isAutoTriggerEnabled: Bool {
-        get { defaults.bool(forKey: Key.autoTriggerEnabled) }
-        set { write(newValue, forKey: Key.autoTriggerEnabled) }
-    }
-
-    var triggerSpeed: InputAssistTriggerSpeed {
-        get {
-            InputAssistTriggerSpeed(rawValue: defaults.string(forKey: Key.triggerSpeed) ?? "")
-                ?? .standard
-        }
-        set { write(newValue.rawValue, forKey: Key.triggerSpeed) }
-    }
-
-    var customTriggerMilliseconds: Int {
-        get { defaults.integer(forKey: Key.customTriggerMilliseconds) }
-        set {
-            let clamped = min(
-                max(newValue, InputAssistTriggerSpeed.customRange.lowerBound),
-                InputAssistTriggerSpeed.customRange.upperBound
-            )
-            write(clamped, forKey: Key.customTriggerMilliseconds)
-        }
-    }
-
-    var triggerDelayMilliseconds: Int {
-        InputAssistTriggerSpeed.milliseconds(
-            speed: triggerSpeed,
-            customMilliseconds: customTriggerMilliseconds
-        )
+    /// 选区完成后自动显示候选。默认关闭，快捷键是稳定主路径。
+    var isSelectionAutoShowEnabled: Bool {
+        get { defaults.bool(forKey: Key.selectionAutoShowEnabled) }
+        set { write(newValue, forKey: Key.selectionAutoShowEnabled) }
     }
 
     /// 缓存命中的 ⚡ 标识，主要服务于早期验证（PRD §22）。

@@ -15,9 +15,9 @@ struct InputAssistOnboardingView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             VStack(alignment: .leading, spacing: 6) {
-                Text("新功能：输入增强")
+                Text("新功能：选区翻译")
                     .font(.system(size: 19, weight: .semibold))
-                Text("继续用你习惯的中文输入法打字，中文确认上屏后，Bagayalu 会在光标附近给出目标语言候选，按 Enter 直接用译文替换刚输入的内容。")
+                Text("在任意应用里选中文字，按快捷键查看多语言翻译候选。支持精确写入的编辑器可原位替换，其它应用会复制译文。")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -26,8 +26,8 @@ struct InputAssistOnboardingView: View {
             demo
 
             VStack(alignment: .leading, spacing: 5) {
-                bullet("不改动、不替换你现有的输入法")
-                bullet("需要辅助功能权限才能读写当前输入框")
+                bullet("只处理你明确选中的文字")
+                bullet("无法安全替换时只复制，不模拟粘贴")
                 bullet("密码框和安全输入状态永远跳过")
             }
 
@@ -37,7 +37,7 @@ struct InputAssistOnboardingView: View {
                     onDismiss()
                 }
                 Spacer()
-                Button("开启输入增强") {
+                Button("开启选区翻译") {
                     settings.didOfferOnboarding = true
                     settings.isEnabled = true
                     coordinator.applyEnabledState()

@@ -23,6 +23,11 @@ enum InputAssistReplacementSafetyGuard {
         case writeVerificationUnavailable
         case sourceTextChanged
         case sourceRangeUnavailable
+        /// 剪贴板正在被用户或剪贴板管理器改写。
+        ///
+        /// 粘贴引擎为此**刻意没有**覆盖那份新内容——调用方也不能接着去复制译文，
+        /// 否则就把引擎保护的东西亲手毁掉了。
+        case clipboardBusy
     }
 
     /// 核心不变式：
