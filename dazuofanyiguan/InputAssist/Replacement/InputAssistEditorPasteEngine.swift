@@ -31,7 +31,7 @@ enum InputAssistEditorPasteEngine {
         let changeCountBeforeSnapshot = pasteboard.changeCount
         let savedItems = InputAssistPasteboardSnapshot.snapshot(from: pasteboard)
         guard pasteboard.changeCount == changeCountBeforeSnapshot else {
-            return .failed(message: "剪贴板正在被其它应用修改")
+            return .aborted(reason: .clipboardBusy)
         }
 
         pasteboard.clearContents()
@@ -47,7 +47,9 @@ enum InputAssistEditorPasteEngine {
             return .aborted(reason: .selectionChanged)
         }
         guard pasteboard.changeCount == translationChangeCount else {
-            return .failed(message: "剪贴板已被其它应用改写")
+            // 有人在我们放上译文之后又写了剪贴板。这里既不粘贴也不还原——
+            // 还原会把对方刚写进去的内容盖掉。
+            return .aborted(reason: .clipboardBusy)
         }
         guard InputAssistKeyboardSynthesizer.pressPaste() else {
             restoreIfUntouched(

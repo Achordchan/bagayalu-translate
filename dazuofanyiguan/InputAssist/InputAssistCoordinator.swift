@@ -392,6 +392,11 @@ final class InputAssistCoordinator: ObservableObject {
                         self.clearSessionIfCurrent(session)
                         return
                     }
+                    if pasteOutcome.preservesForeignClipboard {
+                        self.reportClipboardContention()
+                        self.clearSessionIfCurrent(session)
+                        return
+                    }
                 }
                 // 写出去了但读不回来时，不能说"无法替换"——它可能已经生效了。
                 self.copyTranslatedText(
@@ -408,6 +413,11 @@ final class InputAssistCoordinator: ObservableObject {
                     with: translatedText
                 )
                 if self.handleReplacementOutcome(outcome) {
+                    self.clearSessionIfCurrent(session)
+                    return
+                }
+                if outcome.preservesForeignClipboard {
+                    self.reportClipboardContention()
                     self.clearSessionIfCurrent(session)
                     return
                 }
@@ -463,6 +473,15 @@ final class InputAssistCoordinator: ObservableObject {
             style: .success,
             anchorRect: session.anchorRect
         )
+    }
+
+    /// 剪贴板正被别人改写时的收尾。
+    ///
+    /// **刻意不复制译文**：粘贴引擎正是为了保住那份新内容才失败返回的，
+    /// 这里再 `clearContents()` 就把它亲手毁掉了。译文这次拿不到，
+    /// 但用户自己刚复制的东西还在——后者重要得多，而且是不可恢复的。
+    private func reportClipboardContention() {
+        toast?.show("剪贴板正被其它应用使用，本次未替换，请稍后重试", style: .warning)
     }
 
     private func copyTranslatedText(

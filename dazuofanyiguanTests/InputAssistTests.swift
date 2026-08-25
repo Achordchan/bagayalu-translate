@@ -56,6 +56,40 @@ struct InputAssistTests {
         )
     }
 
+    @Test func clipboardContentionMustNotBeFollowedByACopy() {
+        // 粘贴引擎遇到剪贴板争用时刻意不覆盖那份新内容。
+        // 如果协调器接着走复制兜底，clearContents() 会把引擎特意保护的东西
+        // 亲手毁掉——前脚保护后脚清掉，比一开始就不保护还糟。
+        #expect(
+            InputAssistReplacementOutcome
+                .aborted(reason: .clipboardBusy)
+                .preservesForeignClipboard
+        )
+        // 其余任何结果都不该挡掉复制兜底——译文拿不到才是更常见的损失。
+        for reason in [
+            InputAssistReplacementSafetyGuard.AbortReason.secureInputActive,
+            .applicationChanged,
+            .focusLost,
+            .focusedElementChanged,
+            .selectionChanged,
+            .sourceTextChanged,
+            .sourceRangeUnavailable,
+            .writeVerificationUnavailable
+        ] {
+            #expect(
+                !InputAssistReplacementOutcome
+                    .aborted(reason: reason)
+                    .preservesForeignClipboard,
+                "\(reason.rawValue) 与剪贴板无关，不该挡掉复制兜底"
+            )
+        }
+        #expect(
+            !InputAssistReplacementOutcome
+                .failed(message: "编辑器未接受译文替换")
+                .preservesForeignClipboard
+        )
+    }
+
     @Test func everyOtherOutcomeStillAllowsThePasteFallback() {
         // 其余 abort 都发生在动手写**之前**（选区变了、焦点没了、应用切了…），
         // 没有任何文本被改过，兜底是安全的。
@@ -66,7 +100,8 @@ struct InputAssistTests {
             .focusedElementChanged,
             .selectionChanged,
             .sourceTextChanged,
-            .sourceRangeUnavailable
+            .sourceRangeUnavailable,
+            .clipboardBusy
         ] {
             #expect(
                 InputAssistReplacementOutcome.aborted(reason: reason).allowsPasteFallback,

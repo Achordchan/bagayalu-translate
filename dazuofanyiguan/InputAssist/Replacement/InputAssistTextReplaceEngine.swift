@@ -23,6 +23,16 @@ enum InputAssistReplacementOutcome: Equatable {
     ///
     /// 其余情况要么根本没动手写（selectRange 失败、算不出 expected、
     /// 各种 abort），要么已经读回来证实没生效（`.failed` 那条），兜底是安全的。
+    /// 这次失败是为了保住别人刚写进剪贴板的内容。
+    ///
+    /// 此时**不能再走复制兜底**：`copyTranslatedText` 会 `clearContents()`，
+    /// 把粘贴引擎特意留下的那份新内容亲手毁掉——引擎前脚保护、我们后脚清掉，
+    /// 比一开始就不保护还糟。
+    var preservesForeignClipboard: Bool {
+        guard case .aborted(let reason) = self else { return false }
+        return reason == .clipboardBusy
+    }
+
     var allowsPasteFallback: Bool {
         guard case .aborted(let reason) = self else { return true }
         return reason != .writeVerificationUnavailable
