@@ -115,7 +115,10 @@ final class InputAssistSelectionMonitor {
             return
         }
 
-        pendingTask?.cancel()
+        // 复用 pendingTask 而不是另开一个句柄：stop() / resetSelection() /
+        // 应用切换观察者都只认它，重试任务挂在这里才能被一并取消。
+        // 这里**不**先 cancel——我们此刻就跑在 pendingTask 里，
+        // 取消的是自己；它马上就要结束了，直接接上去即可。
         pendingTask = Task { @MainActor [weak self] in
             try? await Task.sleep(
                 nanoseconds: InputAssistChromiumAccessibility.settleNanoseconds
