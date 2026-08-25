@@ -263,6 +263,14 @@ final class InputAssistCoordinator: ObservableObject {
             return
         }
 
+        // 自动显示那条路可能已经先一步为**同一段选区**开好浮层了：
+        // 它等 180ms，我们等 200ms，树在这中间建好的话它就先到。
+        // 这时再 startSession 一次会把它关掉重开——浮层闪一下，
+        // 同一段文字被翻译两遍，OpenAI 那条路还会多发一次计费请求。
+        if let currentSession, currentSession.matchesSelection(of: capture) {
+            return
+        }
+
         metrics.shortcutTriggerCount += 1
         startSession(capture: capture, identity: identity, appSettings: appSettings)
     }

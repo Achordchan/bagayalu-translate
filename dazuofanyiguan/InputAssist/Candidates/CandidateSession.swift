@@ -21,6 +21,16 @@ struct CandidateSession {
     let detectedSourceLanguageCode: String?
     let createdAt: Date
 
+    /// 这个会话是不是就为**这一段**选区开的。
+    ///
+    /// 用来防止两条延迟路径为同一段选区各开一次：自动显示等 180ms、
+    /// 快捷键的 Chromium 重试等 200ms，谁先到都可能已经开好了浮层。
+    func matchesSelection(of capture: InputAssistCapture) -> Bool {
+        CFEqual(element, capture.element)
+            && sourceText == capture.sourceText
+            && sourceRange == capture.sourceRange
+    }
+
     init(
         sessionID: UUID = UUID(),
         appBundleIdentifier: String?,

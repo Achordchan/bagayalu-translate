@@ -212,6 +212,43 @@ struct InputAssistTests {
         )
     }
 
+    // MARK: - 两条延迟路径的会话去重（Codex review #5 第十三轮）
+
+    @Test func aSessionRecognisesTheSelectionItWasOpenedFor() {
+        // 自动显示等 180ms、快捷键的 Chromium 重试等 200ms。树在这中间建好的话
+        // 两条路会为同一段选区各开一次会话：浮层闪一下，同一段文字翻两遍，
+        // OpenAI 那条路还会多发一次计费请求。
+        let element = AXUIElementCreateSystemWide()
+        func capture(_ text: String, location: Int) -> InputAssistCapture {
+            InputAssistCapture(
+                element: element,
+                sourceText: text,
+                sourceRange: InputAssistTextRange(location: location, length: text.utf16.count),
+                elementValue: text,
+                context: text,
+                capability: .axDirect,
+                role: "AXTextArea",
+                allowsEditorPaste: true,
+                anchorRect: .zero,
+                hasPreciseCaretBounds: true,
+                selectedRangeAtCapture: nil
+            )
+        }
+
+        let session = CandidateSession(
+            appBundleIdentifier: "com.example.app",
+            capture: capture("hello", location: 0),
+            detectedSourceLanguageCode: "en"
+        )
+
+        // 同一段选区：第二条路必须让开。
+        #expect(session.matchesSelection(of: capture("hello", location: 0)))
+        // 内容变了，是新选区。
+        #expect(!session.matchesSelection(of: capture("world", location: 0)))
+        // 内容相同但位置不同——同一控件里的另一处相同文字，也是新选区。
+        #expect(!session.matchesSelection(of: capture("hello", location: 20)))
+    }
+
     // MARK: - Chromium / Electron 取词
 
     @MainActor
