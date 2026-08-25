@@ -170,9 +170,27 @@ struct InputAssistTests {
         )
     }
 
+    @Test func hanOnlyJapaneseAndKoreanKeepTheirDetectedLanguage() {
+        // 纯汉字的日文 / 韩文没有假名和谚文可依，只剩识别器的结论。
+        #expect(
+            InputAssistLanguagePolicy.selectionSourceLanguageCode(
+                for: "東京大学",
+                detectedLanguageCode: "ja"
+            ) == "ja"
+        )
+        #expect(
+            InputAssistLanguagePolicy.selectionSourceLanguageCode(
+                for: "漢字",
+                detectedLanguageCode: "ko"
+            ) == "ko"
+        )
+    }
+
     @Test func chineseTextStillOverridesAWrongDetection() {
-        // 这条是这个函数原本要解决的问题，不能因为上面两条被破坏：
-        // 中英混排 / 数字型号会让识别器返回非中文，那时仍然按中文处理。
+        // 这条是这个函数原本要解决的问题，不能因为上面几条被破坏：
+        // 中英混排 / 数字型号会让识别器返回**非中文或 nil**（具体是 en 和 nil），
+        // 那时仍然按中文处理，否则已安装的中文包会被 Apple 误报成"需要下载"。
+        // 保留 ja / ko 是刻意划出的例外，不能扩大到 en。
         #expect(
             InputAssistLanguagePolicy.selectionSourceLanguageCode(
                 for: "这是 iPhone 15 Pro 的说明",

@@ -43,6 +43,21 @@ enum InputAssistLanguagePolicy {
         guard scripts.containsHan else {
             return detectedLanguageCode
         }
+
+        // 纯汉字的日文 / 韩文（`東京大学`、`漢字`）没有假名和谚文可依，
+        // 只剩识别器的结论。这里保留它。
+        //
+        // 这不会让本函数原本要修的那个 bug 复发。那个 bug 的失败模式是
+        // 「数字、型号、多个标点和中英混排让识别器返回**非中文或 nil**」——
+        // 具体是 `en` 和 nil，不是 `ja`/`ko`。而且 `LanguageDetectionService`
+        // 要求置信度 ≥0.60 且与第二名相差 ≥0.15，能在汉字文本上给出 `ja`
+        // 说明它确实明显领先于中文。
+        //
+        // 除这两个之外的一切仍然按中文处理——`en` 那条有单测钉着。
+        if detectedLanguageCode == "ja" || detectedLanguageCode == "ko" {
+            return detectedLanguageCode
+        }
+
         // 纯汉字 / 中英混排按本功能的中文输入语义处理。
         return "zh-CN"
     }
