@@ -94,9 +94,44 @@ final class InputAssistSelectionMonitor {
         guard isSelectionAllowed?() ?? true else { return }
         guard let capture = InputAssistAXTextCapture.captureSelectedText() else {
             lastFingerprint = nil
+            // Chromium / Electron 在辅助功能树建起来之前一定读不到。
+            // 快捷键那条路会处理，自动显示这条也必须处理——否则在这些应用里
+            // 自动显示是彻底不工作的，而且用户连一条提示都看不到，
+            // 只会觉得"这个开关没用"。
+            retryAfterEnablingChromiumAccessibility()
+            return
+        }
+        emit(capture)
+    }
+
+    /// 打开目标应用的辅助功能树后重试一次。
+    ///
+    /// `enableIfNeeded` 每个进程只会返回一次 true，所以每个应用至多多花一次
+    /// settle 等待，不会因为用户每点一下没选中的地方就反复重试。
+    private func retryAfterEnablingChromiumAccessibility() {
+        guard let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier,
+              InputAssistChromiumAccessibility.enableIfNeeded(pid: pid)
+        else {
             return
         }
 
+        pendingTask?.cancel()
+        pendingTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(
+                nanoseconds: InputAssistChromiumAccessibility.settleNanoseconds
+            )
+            guard !Task.isCancelled, let self else { return }
+            guard self.isSelectionAllowed?() ?? true else { return }
+            // 等待期间前台应用可能已经切走，那这次快照就不该再用。
+            guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else {
+                return
+            }
+            guard let capture = InputAssistAXTextCapture.captureSelectedText() else { return }
+            self.emit(capture)
+        }
+    }
+
+    private func emit(_ capture: InputAssistCapture) {
         let fingerprint = Fingerprint(
             applicationBundleIdentifier: NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
             element: capture.element,

@@ -98,7 +98,8 @@ final class MiniTranslationController: ObservableObject {
         bubbleModel.detectedSourceLanguageName = Self.sourceLanguageName(
             for: trimmedText,
             requestedSourceLanguageCode: languagePair.sourceLanguageCode,
-            targetLanguageCode: languagePair.targetLanguageCode
+            targetLanguageCode: languagePair.targetLanguageCode,
+            engineType: settings.engineType
         )
 
         requestTask?.cancel()
@@ -289,11 +290,17 @@ final class MiniTranslationController: ObservableObject {
     private static func sourceLanguageName(
         for text: String,
         requestedSourceLanguageCode: String,
-        targetLanguageCode: String
+        targetLanguageCode: String,
+        engineType: TranslationEngineType
     ) -> String? {
         if let requested = usableLanguageCode(requestedSourceLanguageCode) {
             return LanguagePreset.displayName(for: requested)
         }
+        // 源语言是 auto 时才需要推。但脚本兜底**只有 `AppleTranslationCoordinator`
+        // 真的会用**——其它引擎收到的确实就是 auto。在那些引擎上显示推断值，
+        // 就成了「页脚说一套、引擎收到另一套」，正是这行页脚要避免的事。
+        // 那边等引擎自己回报 detectedSourceLanguageCode，回报不了就不显示。
+        guard engineType == .apple else { return nil }
         guard let fallback = LanguageScriptFallback.sourceLanguageCode(
             for: text,
             preferredChineseVariant: targetLanguageCode

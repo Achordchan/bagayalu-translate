@@ -12,6 +12,60 @@ import Testing
 /// AppFilter / SecureInputGuard，外加浮层定位与布局。
 struct InputAssistTests {
 
+    // MARK: - 含汉字的日韩文（Codex review #5）
+
+    @Test func koreanWithHanjaIsNotFlattenedToChinese() {
+        // 韩文里混着汉字（한자漢字）很常见。只看"有没有汉字"会把已经正确
+        // 识别出来的韩文压成中文，候选请求的源语言就是错的，
+        // 还会连带把错误的目标行过滤掉。
+        #expect(
+            InputAssistLanguagePolicy.selectionSourceLanguageCode(
+                for: "한자漢字",
+                detectedLanguageCode: "ko"
+            ) == "ko"
+        )
+    }
+
+    @Test func japaneseWithKanjiStillKeepsJapanese() {
+        #expect(
+            InputAssistLanguagePolicy.selectionSourceLanguageCode(
+                for: "日本語の漢字",
+                detectedLanguageCode: "ja"
+            ) == "ja"
+        )
+        // 半角片假名也算假名——共享的 TextScriptPresence 比原来那份私有实现多覆盖这一段。
+        #expect(
+            InputAssistLanguagePolicy.selectionSourceLanguageCode(
+                for: "漢字ｶﾀｶﾅ",
+                detectedLanguageCode: "ja"
+            ) == "ja"
+        )
+    }
+
+    @Test func chineseTextStillOverridesAWrongDetection() {
+        // 这条是这个函数原本要解决的问题，不能因为上面两条被破坏：
+        // 中英混排 / 数字型号会让识别器返回非中文，那时仍然按中文处理。
+        #expect(
+            InputAssistLanguagePolicy.selectionSourceLanguageCode(
+                for: "这是 iPhone 15 Pro 的说明",
+                detectedLanguageCode: "en"
+            ) == "zh-CN"
+        )
+        #expect(
+            InputAssistLanguagePolicy.selectionSourceLanguageCode(
+                for: "纯中文",
+                detectedLanguageCode: nil
+            ) == "zh-CN"
+        )
+        // 没有汉字时原样放行。
+        #expect(
+            InputAssistLanguagePolicy.selectionSourceLanguageCode(
+                for: "hello",
+                detectedLanguageCode: "en"
+            ) == "en"
+        )
+    }
+
     // MARK: - Chromium / Electron 取词
 
     @MainActor

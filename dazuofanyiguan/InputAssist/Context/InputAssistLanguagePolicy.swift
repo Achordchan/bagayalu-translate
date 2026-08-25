@@ -18,7 +18,8 @@ enum InputAssistLanguagePolicy {
         for text: String,
         detectedLanguageCode: String?
     ) -> String? {
-        guard containsHan(text) else {
+        let scripts = TextScriptPresence(in: text)
+        guard scripts.containsHan else {
             return detectedLanguageCode
         }
 
@@ -27,7 +28,14 @@ enum InputAssistLanguagePolicy {
         }
 
         // 明确包含日文假名时保留日文识别；纯汉字 / 中英混排按本功能的中文输入语义处理。
-        if containsJapaneseKana(text), detectedLanguageCode == "ja" {
+        if scripts.containsKana, detectedLanguageCode == "ja" {
+            return detectedLanguageCode
+        }
+        // 谚文同理：韩文里混着汉字（`한자漢字`）很常见，
+        // 不能因为出现汉字就把已经正确识别出来的韩文压成中文。
+        // 这和 `LanguageScriptFallback` 里「假名 / 谚文排在汉字前面」是同一条规则，
+        // 两处必须一致。
+        if scripts.containsHangul, detectedLanguageCode == "ko" {
             return detectedLanguageCode
         }
         return "zh-CN"
@@ -89,29 +97,7 @@ enum InputAssistLanguagePolicy {
             .lowercased()
     }
 
-    private static func containsJapaneseKana(_ text: String) -> Bool {
-        text.unicodeScalars.contains { scalar in
-            switch scalar.value {
-            case 0x3040...0x30FF:
-                return true
-            default:
-                return false
-            }
-        }
-    }
 
-    private static func containsHan(_ text: String) -> Bool {
-        text.unicodeScalars.contains { scalar in
-            switch scalar.value {
-            case 0x3400...0x4DBF,
-                 0x4E00...0x9FFF,
-                 0xF900...0xFAFF:
-                return true
-            default:
-                return false
-            }
-        }
-    }
 
     private static func subtags(of code: String) -> (base: String, variant: String?) {
         let parts = normalize(code).split(separator: "-", omittingEmptySubsequences: true)
