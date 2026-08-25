@@ -134,7 +134,20 @@ final class InputAssistSelectionMonitor {
         }
     }
 
-    private func emit(_ capture: InputAssistCapture) {
+    /// 记下这次已经处理过的选区。
+    ///
+    /// 返回 false 表示和上一次记下的完全相同，调用方应当跳过。
+    ///
+    /// **快捷键那条路也必须调它。** 否则会出现这个循环：自动显示开着、
+    /// 用户在 180ms 自动取词跑起来之前先按了快捷键 → 浮层由快捷键打开，
+    /// 而 `lastFingerprint` 还是空的 → 用户按 Esc，浮层在 key-**down** 上关掉
+    /// （`CandidateKeyTap` 只拦 keyDown），Esc 的 key-**up** 漏到这里的全局监听 →
+    /// 排一次取词 → 选区没变、浮层又已经不可见了 → 浮层立刻自己弹回来。
+    ///
+    /// 记选区而不是"排除某几个按键"，是因为前者对 Esc、Enter 提交、⌘C 复制
+    /// 以及任何其它关闭方式都一致生效，不用去枚举关闭动作。
+    @discardableResult
+    func registerSelection(_ capture: InputAssistCapture) -> Bool {
         let fingerprint = Fingerprint(
             applicationBundleIdentifier: NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
             element: capture.element,
@@ -142,9 +155,14 @@ final class InputAssistSelectionMonitor {
             sourceRange: capture.sourceRange
         )
         if let lastFingerprint, lastFingerprint.matches(fingerprint) {
-            return
+            return false
         }
         lastFingerprint = fingerprint
+        return true
+    }
+
+    private func emit(_ capture: InputAssistCapture) {
+        guard registerSelection(capture) else { return }
         onSelection?(capture)
     }
 }

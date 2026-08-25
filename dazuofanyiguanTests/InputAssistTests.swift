@@ -12,6 +12,38 @@ import Testing
 /// AppFilter / SecureInputGuard，外加浮层定位与布局。
 struct InputAssistTests {
 
+    // MARK: - 自动取词的去重（Codex review #5 第四轮）
+
+    @MainActor
+    @Test func aSelectionAlreadyHandledIsNotPickedUpAgain() {
+        // Esc 关掉浮层时，key-down 被 CandidateKeyTap 吃掉，key-up 会漏到
+        // 选区监听的全局监听器。如果这段选区没被记过，浮层会立刻自己弹回来。
+        let monitor = InputAssistSelectionMonitor()
+        let element = AXUIElementCreateSystemWide()
+        func capture(_ text: String) -> InputAssistCapture {
+            InputAssistCapture(
+                element: element,
+                sourceText: text,
+                sourceRange: InputAssistTextRange(location: 0, length: text.utf16.count),
+                elementValue: text,
+                context: text,
+                capability: .axDirect,
+                role: "AXTextArea",
+                allowsEditorPaste: true,
+                anchorRect: .zero,
+                hasPreciseCaretBounds: true,
+                selectedRangeAtCapture: nil
+            )
+        }
+
+        // 第一次是新选区。
+        #expect(monitor.registerSelection(capture("hello")))
+        // 同一段选区再来一次就该被跳过——这正是快捷键打开浮层后按 Esc 的情形。
+        #expect(!monitor.registerSelection(capture("hello")))
+        // 换了内容才算新选区。
+        #expect(monitor.registerSelection(capture("world")))
+    }
+
     // MARK: - 粘贴兜底的准入（Codex review #5 第二轮）
 
     @Test func unverifiableWriteMustNotBeFollowedByAPaste() {

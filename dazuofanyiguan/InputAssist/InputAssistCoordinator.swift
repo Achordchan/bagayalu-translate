@@ -283,6 +283,11 @@ final class InputAssistCoordinator: ObservableObject {
             return
         }
 
+        // 让自动取词知道这段选区已经处理过了。少了这一步，
+        // 用快捷键打开的浮层被 Esc 关掉之后会立刻自己弹回来
+        // （Esc 的 key-up 会漏到选区监听，而那时它还没记过这段选区）。
+        selectionMonitor.registerSelection(capture)
+
         let session = CandidateSession(
             appBundleIdentifier: identity?.bundleIdentifier,
             capture: capture,
