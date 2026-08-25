@@ -15,6 +15,35 @@ struct InputAssistTests {
     // MARK: - 自动取词的去重（Codex review #5 第四轮）
 
     @MainActor
+    @Test func aNewSelectionGestureClearsTheDedupFingerprint() {
+        // 关掉浮层后原样重新划选同一段文字，必须能再次触发。
+        // 拖选过程中只有 mouseDown 和 mouseUp，中间不会有一次"空选区"取词
+        // 来自动清掉指纹，所以要靠 mouseDown 显式清。
+        let monitor = InputAssistSelectionMonitor()
+        let element = AXUIElementCreateSystemWide()
+        let capture = InputAssistCapture(
+            element: element,
+            sourceText: "hello",
+            sourceRange: InputAssistTextRange(location: 0, length: 5),
+            elementValue: "hello",
+            context: "hello",
+            capability: .axDirect,
+            role: "AXTextArea",
+            allowsEditorPaste: true,
+            anchorRect: .zero,
+            hasPreciseCaretBounds: true,
+            selectedRangeAtCapture: nil
+        )
+
+        #expect(monitor.registerSelection(capture))
+        #expect(!monitor.registerSelection(capture))
+
+        // 新的划选手势开始 —— 同一段选区重新变得可用。
+        monitor.resetSelection()
+        #expect(monitor.registerSelection(capture))
+    }
+
+    @MainActor
     @Test func aSelectionAlreadyHandledIsNotPickedUpAgain() {
         // Esc 关掉浮层时，key-down 被 CandidateKeyTap 吃掉，key-up 会漏到
         // 选区监听的全局监听器。如果这段选区没被记过，浮层会立刻自己弹回来。

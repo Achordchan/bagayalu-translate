@@ -38,10 +38,23 @@ final class InputAssistSelectionMonitor {
         guard AXIsProcessTrusted() else { return false }
 
         eventMonitor = NSEvent.addGlobalMonitorForEvents(
-            matching: [.leftMouseUp, .rightMouseUp, .otherMouseUp, .keyUp]
-        ) { [weak self] _ in
+            matching: [.leftMouseDown, .leftMouseUp, .rightMouseUp, .otherMouseUp, .keyUp]
+        ) { [weak self] event in
+            let isSelectionGestureStart = event.type == .leftMouseDown
             Task { @MainActor [weak self] in
-                self?.scheduleCapture()
+                guard let self else { return }
+                if isSelectionGestureStart {
+                    // 按下左键 = 用户要重新划选了。这里把去重指纹清掉，
+                    // 否则"关掉浮层 → 原样重新选中同一段文字"会被当成重复而静默忽略：
+                    // 拖选过程中只有 mouseDown 和 mouseUp，中间不会有一次
+                    // "空选区"的取词来自动清掉它。
+                    //
+                    // 只认 leftMouseDown：Esc 关闭浮层不产生鼠标事件，
+                    // 所以那条抑制路径不受影响。
+                    self.lastFingerprint = nil
+                    return
+                }
+                self.scheduleCapture()
             }
         }
 

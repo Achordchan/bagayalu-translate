@@ -96,10 +96,7 @@ final class MiniTranslationController: ObservableObject {
         )
         bubbleModel.showsSmartDirectionNotice = languagePair != configuredPair
         bubbleModel.detectedSourceLanguageName = Self.sourceLanguageName(
-            for: trimmedText,
-            requestedSourceLanguageCode: languagePair.sourceLanguageCode,
-            targetLanguageCode: languagePair.targetLanguageCode,
-            engineType: settings.engineType
+            requestedSourceLanguageCode: languagePair.sourceLanguageCode
         )
 
         requestTask?.cancel()
@@ -284,30 +281,22 @@ final class MiniTranslationController: ObservableObject {
 
     /// 页脚显示的原文语种。
     ///
-    /// 优先用我们**实际请求**的源语言；那是 auto 时，用和
-    /// `AppleTranslationCoordinator` 同一套脚本兜底推出来的结果——
-    /// 显示的必须是真正送去翻译的那个语言，不然页脚写着一回事、引擎收到的是另一回事。
+    /// **只显示确实送出去的那个语言。** 源语言是 `auto` 时一律留空、等引擎回报——
+    /// 任何在这里做的推断都可能和最终实际使用的语言对不上：
+    ///
+    /// - 脚本兜底只有 `AppleTranslationCoordinator` 会用，别的引擎收到的就是 auto；
+    /// - 就算是 Apple，猜出来的语言对被 `LanguageAvailability` 判成 `.unsupported` 时
+    ///   协调器也会**弃用**兜底、改走自动识别。
+    ///
+    /// 这行页脚的全部价值就在于它是真的。宁可晚一两秒（等
+    /// `detectedSourceLanguageCode` 回来）也不能先显示一个可能是错的。
     private static func sourceLanguageName(
-        for text: String,
-        requestedSourceLanguageCode: String,
-        targetLanguageCode: String,
-        engineType: TranslationEngineType
+        requestedSourceLanguageCode: String
     ) -> String? {
-        if let requested = usableLanguageCode(requestedSourceLanguageCode) {
-            return LanguagePreset.displayName(for: requested)
-        }
-        // 源语言是 auto 时才需要推。但脚本兜底**只有 `AppleTranslationCoordinator`
-        // 真的会用**——其它引擎收到的确实就是 auto。在那些引擎上显示推断值，
-        // 就成了「页脚说一套、引擎收到另一套」，正是这行页脚要避免的事。
-        // 那边等引擎自己回报 detectedSourceLanguageCode，回报不了就不显示。
-        guard engineType == .apple else { return nil }
-        guard let fallback = LanguageScriptFallback.sourceLanguageCode(
-            for: text,
-            preferredChineseVariant: targetLanguageCode
-        ) else {
+        guard let requested = usableLanguageCode(requestedSourceLanguageCode) else {
             return nil
         }
-        return LanguagePreset.displayName(for: fallback)
+        return LanguagePreset.displayName(for: requested)
     }
 
     /// 能拿来显示的语言代码。auto / und / 空都不算。
