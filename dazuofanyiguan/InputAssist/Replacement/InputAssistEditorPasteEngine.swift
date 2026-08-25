@@ -51,6 +51,18 @@ enum InputAssistEditorPasteEngine {
             // 还原会把对方刚写进去的内容盖掉。
             return .aborted(reason: .clipboardBusy)
         }
+        // 在合成 ⌘V **之前**重新读一次全文，用它算期望值。
+        //
+        // 不能用取词时的快照：浮层开着的这段时间里，编辑器完全可能在选区**之外**
+        // 改动文本（异步追加的后缀、聊天窗口新到的消息）。那时选区和原文都没变、
+        // `targetIsUnchanged` 放行、粘贴也确实成功了，
+        // 但拿旧快照算出来的期望值和现状对不上——一次成功的替换会被报成失败，
+        // 还要用多余的复制兜底把刚还原好的剪贴板再覆盖一遍。
+        let valueBeforePaste = InputAssistAXTextCapture.stringAttribute(
+            session.element,
+            kAXValueAttribute as String
+        )
+
         guard InputAssistKeyboardSynthesizer.pressPaste() else {
             restoreIfUntouched(
                 savedItems,
@@ -74,7 +86,11 @@ enum InputAssistEditorPasteEngine {
             pasteboard: pasteboard
         )
 
-        switch verifyPaste(session, translatedText: translatedText) {
+        switch verifyPaste(
+            session,
+            translatedText: translatedText,
+            valueBeforePaste: valueBeforePaste
+        ) {
         case .applied:
             // 粘贴确实生效了。这时即使有人动过剪贴板也不该报争用——
             // 替换已经成功，协调器不会再去碰剪贴板。
@@ -99,9 +115,14 @@ enum InputAssistEditorPasteEngine {
 
     private static func verifyPaste(
         _ session: CandidateSession,
-        translatedText: String
+        translatedText: String,
+        valueBeforePaste: String?
     ) -> PasteVerification {
-        if let expectedValue = expectedValueAfterPaste(session, translatedText: translatedText) {
+        if let expectedValue = expectedValueAfterPaste(
+            session,
+            translatedText: translatedText,
+            valueBeforePaste: valueBeforePaste
+        ) {
             // 能算出期望值就说明取词那一刻 kAXValue 是读得到的
             // （`expectedValueAfterPaste` 依赖 `elementValueAtCapture`）。
             // 现在读不到，那是瞬时故障或者焦点变了——**不能当成成功**：
@@ -162,11 +183,16 @@ enum InputAssistEditorPasteEngine {
         ) == session.sourceText
     }
 
+    /// 粘贴之后全文应该长什么样。
+    ///
+    /// 基准是**粘贴前刚读到**的全文，不是取词时的快照——见 `replace` 里
+    /// `valueBeforePaste` 那段注释。读不到时才退回快照，聊胜于无。
     private static func expectedValueAfterPaste(
         _ session: CandidateSession,
-        translatedText: String
+        translatedText: String,
+        valueBeforePaste: String?
     ) -> String? {
-        guard let value = session.elementValueAtCapture,
+        guard let value = valueBeforePaste ?? session.elementValueAtCapture,
               let range = session.sourceRange else {
             return nil
         }

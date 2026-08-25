@@ -202,11 +202,18 @@ final class InputAssistCoordinator: ObservableObject {
         // 也不重试就退出了——浮层永远不会出现，用户得按第三次。
         guard !isChromiumRetryInFlight else { return }
 
+        // 把**当初通过检查的那个进程**钉下来。等一下重试时如果前台已经换了应用，
+        // 不能拿这次批准过的 identity 去给新应用背书。
+        guard let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier else {
+            toast?.show("请先选择要翻译的文字", style: .warning)
+            return
+        }
+
         isChromiumRetryInFlight = true
         chromiumRetryTask?.cancel()
         chromiumRetryTask = Task { @MainActor [weak self] in
             await self?.retryAfterEnablingChromiumAccessibility(
-                identity: identity,
+                pid: pid,
                 appSettings: appSettings
             )
         }
@@ -218,16 +225,16 @@ final class InputAssistCoordinator: ObservableObject {
     /// 不该对每个切换到的应用都默认施加。同一个应用开过一次之后，
     /// 后续按快捷键会直接命中上面的快路径。
     private func retryAfterEnablingChromiumAccessibility(
-        identity: InputAssistAppIdentity?,
+        pid: pid_t,
         appSettings: AppSettings
     ) async {
         defer { isChromiumRetryInFlight = false }
 
         guard !isCommitting else { return }
-        guard let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier else {
-            toast?.show("请先选择要翻译的文字", style: .warning)
-            return
-        }
+        // 前台必须还是触发时那个进程。用户在这中间切走的话，
+        // 继续下去就等于用刚才批准过的身份去读另一个应用——
+        // 而那个应用完全可能在黑名单里（默认就有终端、钥匙串、密码管理器）。
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return }
         guard InputAssistChromiumAccessibility.enableIfNeeded(pid: pid) else {
             // 这个应用已经开过了、或者根本不支持这个属性，重试没有意义。
             // 但两者该说的话不一样：开过之后仍然读不到，说明是这个控件不暴露选中文本，
@@ -243,7 +250,8 @@ final class InputAssistCoordinator: ObservableObject {
 
         metrics.chromiumAccessibilityEnabledCount += 1
         log?.info(
-            "Input Assist 请求 \(identity?.localizedName ?? "当前应用") 打开辅助功能树后重试取词"
+            "Input Assist 请求 \(InputAssistAppIdentity.frontmost()?.localizedName ?? "当前应用")"
+                + " 打开辅助功能树后重试取词"
         )
         try? await Task.sleep(
             nanoseconds: InputAssistChromiumAccessibility.settleNanoseconds
@@ -256,6 +264,15 @@ final class InputAssistCoordinator: ObservableObject {
         guard !isCommitting else { return }
         // 前台应用在这 200ms 里可能已经换掉了，那这次快照就不该再用。
         guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return }
+
+        // 应用范围**重新查一遍**，并且用现在读到的身份，而不是触发时那份。
+        // pid 相同已经能挡住"切到别的应用"，但这条不该只靠 pid 比对来保证——
+        // 用户也可能在这 200ms 里刚好把这个应用加进了黑名单。
+        let identity = InputAssistAppIdentity.frontmost()
+        guard allowsApplication(identity) else {
+            log?.info("Input Assist 跳过当前应用（应用范围设置）")
+            return
+        }
 
         guard let capture = InputAssistAXTextCapture.captureSelectedText() else {
             log?.warn("Input Assist 打开辅助功能树后仍未读到选中文本")
