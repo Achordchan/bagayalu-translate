@@ -61,20 +61,59 @@ enum InputAssistEditorPasteEngine {
         }
 
         try? await Task.sleep(nanoseconds: settleNanoseconds)
+
+        // 还原**之前**先看一眼：settle 这 250ms 里有没有人动过剪贴板。
+        //
+        // `restoreIfUntouched` 会静默地不还原（这是对的），但如果接下来我们要报失败，
+        // 协调器就会走复制兜底，把那份新内容清掉。和剪贴板争用那条是同一个矛盾，
+        // 只是窗口挪到了 `pressPaste()` 之后。
+        let clipboardChangedWhileSettling = pasteboard.changeCount != translationChangeCount
         restoreIfUntouched(
             savedItems,
             expectedChangeCount: translationChangeCount,
             pasteboard: pasteboard
         )
 
+        switch verifyPaste(session, translatedText: translatedText) {
+        case .applied:
+            // 粘贴确实生效了。这时即使有人动过剪贴板也不该报争用——
+            // 替换已经成功，协调器不会再去碰剪贴板。
+            return .replaced(strategy: .editorPaste)
+        case .rejected:
+            return clipboardChangedWhileSettling
+                ? .aborted(reason: .clipboardBusy)
+                : .failed(message: "编辑器未接受译文替换")
+        case .unverifiable:
+            return clipboardChangedWhileSettling
+                ? .aborted(reason: .clipboardBusy)
+                : .aborted(reason: .writeVerificationUnavailable)
+        }
+    }
+
+    private enum PasteVerification {
+        case applied
+        case rejected
+        /// 读不回来：既证不了也证伪不了。
+        case unverifiable
+    }
+
+    private static func verifyPaste(
+        _ session: CandidateSession,
+        translatedText: String
+    ) -> PasteVerification {
         if let expectedValue = expectedValueAfterPaste(session, translatedText: translatedText) {
-            if let currentValue = InputAssistAXTextCapture.stringAttribute(
+            // 能算出期望值就说明取词那一刻 kAXValue 是读得到的
+            // （`expectedValueAfterPaste` 依赖 `elementValueAtCapture`）。
+            // 现在读不到，那是瞬时故障或者焦点变了——**不能当成成功**：
+            // 目标要是拒绝了粘贴、或者根本没收到，我们会记一次成功，
+            // 而且不给复制兜底，用户什么都拿不到。
+            guard let currentValue = InputAssistAXTextCapture.stringAttribute(
                 session.element,
                 kAXValueAttribute as String
-            ), currentValue != expectedValue {
-                return .failed(message: "编辑器未接受译文替换")
+            ) else {
+                return .unverifiable
             }
-            return .replaced(strategy: .editorPaste)
+            return currentValue == expectedValue ? .applied : .rejected
         }
 
         // 算不出精确期望值（没有 sourceRange 或没有 elementValue）。
@@ -82,16 +121,18 @@ enum InputAssistEditorPasteEngine {
         // 缺其中之一时才选它——所以不能因为算不出来就一律判失败，
         // 那会让整条粘贴路径彻底失效。
         //
-        // 但还有一个便宜的证伪信号：粘贴真的生效的话，选区里不可能还是原文。
+        // 退到一个便宜的证伪信号：粘贴真的生效的话，选区里不可能还是原文。
         // 只读控件吃掉 ⌘V 之后选区原封不动，正好落在这里。
-        // （译文与原文相同的情况在函数开头已经按 .alreadyMatching 返回了。）
-        if let selectedText = InputAssistAXTextCapture.stringAttribute(
+        // （译文与原文相同的情况在函数开头已按 .alreadyMatching 返回。）
+        guard let selectedText = InputAssistAXTextCapture.stringAttribute(
             session.element,
             kAXSelectedTextAttribute as String
-        ), selectedText == session.sourceText {
-            return .failed(message: "编辑器未接受译文替换")
+        ) else {
+            // 连选区都读不到：这个控件什么都不暴露，维持原有的宽松处理，
+            // 否则这类应用里粘贴永远算不成功。
+            return .applied
         }
-        return .replaced(strategy: .editorPaste)
+        return selectedText == session.sourceText ? .rejected : .applied
     }
 
     private static func targetIsUnchanged(_ session: CandidateSession) -> Bool {

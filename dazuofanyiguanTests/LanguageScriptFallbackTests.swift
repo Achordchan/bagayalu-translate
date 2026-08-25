@@ -97,6 +97,27 @@ struct LanguageScriptFallbackTests {
         )
     }
 
+    // MARK: - 兜底的适用边界（Codex review #5 第九轮）
+
+    @Test func theFallbackOnlyCoversAbstention() {
+        // 兜底的契约是"识别器弃权时才用"。识别出来了、但那个语言对不被支持，
+        // 是完全另一回事——那时该如实报"不支持"，而不是换一个"支持的"语言硬翻。
+        //
+        // 这条用长文本把边界钉住：Configuración 会被高置信度识别为 es（0.98），
+        // 所以协调器里那个 `detection == nil` 的判断根本不会走到兜底；
+        // 而兜底函数本身只看脚本，对同一段文本会给出 en——两者必须靠调用点区分开，
+        // 不能靠兜底函数自己"聪明"。
+        let resolved = LanguageScriptFallback.sourceLanguageCode(for: "Configuración")
+        #expect(resolved == "en")
+
+        let detected = LanguageDetectionService.shared
+            .detectLanguage(in: "Configuración")?
+            .languageCode
+        #expect(detected == "es")
+        // 两者不同，正是为什么"什么时候调用兜底"必须由调用点严格把关。
+        #expect(detected != resolved)
+    }
+
     // MARK: - 气泡页脚
 
     @Test func footerHeightIsAddedOnceForBothNotices() {

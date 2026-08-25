@@ -375,10 +375,11 @@ final class InputAssistCoordinator: ObservableObject {
             )
 
             if commitMode == .axReplace {
-                let outcome = await InputAssistTextReplaceEngine.replace(
+                var lastOutcome = await InputAssistTextReplaceEngine.replace(
                     session: session,
                     with: translatedText
                 )
+                let outcome = lastOutcome
                 if self.handleReplacementOutcome(outcome) {
                     self.clearSessionIfCurrent(session)
                     return
@@ -397,11 +398,13 @@ final class InputAssistCoordinator: ObservableObject {
                         self.clearSessionIfCurrent(session)
                         return
                     }
+                    lastOutcome = pasteOutcome
                 }
                 // 写出去了但读不回来时，不能说"无法替换"——它可能已经生效了。
+                // 看最后一次尝试的结果：粘贴那一步同样可能无法验证。
                 self.copyTranslatedText(
                     translatedText,
-                    message: outcome.allowsPasteFallback
+                    message: lastOutcome.allowsPasteFallback
                         ? "无法安全替换，译文已复制"
                         : "无法确认替换是否生效，译文已复制",
                     style: .warning,
@@ -423,7 +426,9 @@ final class InputAssistCoordinator: ObservableObject {
                 }
                 self.copyTranslatedText(
                     translatedText,
-                    message: "编辑器拒绝替换，译文已复制",
+                    message: outcome.allowsPasteFallback
+                        ? "编辑器拒绝替换，译文已复制"
+                        : "无法确认替换是否生效，译文已复制",
                     style: .warning,
                     anchorRect: session.anchorRect
                 )
