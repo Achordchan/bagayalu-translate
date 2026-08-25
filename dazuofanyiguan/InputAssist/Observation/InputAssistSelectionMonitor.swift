@@ -40,18 +40,24 @@ final class InputAssistSelectionMonitor {
         eventMonitor = NSEvent.addGlobalMonitorForEvents(
             matching: [.leftMouseDown, .leftMouseUp, .rightMouseUp, .otherMouseUp, .keyUp]
         ) { [weak self] event in
-            let isSelectionGestureStart = event.type == .leftMouseDown
+            // 只有**多击**才算"重新划选"的信号。
+            //
+            // 双击选词是关掉浮层后重新选中同一段文字最常见的手势，
+            // 而单击不是：点标题栏、点工具栏、点另一个非文本控件都是单击，
+            // 它们不改变焦点元素的选区。按任意左键都清指纹的话，
+            // 浮层被点掉之后会立刻自己弹回来——用户点一下窗口边缘，它就回来一次。
+            //
+            // 这里刻意**不去读 AX 判断选区到底变没变**：那要在全系统每一次左键
+            // 按下时都发起 AX 调用，而 AX 调用是会卡住的（见
+            // `MiniAssistCapture` 那边关于同步 AX 往返的说明）。
+            // 为一个默认关闭的实验开关，把风险加到最高频的事件上不划算。
+            let isReselectGesture = event.type == .leftMouseDown && event.clickCount >= 2
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                if isSelectionGestureStart {
-                    // 按下左键 = 用户要重新划选了。这里把去重指纹清掉，
-                    // 否则"关掉浮层 → 原样重新选中同一段文字"会被当成重复而静默忽略：
-                    // 拖选过程中只有 mouseDown 和 mouseUp，中间不会有一次
-                    // "空选区"的取词来自动清掉它。
-                    //
-                    // 只认 leftMouseDown：Esc 关闭浮层不产生鼠标事件，
-                    // 所以那条抑制路径不受影响。
-                    self.lastFingerprint = nil
+                if event.type == .leftMouseDown {
+                    if isReselectGesture {
+                        self.lastFingerprint = nil
+                    }
                     return
                 }
                 self.scheduleCapture()
