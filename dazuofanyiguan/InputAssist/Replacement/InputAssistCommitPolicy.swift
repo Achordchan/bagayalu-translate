@@ -23,12 +23,4 @@ enum InputAssistCommitPolicy {
         return .copy
     }
 
-    static func isEditableRole(_ role: String?) -> Bool {
-        switch role {
-        case "AXTextArea", "AXTextField", "AXComboBox", "AXSearchField":
-            return true
-        default:
-            return false
-        }
-    }
 }

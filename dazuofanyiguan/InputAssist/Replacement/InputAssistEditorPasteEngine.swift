@@ -65,12 +65,28 @@ enum InputAssistEditorPasteEngine {
             pasteboard: pasteboard
         )
 
-        if let expectedValue = expectedValueAfterPaste(session, translatedText: translatedText),
-           let currentValue = InputAssistAXTextCapture.stringAttribute(
-               session.element,
-               kAXValueAttribute as String
-           ),
-           currentValue != expectedValue {
+        if let expectedValue = expectedValueAfterPaste(session, translatedText: translatedText) {
+            if let currentValue = InputAssistAXTextCapture.stringAttribute(
+                session.element,
+                kAXValueAttribute as String
+            ), currentValue != expectedValue {
+                return .failed(message: "编辑器未接受译文替换")
+            }
+            return .replaced(strategy: .editorPaste)
+        }
+
+        // 算不出精确期望值（没有 sourceRange 或没有 elementValue）。
+        // `.editorPaste` 这一档**本来就常常**是这种情况——`CommitPolicy` 正是在
+        // 缺其中之一时才选它——所以不能因为算不出来就一律判失败，
+        // 那会让整条粘贴路径彻底失效。
+        //
+        // 但还有一个便宜的证伪信号：粘贴真的生效的话，选区里不可能还是原文。
+        // 只读控件吃掉 ⌘V 之后选区原封不动，正好落在这里。
+        // （译文与原文相同的情况在函数开头已经按 .alreadyMatching 返回了。）
+        if let selectedText = InputAssistAXTextCapture.stringAttribute(
+            session.element,
+            kAXSelectedTextAttribute as String
+        ), selectedText == session.sourceText {
             return .failed(message: "编辑器未接受译文替换")
         }
         return .replaced(strategy: .editorPaste)

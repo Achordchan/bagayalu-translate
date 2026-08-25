@@ -1123,9 +1123,6 @@ struct InputAssistTests {
             hasElementValue: false
         ) == .copy)
 
-        #expect(InputAssistCommitPolicy.isEditableRole("AXTextField"))
-        #expect(InputAssistCommitPolicy.isEditableRole("AXSearchField"))
-        #expect(!InputAssistCommitPolicy.isEditableRole("AXStaticText"))
     }
 
     @MainActor

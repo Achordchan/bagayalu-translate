@@ -100,18 +100,20 @@ enum InputAssistAXTextCapture {
         return .unavailable
     }
 
-    static func allowsEditorPaste(element: AXUIElement, role: String?) -> Bool {
-        if InputAssistCommitPolicy.isEditableRole(role) {
-            return true
-        }
-        // 只认真正表明"文本可改"的属性。
-        //
-        // **不能用 `kAXSelectedTextRange` 可写来推断**：只读的文本视图（日志窗、
-        // 只读代码预览）通常也允许辅助功能客户端移动选区——能挪光标不等于能改字。
-        // 据此判成 .editorPaste 会走进死胡同：⌘V 什么也改不了，而拿不到完整
-        // AX value 时粘贴引擎又无法证伪，只好报成功，于是 Enter 既没替换、
-        // 也不会退到复制兜底，用户看到的是"按了没反应"。
-        return isSettable(element, kAXValueAttribute as String)
+    /// 这个控件的文本能不能被 ⌘V 改动。
+    ///
+    /// **只认真正表明「文本可改」的属性，不认 role，也不认「选区可移动」。**
+    ///
+    /// - `role` 是线索不是证据：只读的 `NSTextView`（日志窗、只读代码预览、
+    ///   聊天记录区）同样暴露 `AXTextArea`。
+    /// - `kAXSelectedTextRange` 可写只说明能挪光标——只读文本视图通常也允许
+    ///   辅助功能客户端移动选区，能挪光标不等于能改字。
+    ///
+    /// 判错的代价不是"少一个功能"而是走进死胡同：⌘V 什么都改不了，
+    /// 而拿不到完整 AX value 时粘贴引擎又无法证伪，于是 Enter 既没替换、
+    /// 也不会退到复制兜底，用户看到的只是"按了没反应"，没有任何线索。
+    static func allowsEditorPaste(element: AXUIElement) -> Bool {
+        isSettable(element, kAXValueAttribute as String)
             || isSettable(element, kAXSelectedTextAttribute as String)
     }
 
@@ -234,7 +236,7 @@ enum InputAssistAXTextCapture {
             context: context,
             capability: capability,
             role: role,
-            allowsEditorPaste: allowsEditorPaste(element: element, role: role),
+            allowsEditorPaste: allowsEditorPaste(element: element),
             anchorRect: anchor.rect,
             hasPreciseCaretBounds: anchor.isPrecise,
             selectedRangeAtCapture: selectedRange
