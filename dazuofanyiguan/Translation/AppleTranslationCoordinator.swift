@@ -8,6 +8,26 @@ enum AppleTranslationPreparationStatus: Equatable {
     case unsupported(message: String)
 }
 
+/// 按 worker 代际跟踪「是否有 worker 正在服务请求」。
+///
+/// 单个布尔位不够：被取消的老 worker 收尾时，不能把新 worker 的忙碌
+/// 状态一并清掉（否则顶替判断会误判空闲、走排队唤醒而不是打断）。
+/// 只有当前记录在案的那一代 `end` 才真正清空。
+struct AppleTranslationServingTracker {
+    private var servingGeneration: Int?
+
+    var isServing: Bool { servingGeneration != nil }
+
+    mutating func begin(generation: Int) {
+        servingGeneration = generation
+    }
+
+    mutating func end(generation: Int) {
+        guard servingGeneration == generation else { return }
+        servingGeneration = nil
+    }
+}
+
 /// Apple 本地翻译的协调器：把 `translate()` 请求桥接到 SwiftUI
 /// `.translationTask` 送进来的 `TranslationSession`。
 ///
@@ -77,11 +97,12 @@ final class AppleTranslationCoordinator: ObservableObject {    private struct Tr
     private var workerWake: AsyncStream<Void>.Continuation?
     private var workerGeneration = 0
 
-    /// 是否有 worker 正在服务一个请求（`servePendingRequest` 执行中）。
+    /// 是否有 worker 正在服务一个请求（按代际跟踪）。
     ///
     /// 忙时到达的同语言对请求不能只排队唤醒——必须走重跑路径让 SwiftUI
     /// 取消旧任务、打断在途翻译，否则一个卡住的翻译会堵死后续所有请求。
-    private var isServing = false
+    /// 老的 worker（被顶替后收尾中）无权清除新 worker 的忙碌状态。
+    private var servingTracker = AppleTranslationServingTracker()
 
     private var pendingRequest: PendingRequest?
     private var continuation: CheckedContinuation<TranslationResult, Error>?
@@ -175,7 +196,7 @@ final class AppleTranslationCoordinator: ObservableObject {    private struct Tr
                 // worker 不可能在 pendingRequest 就位前醒来。
                 let installation = Self.installationDecision(
                     installed: sessionConfiguration,
-                    workerIsIdle: workerWake != nil && !isServing,
+                    workerIsIdle: workerWake != nil && !servingTracker.isServing,
                     source: context.sourceLanguage,
                     target: context.targetLanguage
                 )
@@ -334,11 +355,19 @@ final class AppleTranslationCoordinator: ObservableObject {    private struct Tr
         }
 
         // 首个请求总是先于 worker 就绪：启动时先服务一次挂着的请求。
-        await servePendingRequest(using: session, configuration: configuration)
+        await servePendingRequest(
+            using: session,
+            configuration: configuration,
+            workerGeneration: generation
+        )
 
         for await _ in stream {
             if Task.isCancelled { break }
-            await servePendingRequest(using: session, configuration: configuration)
+            await servePendingRequest(
+                using: session,
+                configuration: configuration,
+                workerGeneration: generation
+            )
         }
 
         // 退出时还有请求没服务完，说明唤醒恰好落在本 worker 的退出空隙里
@@ -352,7 +381,8 @@ final class AppleTranslationCoordinator: ObservableObject {    private struct Tr
 
     private func servePendingRequest(
         using session: TranslationSession,
-        configuration: TranslationSession.Configuration
+        configuration: TranslationSession.Configuration,
+        workerGeneration: Int
     ) async {
         // 只服务绑定到本 worker 所持 Configuration 的请求。语言对切换后，
         // 旧 worker 可能还带着缓冲的唤醒活着；没有这个校验，它会用旧
@@ -361,8 +391,9 @@ final class AppleTranslationCoordinator: ObservableObject {    private struct Tr
             return
         }
         // 标记在途：期间到达的同语言对请求会走重跑打断，而不是排队等它。
-        isServing = true
-        defer { isServing = false }
+        // 按代际登记——被顶替的老 worker 收尾时清不掉新 worker 的忙碌。
+        servingTracker.begin(generation: workerGeneration)
+        defer { servingTracker.end(generation: workerGeneration) }
 
         do {
             if request.shouldPrepareTranslation {

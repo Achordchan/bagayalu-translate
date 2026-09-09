@@ -168,6 +168,38 @@ struct AppleTranslationCoordinatorTests {
 
     // MARK: - worker 退出自救的重绑（语言对切换竞态）
 
+    /// 评审第四轮指出的交错：被顶替的老 worker 收尾时，不能把新 worker
+    /// 的忙碌状态清掉——否则同语言对的下一个请求会误判空闲、排队等在
+    /// 卡住的翻译后面。按代际登记，只有当前在案的那一代 end 才清空。
+    @Test func servingTrackerKeepsNewWorkerBusyWhileOldOneUnwinds() {
+        var tracker = AppleTranslationServingTracker()
+
+        #expect(!tracker.isServing)
+        tracker.begin(generation: 1)
+        #expect(tracker.isServing)
+
+        // 新 worker 接手开始服务，老 worker（第 1 代）随后收尾退出。
+        tracker.begin(generation: 2)
+        tracker.end(generation: 1)
+        #expect(tracker.isServing, "老 worker 的退出不得清除新 worker 的忙碌状态")
+
+        // 新 worker 结束后才真正空闲。
+        tracker.end(generation: 2)
+        #expect(!tracker.isServing)
+    }
+
+    @Test func servingTrackerClearsWhenTheServingGenerationEnds() {
+        var tracker = AppleTranslationServingTracker()
+
+        tracker.begin(generation: 3)
+        tracker.end(generation: 3)
+        #expect(!tracker.isServing)
+
+        // 无人服务时，迟到的 end 是无害的空操作。
+        tracker.end(generation: 3)
+        #expect(!tracker.isServing)
+    }
+
     /// 评审第二三轮指出的挂死路径：语言对切换取消旧 worker、新请求挂在
     /// 新配置上时，自救 invalidate 发布的刷新值与请求的旧绑定**不再相等**
     /// （`Configuration.==` 含 invalidated 状态），若不把请求一并重绑，
