@@ -26,7 +26,7 @@ struct AppleTranslationCoordinatorTests {
         #expect(
             AppleTranslationCoordinator.installationDecision(
                 installed: nil,
-                workerIsRunning: false,
+                workerIsIdle: false,
                 source: zhHans,
                 target: english
             ) == .installNewConfiguration(
@@ -35,13 +35,13 @@ struct AppleTranslationCoordinatorTests {
         )
     }
 
-    @Test func samePairWithLiveWorkerReusesTheSession() {
+    @Test func samePairWithIdleWorkerReusesTheSession() {
         let installed = TranslationSession.Configuration(source: zhHans, target: english)
 
         #expect(
             AppleTranslationCoordinator.installationDecision(
                 installed: installed,
-                workerIsRunning: true,
+                workerIsIdle: true,
                 source: zhHans,
                 target: english
             ) == .reuseLiveSession(installed)
@@ -53,7 +53,7 @@ struct AppleTranslationCoordinatorTests {
 
         let decision = AppleTranslationCoordinator.installationDecision(
             installed: installed,
-            workerIsRunning: false,
+            workerIsIdle: false,
             source: zhHans,
             target: english
         )
@@ -63,13 +63,60 @@ struct AppleTranslationCoordinatorTests {
         #expect(decision == .rerunInstalledConfiguration(expectedRefreshed))
     }
 
+    /// 评审第三轮指出的阻塞回归：同语言对顶替一个**在途**请求时不能只排队
+    /// 唤醒——卡住的 `prepareTranslation()`/`translate()` 会把后续请求全部
+    /// 堵死。必须走重跑路径发布 invalidate 配置，让 SwiftUI 取消旧任务、
+    /// 打断在途翻译。且重跑值必须不同于已安装值（invalidate 不幂等，已实测），
+    /// 否则任务不会重启、打断不会发生。
+    @Test func busyWorkerIsInterruptedInsteadOfQueueingBehindInFlightWork() {
+        let installed = TranslationSession.Configuration(source: zhHans, target: english)
+
+        guard case .rerunInstalledConfiguration(let refreshed)? = Optional(
+            AppleTranslationCoordinator.installationDecision(
+                installed: installed,
+                workerIsIdle: false,
+                source: zhHans,
+                target: english
+            )
+        ) else {
+            Issue.record("忙时顶替必须走重跑路径")
+            return
+        }
+        #expect(refreshed != installed, "重跑发布值必须不同于已安装值，任务才会重启")
+        #expect(refreshed.source == installed.source)
+        #expect(refreshed.target == installed.target)
+    }
+
+    /// 连续两次忙时顶替（中间没有别的发布）都必须能触发重启：
+    /// 对上一次的重跑值再 invalidate 依然产生新值。
+    @Test func consecutiveRerunsAlwaysChangeThePublishedValue() {
+        let installed = TranslationSession.Configuration(source: zhHans, target: english)
+
+        var previous = installed
+        for round in 1...3 {
+            guard case .rerunInstalledConfiguration(let refreshed)? = Optional(
+                AppleTranslationCoordinator.installationDecision(
+                    installed: previous,
+                    workerIsIdle: false,
+                    source: zhHans,
+                    target: english
+                )
+            ) else {
+                Issue.record("第 \(round) 轮重跑决策异常")
+                return
+            }
+            #expect(refreshed != previous, "第 \(round) 轮重跑值必须不同于上一轮")
+            previous = refreshed
+        }
+    }
+
     @Test func differentTargetLanguageInstallsNewConfiguration() {
         let installed = TranslationSession.Configuration(source: zhHans, target: english)
 
         #expect(
             AppleTranslationCoordinator.installationDecision(
                 installed: installed,
-                workerIsRunning: true,
+                workerIsIdle: true,
                 source: zhHans,
                 target: japanese
             ) == .installNewConfiguration(
@@ -84,7 +131,7 @@ struct AppleTranslationCoordinatorTests {
         #expect(
             AppleTranslationCoordinator.installationDecision(
                 installed: installed,
-                workerIsRunning: true,
+                workerIsIdle: true,
                 source: nil,
                 target: english
             ) == .installNewConfiguration(
@@ -107,10 +154,10 @@ struct AppleTranslationCoordinatorTests {
             ("源语变化", installed, true, nil, english)
         ]
 
-        for (name, installedConfiguration, workerIsRunning, source, target) in scenarios {
+        for (name, installedConfiguration, workerIsIdle, source, target) in scenarios {
             let decision = AppleTranslationCoordinator.installationDecision(
                 installed: installedConfiguration,
-                workerIsRunning: workerIsRunning,
+                workerIsIdle: workerIsIdle,
                 source: source,
                 target: target
             )

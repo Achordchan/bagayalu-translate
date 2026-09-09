@@ -77,6 +77,12 @@ final class AppleTranslationCoordinator: ObservableObject {    private struct Tr
     private var workerWake: AsyncStream<Void>.Continuation?
     private var workerGeneration = 0
 
+    /// 是否有 worker 正在服务一个请求（`servePendingRequest` 执行中）。
+    ///
+    /// 忙时到达的同语言对请求不能只排队唤醒——必须走重跑路径让 SwiftUI
+    /// 取消旧任务、打断在途翻译，否则一个卡住的翻译会堵死后续所有请求。
+    private var isServing = false
+
     private var pendingRequest: PendingRequest?
     private var continuation: CheckedContinuation<TranslationResult, Error>?
     private var generationCounter: Int = 0
@@ -169,7 +175,7 @@ final class AppleTranslationCoordinator: ObservableObject {    private struct Tr
                 // worker 不可能在 pendingRequest 就位前醒来。
                 let installation = Self.installationDecision(
                     installed: sessionConfiguration,
-                    workerIsRunning: workerWake != nil,
+                    workerIsIdle: workerWake != nil && !isServing,
                     source: context.sourceLanguage,
                     target: context.targetLanguage
                 )
@@ -203,11 +209,18 @@ final class AppleTranslationCoordinator: ObservableObject {    private struct Tr
 
     /// 决定如何把一次翻译请求的语言对交给 `.translationTask`。
     ///
-    /// 会话复用的分岔点：同语言对且 worker 在跑时**不发布任何变更**，只唤醒
-    /// worker——这是对「每个请求都重建一次会话」的直接修复。
+    /// 会话复用的分岔点：
+    /// - 同语言对、worker **空闲** → 只唤醒，不发布任何变更，零会话重建；
+    /// - 同语言对、worker **忙**（正在翻上一个请求）→ 发布 invalidate 过的
+    ///   配置触发任务重跑，让 SwiftUI 取消旧任务、**打断在途翻译**——
+    ///   这是修复前旧代码的打断语义，忙时顶替若只排队唤醒，一个卡住的
+    ///   `prepareTranslation()`/`translate()` 会把后续请求全部堵死。
+    ///
+    /// invalidate() 不幂等（每次调用产生新值，已实测），所以重跑发布值
+    /// 必然不同于已安装值，任务必然重启。
     nonisolated static func installationDecision(
         installed: TranslationSession.Configuration?,
-        workerIsRunning: Bool,
+        workerIsIdle: Bool,
         source: Locale.Language?,
         target: Locale.Language
     ) -> SessionInstallation {
@@ -219,7 +232,7 @@ final class AppleTranslationCoordinator: ObservableObject {    private struct Tr
                 TranslationSession.Configuration(source: source, target: target)
             )
         }
-        if workerIsRunning {
+        if workerIsIdle {
             return .reuseLiveSession(installed)
         }
         var refreshed = installed
@@ -298,9 +311,11 @@ final class AppleTranslationCoordinator: ObservableObject {    private struct Tr
     /// CPU 升到 90%，只能重启应用恢复。
     ///
     /// `TranslationSession` 本来就支持在一次任务里翻译多次（系统的 batch API
-    /// 就是这么用的），所以改成：任务存活期间会话一直复用，新请求只是唤醒
-    /// 这里；语言对变化或视图拆除导致任务被取消时，会话随之由 SwiftUI
-    /// 回收。
+    /// 就是这么用的），所以改成：任务存活期间会话一直复用。新请求到达时：
+    /// worker 空闲则唤醒它服务（零会话重建）；worker 忙则发布 invalidate
+    /// 配置触发任务重跑，让 SwiftUI 取消本任务、打断在途翻译（保留修复前
+    /// 的打断语义）。语言对变化或视图拆除导致任务被取消时，会话随之由
+    /// SwiftUI 回收。
     fileprivate func runSessionWorker(
         using session: TranslationSession,
         configuration: TranslationSession.Configuration?
@@ -345,6 +360,9 @@ final class AppleTranslationCoordinator: ObservableObject {    private struct Tr
         guard let request = pendingRequest, request.configuration == configuration else {
             return
         }
+        // 标记在途：期间到达的同语言对请求会走重跑打断，而不是排队等它。
+        isServing = true
+        defer { isServing = false }
 
         do {
             if request.shouldPrepareTranslation {
