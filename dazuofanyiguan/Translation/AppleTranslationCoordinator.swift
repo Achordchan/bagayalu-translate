@@ -26,17 +26,34 @@ final class AppleTranslationCoordinator: ObservableObject {    private struct Tr
     }
 
     /// 会话安装决策。独立成纯函数（`installationDecision`）便于单测。
+    ///
+    /// 携带的 `Configuration` 是该决策下请求要**绑定**的配置：worker
+    /// 服务前会校验请求的绑定和自己的配置一致（见 `servePendingRequest`），
+    /// 防止语言对切换后，旧 worker 在退出间隙里用旧会话服务新请求。
     enum SessionInstallation: Equatable {
         /// 语言对没变、worker 还在跑：唤醒它服务新请求，不触发任何 SwiftUI 会话重建。
-        case reuseLiveSession
+        case reuseLiveSession(TranslationSession.Configuration)
         /// 语言对没变但 worker 已不在：invalidate 当前配置，让任务重跑、重新拿一个会话。
-        case rerunInstalledConfiguration
+        case rerunInstalledConfiguration(TranslationSession.Configuration)
         /// 首次使用或语言对变了：发布新配置，SwiftUI 会取消旧任务并换新会话。
-        case installNewConfiguration
+        case installNewConfiguration(TranslationSession.Configuration)
+
+        /// 该决策下请求应绑定的 Configuration。
+        var configuration: TranslationSession.Configuration {
+            switch self {
+            case .reuseLiveSession(let configuration),
+                 .rerunInstalledConfiguration(let configuration),
+                 .installNewConfiguration(let configuration):
+                return configuration
+            }
+        }
     }
 
     private struct PendingRequest {
         let generation: Int
+        /// 请求绑定的 Configuration。worker 只服务绑定与自己一致 的请求，
+        /// 防止旧语言对的 worker 在退出间隙用错会话服务新请求。
+        let configuration: TranslationSession.Configuration
         let text: String
         let shouldPrepareTranslation: Bool
         let onPhaseChange: ((String) -> Void)?
@@ -147,9 +164,20 @@ final class AppleTranslationCoordinator: ObservableObject {    private struct Tr
 
                 cancelPending(throwing: CancellationError())
 
+                // 先定会话安装方式，把请求绑定到它对应的 Configuration 上，
+                // 再落地副作用（发布/唤醒）。同一 Actor 内不会被打断，
+                // worker 不可能在 pendingRequest 就位前醒来。
+                let installation = Self.installationDecision(
+                    installed: sessionConfiguration,
+                    workerIsRunning: workerWake != nil,
+                    source: context.sourceLanguage,
+                    target: context.targetLanguage
+                )
+
                 continuation = newContinuation
                 pendingRequest = PendingRequest(
                     generation: generation,
+                    configuration: installation.configuration,
                     text: text,
                     shouldPrepareTranslation: context.sourceLanguage != nil,
                     onPhaseChange: onPhaseChange,
@@ -157,10 +185,7 @@ final class AppleTranslationCoordinator: ObservableObject {    private struct Tr
                 )
                 onLanguageDownloadStateChange?(requiresDownload)
 
-                installConfiguration(
-                    source: context.sourceLanguage,
-                    target: context.targetLanguage
-                )
+                apply(installation)
             }
         } onCancel: {
             Task { @MainActor [weak self] in
@@ -190,34 +215,33 @@ final class AppleTranslationCoordinator: ObservableObject {    private struct Tr
               installed.source == source,
               installed.target == target
         else {
-            return .installNewConfiguration
+            return .installNewConfiguration(
+                TranslationSession.Configuration(source: source, target: target)
+            )
         }
-        return workerIsRunning ? .reuseLiveSession : .rerunInstalledConfiguration
+        if workerIsRunning {
+            return .reuseLiveSession(installed)
+        }
+        var refreshed = installed
+        refreshed.invalidate()
+        return .rerunInstalledConfiguration(refreshed)
     }
 
-    private func installConfiguration(
-        source: Locale.Language?,
-        target: Locale.Language
-    ) {
-        switch Self.installationDecision(
-            installed: sessionConfiguration,
-            workerIsRunning: workerWake != nil,
-            source: source,
-            target: target
-        ) {
+    private func apply(_ installation: SessionInstallation) {
+        switch installation {
         case .reuseLiveSession:
             workerWake?.yield()
-        case .rerunInstalledConfiguration:
-            rerunInstalledConfiguration()
-        case .installNewConfiguration:
-            sessionConfiguration = TranslationSession.Configuration(source: source, target: target)
+        case .rerunInstalledConfiguration(let configuration),
+             .installNewConfiguration(let configuration):
+            sessionConfiguration = configuration
         }
     }
 
-    /// invalidate 当前配置，强制 `.translationTask` 重跑并重新拿一个会话。
-    private func rerunInstalledConfiguration() {
-        var refreshed = sessionConfiguration
-        refreshed?.invalidate()
+    /// worker 退出后还有未服务请求时的自救：invalidate 当前配置，强制
+    /// `.translationTask` 重跑、重新拿一个会话来把它服务掉。
+    private func rescueUnservedRequest() {
+        guard var refreshed = sessionConfiguration else { return }
+        refreshed.invalidate()
         sessionConfiguration = refreshed
     }
 
@@ -234,7 +258,11 @@ final class AppleTranslationCoordinator: ObservableObject {    private struct Tr
     /// 就是这么用的），所以改成：任务存活期间会话一直复用，新请求只是唤醒
     /// 这里；语言对变化或视图拆除导致任务被取消时，会话随之由 SwiftUI
     /// 回收。
-    fileprivate func runSessionWorker(using session: TranslationSession) async {
+    fileprivate func runSessionWorker(
+        using session: TranslationSession,
+        configuration: TranslationSession.Configuration?
+    ) async {
+        guard let configuration else { return }
         workerGeneration += 1
         let generation = workerGeneration
         let (stream, continuation) = AsyncStream<Void>.makeStream(
@@ -248,11 +276,11 @@ final class AppleTranslationCoordinator: ObservableObject {    private struct Tr
         }
 
         // 首个请求总是先于 worker 就绪：启动时先服务一次挂着的请求。
-        await servePendingRequest(using: session)
+        await servePendingRequest(using: session, configuration: configuration)
 
         for await _ in stream {
             if Task.isCancelled { break }
-            await servePendingRequest(using: session)
+            await servePendingRequest(using: session, configuration: configuration)
         }
 
         // 退出时还有请求没服务完，说明唤醒恰好落在本 worker 的退出空隙里
@@ -260,12 +288,20 @@ final class AppleTranslationCoordinator: ObservableObject {    private struct Tr
         // 更新的 worker 在跑时（generation 落后）不用管，新 worker 启动时
         // 会自带一次启动服务。
         if pendingRequest != nil, workerGeneration == generation {
-            rerunInstalledConfiguration()
+            rescueUnservedRequest()
         }
     }
 
-    private func servePendingRequest(using session: TranslationSession) async {
-        guard let request = pendingRequest else { return }
+    private func servePendingRequest(
+        using session: TranslationSession,
+        configuration: TranslationSession.Configuration
+    ) async {
+        // 只服务绑定到本 worker 所持 Configuration 的请求。语言对切换后，
+        // 旧 worker 可能还带着缓冲的唤醒活着；没有这个校验，它会用旧
+        // 语言对的会话去翻新请求，而 generation 守卫拦不住「翻错了」的结果。
+        guard let request = pendingRequest, request.configuration == configuration else {
+            return
+        }
 
         do {
             if request.shouldPrepareTranslation {
@@ -500,8 +536,11 @@ private struct AppleTranslationSessionModifier: ViewModifier {
     @ObservedObject var coordinator: AppleTranslationCoordinator
 
     func body(content: Content) -> some View {
-        content.translationTask(coordinator.sessionConfiguration) { session in
-            await coordinator.runSessionWorker(using: session)
+        // 把触发本次任务运行的 Configuration 捕获进闭包，作为 worker 的
+        // 会话身份：请求绑定与它不一致时 worker 拒绝服务（防串台）。
+        let configuration = coordinator.sessionConfiguration
+        return content.translationTask(configuration) { session in
+            await coordinator.runSessionWorker(using: session, configuration: configuration)
         }
     }
 }
