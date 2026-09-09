@@ -237,12 +237,55 @@ final class AppleTranslationCoordinator: ObservableObject {    private struct Tr
         }
     }
 
+    /// worker 退出时的自救决策：挂着的请求绑定与当前安装的配置一致时，
+    /// 返回重绑所用的刷新配置（invalidate 后的副本）；不一致或没有请求时
+    /// 返回 nil，不动状态——那种请求属于别的路径（如语言对切换触发的
+    /// 新任务），自救插手反而添乱。
+    ///
+    /// **返回的同一个值要同时落到两处**：发布到 `sessionConfiguration`，
+    /// 并重绑 `pendingRequest.configuration`。只发布不重绑会挂死——
+    /// `Configuration.==` 把 invalidated 状态算进去，新 worker 拿到的
+    /// invalidated 值和请求的旧绑定永远不相等，`servePendingRequest`
+    /// 的校验过不去。
+    nonisolated static func rescueBinding(
+        requestConfiguration: TranslationSession.Configuration?,
+        installedConfiguration: TranslationSession.Configuration?
+    ) -> TranslationSession.Configuration? {
+        guard let requestConfiguration,
+              let installedConfiguration,
+              requestConfiguration == installedConfiguration
+        else {
+            return nil
+        }
+        var refreshed = installedConfiguration
+        refreshed.invalidate()
+        return refreshed
+    }
+
     /// worker 退出后还有未服务请求时的自救：invalidate 当前配置，强制
     /// `.translationTask` 重跑、重新拿一个会话来把它服务掉。
+    ///
+    /// 语言对切换取消旧 worker 时也会走到这里——此时挂着的请求属于新
+    /// 配置，重跑由切换本身触发，这里多 invalidate 一次至多造成一次
+    /// 有限的多余任务重跑（会被 generation 守卫丢弃），不会泄漏。
     private func rescueUnservedRequest() {
-        guard var refreshed = sessionConfiguration else { return }
-        refreshed.invalidate()
+        guard let request = pendingRequest,
+              let refreshed = Self.rescueBinding(
+                requestConfiguration: request.configuration,
+                installedConfiguration: sessionConfiguration
+              )
+        else {
+            return
+        }
         sessionConfiguration = refreshed
+        pendingRequest = PendingRequest(
+            generation: request.generation,
+            configuration: refreshed,
+            text: request.text,
+            shouldPrepareTranslation: request.shouldPrepareTranslation,
+            onPhaseChange: request.onPhaseChange,
+            onLanguageDownloadStateChange: request.onLanguageDownloadStateChange
+        )
     }
 
     /// `.translationTask` 的 action 主体：常驻消费翻译请求。

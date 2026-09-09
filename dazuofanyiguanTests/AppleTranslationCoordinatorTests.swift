@@ -118,4 +118,61 @@ struct AppleTranslationCoordinatorTests {
             #expect(decision.configuration.target == target, "\(name)：绑定目标语言不符")
         }
     }
+
+    // MARK: - worker 退出自救的重绑（语言对切换竞态）
+
+    /// 评审第二三轮指出的挂死路径：语言对切换取消旧 worker、新请求挂在
+    /// 新配置上时，自救 invalidate 发布的刷新值与请求的旧绑定**不再相等**
+    /// （`Configuration.==` 含 invalidated 状态），若不把请求一并重绑，
+    /// 新 worker 的校验永远不过，请求无限等待。这里固化「刷新值必然不同于
+    /// 旧绑定」的前提，以及绑定与发布必须落同一个值。
+    @Test func rescueRebindsWhenRequestMatchesInstalledConfiguration() {
+        let japaneseConfiguration = TranslationSession.Configuration(source: zhHans, target: japanese)
+
+        let refreshed = AppleTranslationCoordinator.rescueBinding(
+            requestConfiguration: japaneseConfiguration,
+            installedConfiguration: japaneseConfiguration
+        )
+
+        #expect(refreshed != nil)
+        // 不重绑就会挂死的直接证据：刷新值与旧绑定不相等。
+        #expect(refreshed != japaneseConfiguration)
+        // 刷新值就是安装配置的 invalidate 副本：发布目标与重绑目标是
+        // 同一个值（调用方把返回值同时写进 pendingRequest.configuration
+        // 和 sessionConfiguration）。
+        var expectedRefreshed = japaneseConfiguration
+        expectedRefreshed.invalidate()
+        #expect(refreshed == expectedRefreshed)
+    }
+
+    /// 请求绑定与当前安装的配置不一致（语言对切换的残留）时，自救必须
+    /// 拒绝插手——那种请求由切换触发的新任务接手。
+    @Test func rescueDeclinesWhenBindingDivergesFromInstalledConfiguration() {
+        let englishConfiguration = TranslationSession.Configuration(source: zhHans, target: english)
+        let japaneseConfiguration = TranslationSession.Configuration(source: zhHans, target: japanese)
+
+        #expect(
+            AppleTranslationCoordinator.rescueBinding(
+                requestConfiguration: englishConfiguration,
+                installedConfiguration: japaneseConfiguration
+            ) == nil
+        )
+    }
+
+    @Test func rescueDeclinesWithoutRequestOrInstalledConfiguration() {
+        let configuration = TranslationSession.Configuration(source: zhHans, target: english)
+
+        #expect(
+            AppleTranslationCoordinator.rescueBinding(
+                requestConfiguration: nil,
+                installedConfiguration: configuration
+            ) == nil
+        )
+        #expect(
+            AppleTranslationCoordinator.rescueBinding(
+                requestConfiguration: configuration,
+                installedConfiguration: nil
+            ) == nil
+        )
+    }
 }
