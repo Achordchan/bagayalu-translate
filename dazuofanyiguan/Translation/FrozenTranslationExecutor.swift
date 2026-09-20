@@ -14,6 +14,8 @@ enum FrozenTranslationExecutor {
             return nil
         case .google:
             return GoogleTranslateEngine()
+        case .microsoft:
+            return MicrosoftTranslateEngine()
         case .openAICompatible:
             return OpenAICompatibleEngine(
                 baseURL: request.openAIBaseURL,

@@ -8,7 +8,7 @@
 - 截图 OCR + 翻译（支持框选区域、翻译覆盖层）
 - 钉图（把截图固定在桌面，右键复制/保存/关闭）
 - 应用内自动更新（直接安装并自动重启，无需手动覆盖 App）
-- 默认使用 Apple 本地翻译，也支持 Google / OpenAI Compatible
+- 默认使用 Apple 本地翻译，也支持 Google / 微软翻译 / OpenAI Compatible
 
 > 本项目仍在快速迭代中。欢迎 issue / PR。
 
@@ -33,6 +33,7 @@
 - **多引擎**
   - Apple 本地翻译（默认，无需 API Key）
   - Google Translate
+  - 微软翻译（免密，走 Edge 网页翻译接口）
   - OpenAI Compatible（可接 OpenAI / 兼容格式的第三方服务）
 
 - **应用内更新**

@@ -23,7 +23,7 @@ struct InputAssistCacheKey: Hashable {
         openAIEndpointMode: OpenAIEndpointMode
     ) -> String {
         switch engineType {
-        case .apple, .google:
+        case .apple, .google, .microsoft:
             return engineType.rawValue
         case .openAICompatible:
             return [

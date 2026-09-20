@@ -52,6 +52,7 @@
 
 - **Apple 本地翻译**：使用 macOS Translation 框架和系统语言模型处理，应用不会将待翻译文本发送到自建服务器。
 - **Google 翻译**：会将待翻译文本发送到 Google 翻译相关接口。
+- **微软翻译**：会将待翻译文本发送到微软（Edge 网页翻译）相关接口。
 - **OpenAI Compatible**：会将待翻译文本发送到你配置的 BaseURL 所对应的服务（可能是 OpenAI 或兼容 OpenAI 协议的第三方）。
 
 注意：

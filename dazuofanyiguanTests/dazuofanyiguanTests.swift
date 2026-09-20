@@ -1282,6 +1282,146 @@ struct dazuofanyiguanTests {
         #expect(body.contains("privacy") || body.contains("sensitive") || body.contains("12345"))
     }
 
+    // MARK: - 微软翻译
+
+    @Test func microsoftTranslateRequestKeepsTextOutOfURLAndOmitsAutoFrom() {
+        let secret = "privacy-sensitive-source-text-12345"
+        let request = MicrosoftTranslateEngine.makeRequest(
+            texts: [secret],
+            sourceLanguageCode: "auto",
+            targetLanguageCode: "zh-CN"
+        )
+
+        #expect(request.httpMethod == "POST")
+        #expect(request.url?.host == MicrosoftTranslateEngine.endpoint.host)
+        #expect(request.url?.path == MicrosoftTranslateEngine.endpoint.path)
+        #expect(!(request.url?.absoluteString.contains(secret) ?? true))
+        // `from=auto` 服务端会 400，自动检测必须省略 from。
+        let query = request.url?.query ?? ""
+        #expect(!query.contains("from="))
+        #expect(query.contains("to=zh-Hans"))
+        // 服务端校验 UA 像浏览器，没有会 400。
+        #expect(!(request.value(forHTTPHeaderField: "User-Agent") ?? "").isEmpty)
+
+        let body = try? JSONSerialization.jsonObject(with: request.httpBody ?? Data()) as? [String]
+        #expect(body == [secret])
+    }
+
+    @Test func microsoftTranslateRequestSendsExplicitSource() {
+        let request = MicrosoftTranslateEngine.makeRequest(
+            texts: ["早上好"],
+            sourceLanguageCode: "zh-TW",
+            targetLanguageCode: "no"
+        )
+        let query = request.url?.query ?? ""
+        #expect(query.contains("from=zh-Hant"))
+        #expect(query.contains("to=nb"))
+    }
+
+    @Test func microsoftLanguageCodesRoundTripBetweenAppAndService() {
+        #expect(MicrosoftTranslateEngine.requestLanguageCode(forTarget: "zh-CN") == "zh-Hans")
+        #expect(MicrosoftTranslateEngine.requestLanguageCode(forTarget: "zh-TW") == "zh-Hant")
+        #expect(MicrosoftTranslateEngine.requestLanguageCode(forTarget: "no") == "nb")
+        #expect(MicrosoftTranslateEngine.requestLanguageCode(forTarget: "ja") == "ja")
+        #expect(MicrosoftTranslateEngine.requestLanguageCode(forSource: "auto") == nil)
+        #expect(MicrosoftTranslateEngine.requestLanguageCode(forSource: "") == nil)
+        #expect(MicrosoftTranslateEngine.requestLanguageCode(forSource: "en") == "en")
+
+        #expect(MicrosoftTranslateEngine.appLanguageCode(fromMicrosoft: "zh-Hans") == "zh-CN")
+        #expect(MicrosoftTranslateEngine.appLanguageCode(fromMicrosoft: "zh-Hant") == "zh-TW")
+        #expect(MicrosoftTranslateEngine.appLanguageCode(fromMicrosoft: "nb") == "no")
+        #expect(MicrosoftTranslateEngine.appLanguageCode(fromMicrosoft: "ko") == "ko")
+
+        // 检测结果会当反向翻译的目标语言：不同语言的码必须透传，且透传后再发给服务端仍是原码。
+        for distinct in ["yue", "lzh", "pt-pt", "sr-Latn", "sr-Cyrl", "mn-Mong", "fr-ca"] {
+            let app = MicrosoftTranslateEngine.appLanguageCode(fromMicrosoft: distinct)
+            #expect(app == distinct, "\(distinct) 被折叠成了 \(app)")
+            #expect(MicrosoftTranslateEngine.requestLanguageCode(forTarget: app) == distinct)
+        }
+
+        // 应用里每个可选语言都得能变成微软接受的码，且不能是 auto。
+        for language in LanguagePreset.common where language.code != "auto" {
+            let mapped = MicrosoftTranslateEngine.requestLanguageCode(forTarget: language.code)
+            #expect(!mapped.isEmpty && mapped != "auto", "\(language.code) -> \(mapped)")
+        }
+    }
+
+    @Test func microsoftTranslateParsesServiceResponse() throws {
+        // 2026-09-20 实测响应原样（去掉 sentLen）。
+        let json = """
+        [{"detectedLanguage":{"language":"zh-Hans","score":1.0},
+          "translations":[{"text":"Good morning, the weather is nice today.\\n\\nParagraph 2","to":"en"}]},
+         {"translations":[{"text":"Second","to":"en"}]}]
+        """
+        let results = try MicrosoftTranslateEngine.parseResponse(Data(json.utf8), expectedCount: 2)
+        #expect(results.count == 2)
+        #expect(results[0].translatedText == "Good morning, the weather is nice today.\n\nParagraph 2")
+        #expect(results[0].detectedSourceLanguageCode == "zh-CN")
+        #expect(results[1].translatedText == "Second")
+        #expect(results[1].detectedSourceLanguageCode == nil)
+    }
+
+    @Test func microsoftTranslateRejectsMalformedResponses() {
+        let cases: [(String, Int)] = [
+            ("{}", 1),
+            ("[]", 1),
+            ("[{\"translations\":[]}]", 1),
+            ("[{\"translations\":[{\"text\":\"a\"}]}]", 2)
+        ]
+        for (json, expected) in cases {
+            var thrown: Error?
+            do {
+                _ = try MicrosoftTranslateEngine.parseResponse(Data(json.utf8), expectedCount: expected)
+            } catch {
+                thrown = error
+            }
+            #expect(thrown is MicrosoftTranslateEngine.EngineError, "should reject: \(json)")
+        }
+    }
+
+    @Test func microsoftTranslateRejectsOversizedTextLocally() async {
+        let engine = MicrosoftTranslateEngine()
+        let huge = String(repeating: "A", count: MicrosoftTranslateEngine.maxTotalCharacters + 1)
+        var thrown: Error?
+        do {
+            _ = try await engine.translate(text: huge, sourceLanguageCode: "en", targetLanguageCode: "zh-CN")
+        } catch {
+            thrown = error
+        }
+        guard let engineError = thrown as? MicrosoftTranslateEngine.EngineError,
+              case .textTooLong = engineError
+        else {
+            #expect(Bool(false), "expected textTooLong, got: \(String(describing: thrown))")
+            return
+        }
+    }
+
+    @Test func microsoftTranslateChunksAndBatchesPreserveOrderAndText() {
+        let paragraph = String(repeating: "word ", count: 400) // 2000 字
+        let text = (0..<9).map { "\($0)" + paragraph }.joined(separator: "\n") // ~18000 字
+        let chunks = MicrosoftTranslateEngine.chunkText(text, maxCharacters: 5000)
+        #expect(chunks.count > 1)
+        #expect(chunks.allSatisfy { $0.count <= 5000 })
+        #expect(chunks.joined() == text)
+
+        let batches = MicrosoftTranslateEngine.batchChunks(chunks, maxCharacters: 15000)
+        #expect(batches.count == 2)
+        #expect(batches.allSatisfy { $0.reduce(0) { $0 + $1.count } <= 15000 })
+        #expect(batches.flatMap { $0 } == chunks)
+    }
+
+    @Test func microsoftTranslateMapsHTTPStatusesToReadableErrors() {
+        let badRequest = MicrosoftTranslateEngine.mapHTTPError(.badStatus(code: 400, body: ""))
+        #expect((badRequest as? MicrosoftTranslateEngine.EngineError) != nil)
+        let limited = MicrosoftTranslateEngine.mapHTTPError(.badStatus(code: 429, body: ""))
+        guard case .rateLimited? = limited as? MicrosoftTranslateEngine.EngineError else {
+            #expect(Bool(false), "expected rateLimited")
+            return
+        }
+        let server = MicrosoftTranslateEngine.mapHTTPError(.badStatus(code: 503, body: "x"))
+        #expect(server is HTTPClient.HTTPError)
+    }
+
     @Test func mainWindowPreferredSizeConstantsStayStable() {
         #expect(AppWindowController.preferredContentSize.width == 980)
         #expect(AppWindowController.preferredContentSize.height == 640)
