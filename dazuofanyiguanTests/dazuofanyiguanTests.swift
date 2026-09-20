@@ -1332,6 +1332,13 @@ struct dazuofanyiguanTests {
         #expect(MicrosoftTranslateEngine.appLanguageCode(fromMicrosoft: "nb") == "no")
         #expect(MicrosoftTranslateEngine.appLanguageCode(fromMicrosoft: "ko") == "ko")
 
+        // 检测结果会当反向翻译的目标语言：不同语言的码必须透传，且透传后再发给服务端仍是原码。
+        for distinct in ["yue", "lzh", "pt-pt", "sr-Latn", "sr-Cyrl", "mn-Mong", "fr-ca"] {
+            let app = MicrosoftTranslateEngine.appLanguageCode(fromMicrosoft: distinct)
+            #expect(app == distinct, "\(distinct) 被折叠成了 \(app)")
+            #expect(MicrosoftTranslateEngine.requestLanguageCode(forTarget: app) == distinct)
+        }
+
         // 应用里每个可选语言都得能变成微软接受的码，且不能是 auto。
         for language in LanguagePreset.common where language.code != "auto" {
             let mapped = MicrosoftTranslateEngine.requestLanguageCode(forTarget: language.code)

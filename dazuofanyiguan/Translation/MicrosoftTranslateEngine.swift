@@ -138,25 +138,26 @@ struct MicrosoftTranslateEngine: TranslationEngine {
         switch normalized.lowercased() {
         case "zh", "zh-cn", "zh-hans", "zh-sg": return "zh-Hans"
         case "zh-tw", "zh-hk", "zh-hant", "zh-mo": return "zh-Hant"
-        case "no", "nb", "nn": return "nb"
+        case "no", "nb": return "nb"
         case "tl": return "fil"
         case "pt-br": return "pt"
-        case "sr": return "sr-Cyrl"
-        case "mn": return "mn-Cyrl"
         default: return normalized
         }
     }
 
-    /// 微软码 → 应用内部码。未知码原样透传，界面只会把它当代码显示。
+    /// 微软码 → 应用内部码。
+    ///
+    /// 只做**同一种语言换个写法**的归一化（`zh-Hans`↔`zh-CN`、`nb`↔`no`），
+    /// 其余原样透传。粤语 `yue`、文言 `lzh`、葡萄牙葡语 `pt-pt`、拉丁塞语 `sr-Latn`
+    /// 这些都不能折叠到近似语言：检测结果会被 `TranslatorViewModel.reverseTranslate`
+    /// 当成反向翻译的目标语言，折叠等于把用户的原语种偷换掉。
+    /// 透传的码再送回 `requestLanguageCode(forTarget:)` 时也原样进 `default` 分支，
+    /// 服务端认识它们，反向翻译就还是原语种。
     static func appLanguageCode(fromMicrosoft code: String) -> String {
         switch code.lowercased() {
-        case "zh-hans", "zh": return "zh-CN"
-        case "zh-hant", "yue", "lzh": return "zh-TW"
-        case "nb", "nn": return "no"
-        case "pt-pt", "pt-br": return "pt"
-        case "sr-cyrl", "sr-latn": return "sr"
-        case "mn-cyrl", "mn-mong": return "mn"
-        case "fr-ca": return "fr"
+        case "zh-hans": return "zh-CN"
+        case "zh-hant": return "zh-TW"
+        case "nb": return "no"
         default: return code
         }
     }
