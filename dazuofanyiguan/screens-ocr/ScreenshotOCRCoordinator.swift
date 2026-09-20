@@ -464,6 +464,8 @@ final class ScreenshotOCRCoordinator: ObservableObject {
             log.info("截图翻译引擎：Apple 本地翻译")
         case .google:
             log.info("截图翻译引擎：Google")
+        case .microsoft:
+            log.info("截图翻译引擎：微软翻译")
         case .openAICompatible:
             log.info("截图翻译引擎：OpenAI 通用接口")
         }

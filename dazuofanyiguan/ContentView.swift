@@ -517,7 +517,7 @@ struct ContentView: View {
 
         if showClipboardToast {
             switch settings.engineType {
-            case .google, .openAICompatible:
+            case .google, .microsoft, .openAICompatible:
                 toast.show("已从剪贴板读取文字，将发送到在线翻译服务", style: .info)
             case .apple:
                 toast.show("已获取剪贴板文字并开始翻译", style: .success)

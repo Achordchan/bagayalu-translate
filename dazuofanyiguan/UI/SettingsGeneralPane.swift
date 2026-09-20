@@ -221,6 +221,14 @@ struct GeneralSettingsPane: View {
                 tint: .blue
             )
 
+        case .microsoft:
+            SettingsInlineNotice(
+                icon: "network",
+                title: "在线翻译",
+                message: "无需额外配置，语言识别由微软翻译完成。翻译内容需要发送到微软的网络服务。",
+                tint: .blue
+            )
+
         case .openAICompatible:
             openAIConfiguration
         }
@@ -308,6 +316,7 @@ struct GeneralSettingsPane: View {
         switch engine {
         case .apple: return "本地 · 默认"
         case .google: return "在线 · 免配置"
+        case .microsoft: return "在线 · 免配置"
         case .openAICompatible: return "在线 · 自定义"
         }
     }
