@@ -7,6 +7,7 @@
 
 import AppKit
 import OpenAI
+import SwiftUI
 import Testing
 import UniformTypeIdentifiers
 @testable import 大佐翻译官v1
@@ -184,6 +185,34 @@ struct dazuofanyiguanTests {
         #expect(
             provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier)
         )
+    }
+
+    /// 权限引导是 sheet，AppKit 默认会拦下所有退出请求，
+    /// 系统设置里的「退出并重新打开」因此失效。
+    @MainActor
+    @Test func permissionGuideDoesNotBlockAppTermination() {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 620, height: 590),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: true
+        )
+        window.isReleasedWhenClosed = false
+        defer { window.orderOut(nil) }
+        #expect(window.preventsApplicationTerminationWhenModal)
+
+        let guide = PermissionGuideView(
+            needsAccessibility: true,
+            needsScreenRecording: true,
+            showsScreenRecordingPermission: true,
+            onOpenAccessibility: {},
+            onOpenScreenRecording: {},
+            onClose: {}
+        )
+        window.contentView = NSHostingView(rootView: guide)
+        window.contentView?.layoutSubtreeIfNeeded()
+
+        #expect(!window.preventsApplicationTerminationWhenModal)
     }
 
     @Test func languageDetectionRecognizesClearLongText() {
