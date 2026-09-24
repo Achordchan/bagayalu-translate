@@ -4,6 +4,10 @@ on:
   push:
     branches:
       - main
+  # PR 也跑一遍构建和签名校验（不发布）：证书、签名身份要求有问题，合并前就能看到。
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       version:
@@ -34,6 +38,11 @@ jobs:
       DERIVED_DATA_PATH: build
       BUILD_PRODUCTS_PATH: build-products
       RELEASE_VERSION: ${{ inputs.version }}
+      BUNDLE_IDENTIFIER: achord.dazuofanyiguan
+      # 自签名代码签名证书（scripts/create_signing_certificate.sh 生成，私钥只在 Secrets 里）。
+      # 用户的辅助功能、屏幕录制授权绑在这张证书的 SHA-1 上：换证书 = 所有用户重新授权一次。
+      SIGNING_IDENTITY_NAME: Bagayalu Translate Self-Signed
+      SIGNING_IDENTITY_SHA1: 65333a6e8f985b5fa58e827d430c2cc811fe6a73
 
     steps:
       - name: Checkout
@@ -131,16 +140,55 @@ jobs:
               build
           done
 
-      - name: Ad-hoc sign release app bundles
+      - name: Sign release app bundles with the self-signed certificate
+        env:
+          SIGNING_CERT_P12_BASE64: ${{ secrets.MACOS_SIGNING_CERT_P12_BASE64 }}
+          SIGNING_CERT_PASSWORD: ${{ secrets.MACOS_SIGNING_CERT_PASSWORD }}
         run: |
           set -euo pipefail
 
+          if [ -z "${SIGNING_CERT_P12_BASE64:-}" ] || [ -z "${SIGNING_CERT_PASSWORD:-}" ]; then
+            echo "缺少签名证书 Secret：MACOS_SIGNING_CERT_P12_BASE64 / MACOS_SIGNING_CERT_PASSWORD。" >&2
+            echo "不能退回 ad-hoc 签名：那会让所有用户已给的辅助功能、屏幕录制授权失效。" >&2
+            echo "从 fork 发起的 PR 拿不到仓库 Secret，会停在这里，属预期。" >&2
+            exit 1
+          fi
+
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 16)"
+          P12="$RUNNER_TEMP/signing.p12"
+
+          ORIGINAL_KEYCHAINS=()
+          while IFS= read -r line; do
+            line="$(printf '%s' "$line" | sed -E 's/^[[:space:]]*"//; s/"[[:space:]]*$//')"
+            [ -n "$line" ] && ORIGINAL_KEYCHAINS+=("$line")
+          done < <(security list-keychains -d user)
+
+          # 私钥只在这一步里存在：签完（包括失败）立刻删钥匙串、删 p12、恢复搜索列表。
+          cleanup() {
+            set +e
+            security list-keychains -d user -s ${ORIGINAL_KEYCHAINS[@]+"${ORIGINAL_KEYCHAINS[@]}"}
+            security delete-keychain "$KEYCHAIN" >/dev/null 2>&1
+            rm -f "$P12"
+          }
+          trap cleanup EXIT
+
+          printf '%s' "$SIGNING_CERT_P12_BASE64" | base64 --decode > "$P12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$P12" -k "$KEYCHAIN" -P "$SIGNING_CERT_PASSWORD" -T /usr/bin/codesign >/dev/null
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          # codesign 只在钥匙串搜索列表里找签名身份，--keychain 指定文件也找不到。
+          security list-keychains -d user -s "$KEYCHAIN" ${ORIGINAL_KEYCHAINS[@]+"${ORIGINAL_KEYCHAINS[@]}"}
+
           for ARCH in arm64 x86_64; do
             APP_PATH="$BUILD_PRODUCTS_PATH/$ARCH/$APP_NAME.app"
+            # 按 SHA-1 指定身份：就算钥匙串里混进同名证书，也只会用这一张。
             codesign \
               --force \
               --deep \
-              --sign - \
+              --sign "$SIGNING_IDENTITY_SHA1" \
               --timestamp=none \
               "$APP_PATH"
           done
@@ -165,15 +213,28 @@ jobs:
 
             SIGNATURE_INFO="$(codesign -dv --verbose=4 "$APP_PATH" 2>&1)"
             printf '%s\n' "$SIGNATURE_INFO"
-            grep -q 'flags=.*adhoc' <<< "$SIGNATURE_INFO"
-            if grep -q 'flags=.*runtime' <<< "$SIGNATURE_INFO"; then
-              echo "$ARCH ad-hoc 签名不应启用 hardened runtime，否则 Sparkle 动态库会因 Team ID 不一致而被拒绝加载。" >&2
+            if grep -q 'flags=.*adhoc' <<< "$SIGNATURE_INFO"; then
+              echo "$ARCH 仍是 ad-hoc 签名。发布包必须用固定证书签名，否则用户每次更新都要重新授权。" >&2
               exit 1
             fi
-            grep -q 'Signature=adhoc' <<< "$SIGNATURE_INFO"
+            if grep -q 'flags=.*runtime' <<< "$SIGNATURE_INFO"; then
+              echo "$ARCH 不应启用 hardened runtime：自签名证书没有 Team ID，库验证会拒绝加载 Sparkle 动态库。" >&2
+              exit 1
+            fi
+            grep -q "Authority=$SIGNING_IDENTITY_NAME" <<< "$SIGNATURE_INFO"
             grep -q 'Info.plist entries=' <<< "$SIGNATURE_INFO"
             grep -q 'Sealed Resources version=2' <<< "$SIGNATURE_INFO"
             grep -q 'TeamIdentifier=not set' <<< "$SIGNATURE_INFO"
+
+            # 用户的授权绑在这条身份要求上。它一变，所有人都要重新授权——宁可构建失败，也不能悄悄发出去。
+            EXPECTED_REQUIREMENT="identifier \"$BUNDLE_IDENTIFIER\" and certificate leaf = H\"$SIGNING_IDENTITY_SHA1\""
+            ACTUAL_REQUIREMENT="$(codesign -d -r- "$APP_PATH" 2>&1 | sed -n 's/^.*designated => //p')"
+            if [ "$ACTUAL_REQUIREMENT" != "$EXPECTED_REQUIREMENT" ]; then
+              echo "$ARCH 签名身份要求与固定值不一致。" >&2
+              echo "  预期：$EXPECTED_REQUIREMENT" >&2
+              echo "  实际：$ACTUAL_REQUIREMENT" >&2
+              exit 1
+            fi
 
             if /usr/libexec/PlistBuddy \
               -c 'Print :SUEnableInstallerLauncherService' \
@@ -303,7 +364,7 @@ jobs:
           Path(output_path).write_text(
               f"## 大佐翻译官 v{version}\n\n{body}\n\n"
               "- 分别提供 Apple Silicon（arm64）和 Intel（x86_64）安装包。\n"
-              "- 主程序不使用 Developer ID 分发签名，更新包继续通过 Sparkle EdDSA 签名验证；未经过 Apple 公证。\n",
+              "- 主程序使用固定的自签名证书签名（非 Apple Developer ID），未经过 Apple 公证；更新包继续通过 Sparkle EdDSA 签名验证。\n",
               encoding="utf-8",
           )
           PY
