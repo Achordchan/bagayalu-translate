@@ -213,7 +213,7 @@ struct PermissionGuideView: View {
             .buttonStyle(.plain)
 
             if showPermissionMigrationExplanation {
-                Text("1.2.1 及更早版本使用临时签名，首次升级到正式签名版本时，macOS 可能仍保留无法匹配的旧权限记录。请在系统设置中删除旧条目，再把上方应用图标拖入权限列表并开启；完成这一次迁移后，后续更新会保持同一权限身份。")
+                Text("1.3.0 及更早版本的签名每次更新都会变，macOS 会保留一条对不上的旧权限记录。之后的版本改用固定证书签名：升级上来的这一次，请在系统设置中删除旧条目，再把上方应用图标拖入权限列表并开启；完成这一次后，后续更新会沿用同一权限，不用再重新授权。")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
