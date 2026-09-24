@@ -9,7 +9,6 @@ import AppKit
 import OpenAI
 import SwiftUI
 import Testing
-import UniformTypeIdentifiers
 @testable import 大佐翻译官v1
 
 private final class OpenAISDKMockURLProtocol: URLProtocol {
@@ -176,15 +175,96 @@ struct dazuofanyiguanTests {
         #expect(!defaults.bool(forKey: LegacySandboxPreferencesMigration.markerKey))
     }
 
-    @Test func permissionGuideProvidesDraggableApplicationFileURL() {
-        let applicationURL = URL(fileURLWithPath: "/Applications/大佐翻译官v1.app")
-        let provider = PermissionGuideDragItemProvider.make(
-            applicationURL: applicationURL
+    @MainActor
+    @Test func permissionGuideProvidesDraggableApplicationFileURL() throws {
+        let applicationURL = URL(
+            fileURLWithPath: "/Applications/大佐翻译官v1.app",
+            isDirectory: true
+        )
+        let item = PermissionGuideApplicationDrag.draggingItem(
+            applicationURL: applicationURL,
+            centeredAt: .zero,
+            image: NSImage(size: NSSize(width: 42, height: 42))
+        )
+        let pasteboard = NSPasteboard(
+            name: NSPasteboard.Name("PermissionGuideTests.\(UUID().uuidString)")
+        )
+        defer { pasteboard.releaseGlobally() }
+
+        pasteboard.clearContents()
+        #expect(pasteboard.writeObjects([try #require(item.item as? NSPasteboardWriting)]))
+
+        // 新旧两种读法（系统设置这类接收方按文件 URL 收应用）拿到的都必须是原路径本身，
+        // 而不是 SwiftUI 拖拽那种 ~/Library/Caches/com.apple.SwiftUI.Drag-<UUID>/ 下的拷贝。
+        let urls = pasteboard.readObjects(
+            forClasses: [NSURL.self],
+            options: [.urlReadingFileURLsOnly: true]
+        ) as? [URL]
+        #expect(urls?.map(\.path) == [applicationURL.path])
+        #expect(
+            pasteboard.propertyList(
+                forType: NSPasteboard.PasteboardType("NSFilenamesPboardType")
+            ) as? [String] == [applicationURL.path]
         )
 
-        #expect(
-            provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier)
-        )
+        // 也不能带文件承诺类型：那是让接收方要求拖拽源另写一份文件出来，同样是拷贝。
+        let types = Set(pasteboard.types ?? [])
+        #expect(types.contains(.fileURL))
+        #expect(types.isDisjoint(with: [
+            .filePromise,
+            NSPasteboard.PasteboardType("com.apple.NSFilePromiseItemMetaData"),
+            NSPasteboard.PasteboardType("com.apple.pasteboard.promised-file-content-type"),
+            NSPasteboard.PasteboardType("Apple files promise pasteboard type"),
+        ]))
+
+        #expect(PermissionGuideApplicationDrag.operationMask(for: .outsideApplication) == .copy)
+        #expect(PermissionGuideApplicationDrag.operationMask(for: .withinApplication).isEmpty)
+    }
+
+    /// 回归：拖拽必须走 AppKit 拖拽源，不能退回 SwiftUI 的 `.onDrag` / `.draggable`。
+    /// 后者在系统设置读取拖入的文件时把整个 .app 拷进 ~/Library/Caches，交出去的是拷贝的路径。
+    @MainActor
+    @Test func permissionGuideDragsTheRunningApplicationInPlace() {
+        func dragSources(
+            needsAccessibility: Bool,
+            needsScreenRecording: Bool
+        ) -> [PermissionGuideApplicationDragSource.DragSourceView] {
+            let hostingView = NSHostingView(
+                rootView: PermissionGuideView(
+                    needsAccessibility: needsAccessibility,
+                    needsScreenRecording: needsScreenRecording,
+                    showsScreenRecordingPermission: true,
+                    onOpenAccessibility: {},
+                    onOpenScreenRecording: {},
+                    onClose: {}
+                )
+            )
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 620, height: 590),
+                styleMask: [.borderless],
+                backing: .buffered,
+                defer: true
+            )
+            window.isReleasedWhenClosed = false
+            window.contentView = hostingView
+            defer { window.contentView = nil }
+            hostingView.layoutSubtreeIfNeeded()
+
+            func collect(_ view: NSView) -> [PermissionGuideApplicationDragSource.DragSourceView] {
+                let own = (view as? PermissionGuideApplicationDragSource.DragSourceView).map { [$0] } ?? []
+                return own + view.subviews.flatMap(collect)
+            }
+            return collect(hostingView)
+        }
+
+        let sources = dragSources(needsAccessibility: true, needsScreenRecording: true)
+        #expect(sources.count == 2)
+        for source in sources {
+            #expect(source.applicationURL == Bundle.main.bundleURL)
+            #expect(source.acceptsFirstMouse(for: nil))
+        }
+
+        #expect(dragSources(needsAccessibility: false, needsScreenRecording: false).isEmpty)
     }
 
     /// 权限引导是 sheet，AppKit 默认会拦下所有退出请求，
