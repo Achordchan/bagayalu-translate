@@ -137,6 +137,7 @@ private struct InputAssistOnboardingPresenter: ViewModifier {
                     onOpenTestWindow: { openWindow(id: "inputAssistTest") },
                     onDismiss: { isPresented = false }
                 )
+                .allowsAppTerminationWhilePresented()
             }
     }
 }

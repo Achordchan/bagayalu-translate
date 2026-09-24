@@ -90,6 +90,9 @@ struct PermissionGuideView: View {
         }
         .frame(width: 620, height: 590)
         .background(Color(nsColor: .windowBackgroundColor))
+        // 用户正是开着这个引导去系统设置授权的；引导拦下退出，
+        // 系统设置里的「退出并重新打开」就会失效。
+        .allowsAppTerminationWhilePresented()
     }
 
     private var guideHeader: some View {
