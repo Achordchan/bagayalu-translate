@@ -342,16 +342,136 @@ struct PermissionGuideView: View {
                 .foregroundStyle(.secondary)
         }
         .frame(width: 54)
-        .contentShape(Rectangle())
-        .onDrag {
-            PermissionGuideDragItemProvider.make()
+        // `.help` 留给 VoiceOver；盖在上面的拖拽源会挡住鼠标悬停，悬停提示由它自己的 toolTip 出。
+        .help(Self.dragHelp)
+        .overlay {
+            PermissionGuideApplicationDragSource(
+                applicationURL: Bundle.main.bundleURL,
+                toolTip: Self.dragHelp
+            )
         }
-        .help("将大佐翻译官拖到系统设置的权限列表")
+    }
+
+    private static let dragHelp = "将大佐翻译官拖到系统设置的权限列表"
+}
+
+/// 权限引导里「拖到系统设置」的拖拽源：拖拽剪贴板里只放 .app 的文件引用。
+///
+/// 不用 SwiftUI 的 `.onDrag { NSItemProvider(object: url as NSURL) }`：实测别的进程一读拖拽里的
+/// `public.file-url`（系统设置在松手时读，有的接收方悬停时就读），SwiftUI 就把整个 .app 拷进
+/// `~/Library/Caches/com.apple.SwiftUI.Drag-<UUID>/`，交出去的是拷贝的路径，拷贝从不清理。
+/// 这份拷贝随后以同一 bundle ID 登记进 LaunchServices，「退出并重新打开」就可能挑中它。
+struct PermissionGuideApplicationDragSource: NSViewRepresentable {
+    let applicationURL: URL
+    let toolTip: String
+
+    func makeNSView(context: Context) -> DragSourceView {
+        DragSourceView(applicationURL: applicationURL)
+    }
+
+    func updateNSView(_ nsView: DragSourceView, context: Context) {
+        nsView.applicationURL = applicationURL
+        nsView.toolTip = toolTip
+    }
+
+    final class DragSourceView: NSView, NSDraggingSource {
+        var applicationURL: URL
+        private var mouseDownEvent: NSEvent?
+
+        init(applicationURL: URL) {
+            self.applicationURL = applicationURL
+            super.init(frame: .zero)
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) {
+            fatalError("init(coder:) has not been implemented")
+        }
+
+        // 用户通常先打开系统设置、再从后面的引导窗口拖：第一下按住就能拖，
+        // 拖动时引导窗口也不跳到系统设置前面挡住列表。
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+            true
+        }
+
+        override func shouldDelayWindowOrdering(for event: NSEvent) -> Bool {
+            true
+        }
+
+        override func mouseDown(with event: NSEvent) {
+            mouseDownEvent = event
+        }
+
+        override func mouseUp(with event: NSEvent) {
+            mouseDownEvent = nil
+        }
+
+        override func mouseDragged(with event: NSEvent) {
+            guard let mouseDownEvent else { return }
+            self.mouseDownEvent = nil
+
+            NSApp.preventWindowOrdering()
+            let location = convert(mouseDownEvent.locationInWindow, from: nil)
+            beginDraggingSession(
+                with: [
+                    PermissionGuideApplicationDrag.draggingItem(
+                        applicationURL: applicationURL,
+                        centeredAt: location,
+                        image: NSApp.applicationIconImage
+                    )
+                ],
+                event: mouseDownEvent,
+                source: self
+            )
+        }
+
+        func draggingSession(
+            _ session: NSDraggingSession,
+            sourceOperationMaskFor context: NSDraggingContext
+        ) -> NSDragOperation {
+            PermissionGuideApplicationDrag.operationMask(for: context)
+        }
+
+        // 按住 ⌘ / ⌃ 时 AppKit 会把可选操作收窄成 generic / link，和只给的 copy 一交就空了，拖不进去。
+        func ignoreModifierKeys(for session: NSDraggingSession) -> Bool {
+            true
+        }
     }
 }
 
-enum PermissionGuideDragItemProvider {
-    static func make(applicationURL: URL = Bundle.main.bundleURL) -> NSItemProvider {
-        NSItemProvider(object: applicationURL as NSURL)
+enum PermissionGuideApplicationDrag {
+    static let iconSize: CGFloat = 42
+
+    /// `NSURL` 作为 `NSPasteboardWriting` 只写文件引用（`public.file-url` 及其旧式别名），
+    /// 不经过 `NSItemProvider`，也就没有 SwiftUI 替接收方「备一份文件」的那一步。
+    static func draggingItem(
+        applicationURL: URL,
+        centeredAt location: NSPoint,
+        image: NSImage
+    ) -> NSDraggingItem {
+        let item = NSDraggingItem(pasteboardWriter: applicationURL as NSURL)
+        item.setDraggingFrame(
+            NSRect(
+                x: location.x - iconSize / 2,
+                y: location.y - iconSize / 2,
+                width: iconSize,
+                height: iconSize
+            ),
+            contents: image
+        )
+        return item
+    }
+
+    /// 只给 copy：旧版 SwiftUI 拖拽给的也只有 copy，系统设置照收。
+    /// 不给 move / delete，免得拖进废纸篓或 Finder 时把正式安装的 .app 挪走；本应用里没有接收方。
+    static func operationMask(for context: NSDraggingContext) -> NSDragOperation {
+        switch context {
+        case .outsideApplication:
+            return .copy
+        case .withinApplication:
+            return []
+        @unknown default:
+            return []
+        }
     }
 }
