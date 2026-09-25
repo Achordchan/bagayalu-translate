@@ -85,7 +85,8 @@ enum ScreenshotTranslationRenderer {
                     weight: placement.weight,
                     color: colors[placement.id] ?? .black,
                     alignment: placement.alignment,
-                    lineHeight: placement.lineHeight
+                    lineHeight: placement.lineHeight,
+                    baselineOffset: placement.baselineOffset
                 )
                 ScreenshotTranslationLayout.TextLayout(
                     string,
@@ -274,6 +275,18 @@ enum ScreenshotTranslationRenderer {
         let maxY = floorStripe.hitEdge
             ? max(bounds.maxY, CGFloat(floorStripe.stop) - max(0.3 * em, 0.5 * gapBelow))
             : min(CGFloat(pixels.height) - 0.2 * em, CGFloat(floorStripe.stop))
+        // 往上：第一行上面紧挨着的东西（上一段、按钮的上沿、选区边）。段落不往上长，
+        // 这里只用来别让字身高的译文（缅甸文、高棉文）越过去。
+        let above = pixels.scanRows(from: Int((bounds.minY - clearance).rounded(.down)) - 3, step: -1, limit: Int(3 * em), columns: columns, background: background, noise: noise)
+        let minY = above.hitEdge
+            ? min(bounds.minY, CGFloat(above.stop + 1) + 0.1 * em)
+            : max(0, CGFloat(above.stop + 1))
+        // 原来这一行的字身往下最多到哪：下面最近的边（任何一条竖条碰到的最高处），只留 0.1 个字宽。
+        let nearestBelow = stripes.min { $0.stop < $1.stop }!
+        let bodyMaxY = nearestBelow.hitEdge
+            ? max(bounds.maxY, CGFloat(nearestBelow.stop) - 0.1 * em)
+            : min(CGFloat(pixels.height), CGFloat(nearestBelow.stop))
+
         // 只绕开障碍实际占的那几行：找到它的下沿，同一竖条再往下还有东西就接着找。
         for stripe in stripes where CGFloat(stripe.stop) < maxY {
             var top = stripe.stop
@@ -300,7 +313,7 @@ enum ScreenshotTranslationRenderer {
             weight: weight,
             strokeRatio: strokeRatio,
             alignment: alignment,
-            limits: .init(minX: minX / scale, maxX: maxX / scale, maxY: maxY / scale),
+            limits: .init(minX: minX / scale, maxX: maxX / scale, maxY: maxY / scale, minY: minY / scale, bodyMaxY: bodyMaxY / scale),
             obstacles: obstacles.map { CGRect(x: $0.minX / scale, y: $0.minY / scale, width: $0.width / scale, height: $0.height / scale) }
         )
     }
@@ -566,9 +579,13 @@ struct PixelBuffer {
             runs.append(runCount)
         }
         let minimum = max(1, (x1 - x0) / 250)
+        // 几乎整行都是「墨迹色」的，不是字，是和字同色的一整块——白字按钮外面的白底。碰到就停，
+        // 不然矮按钮上的白字，墨迹带会一直伸到按钮外面，字宽、字号跟着量错。
+        let solid = Int(0.85 * Double(x1 - x0 + 1))
+        func isInk(_ row: Int) -> Bool { counts[row] >= minimum && counts[row] < solid }
         let centerRow = Int(center) - searchTop
         guard let start = counts.indices
-            .filter({ counts[$0] >= minimum })
+            .filter(isInk)
             .min(by: { abs($0 - centerRow) < abs($1 - centerRow) }) else {
             return fallback
         }
@@ -576,14 +593,14 @@ struct PixelBuffer {
         let maxGap = max(2, Int(0.2 * em))
         var top = start, bottom = start, gap = 0
         var row = start - 1
-        while row >= 0 {
-            if counts[row] >= minimum { top = row; gap = 0 } else { gap += 1; if gap > maxGap { break } }
+        while row >= 0, counts[row] < solid {
+            if isInk(row) { top = row; gap = 0 } else { gap += 1; if gap > maxGap { break } }
             row -= 1
         }
         gap = 0
         row = start + 1
-        while row < counts.count {
-            if counts[row] >= minimum { bottom = row; gap = 0 } else { gap += 1; if gap > maxGap { break } }
+        while row < counts.count, counts[row] < solid {
+            if isInk(row) { bottom = row; gap = 0 } else { gap += 1; if gap > maxGap { break } }
             row += 1
         }
 

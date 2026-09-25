@@ -16,9 +16,11 @@ struct ScreenshotTranslationLayoutTests {
     private let measure: ScreenshotTranslationLayout.Measure = { text, fontSize, _, width, lineHeight, _ in
         let natural = CGFloat(text.count) * 0.6 * fontSize
         let line = lineHeight ?? 1.2 * fontSize
-        guard let width else { return CGSize(width: natural, height: line) }
+        // 墨迹占行框中间的 70%。
+        let ink = (top: 0.15 * line, bottom: 0.85 * line)
+        guard let width else { return .init(size: CGSize(width: natural, height: line), inkTop: ink.top, inkBottom: ink.bottom) }
         let lines = max(1, Int((natural / width).rounded(.up)))
-        return CGSize(width: min(natural, width), height: CGFloat(lines) * line)
+        return .init(size: CGSize(width: min(natural, width), height: CGFloat(lines) * line), inkTop: ink.top, inkBottom: ink.bottom)
     }
 
     private func block(
@@ -198,6 +200,71 @@ struct ScreenshotTranslationLayoutTests {
         #expect(placement.frame.height >= actual.height - 0.5)
         #expect(abs(placement.frame.minY + actual.midY - line.midY) < 1, "译文这一行没有居中在原文那一行上")
         #expect(layout.laysOutEverything)
+    }
+
+    /// 把排好的一段画到白底位图上（2 倍），返回有墨迹的像素行的上下范围（pt）。
+    private func inkRows(of placement: ScreenshotTranslationLayout.Placement, canvas: CGSize) -> ClosedRange<CGFloat>? {
+        let context = CGContext(
+            data: nil, width: Int(canvas.width * 2), height: Int(canvas.height * 2), bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        )!
+        context.setFillColor(NSColor.white.cgColor)
+        context.fill(CGRect(x: 0, y: 0, width: canvas.width * 2, height: canvas.height * 2))
+        context.translateBy(x: 0, y: canvas.height * 2)
+        context.scaleBy(x: 2, y: -2)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: true)
+        let string = ScreenshotTranslationLayout.attributedString(
+            placement.text, fontSize: placement.fontSize, weight: placement.weight, color: .black,
+            alignment: placement.alignment, lineHeight: placement.lineHeight, baselineOffset: placement.baselineOffset
+        )
+        ScreenshotTranslationLayout.TextLayout(string, size: placement.frame.size, exclusions: placement.exclusions, maximumLines: placement.maximumLines)
+            .draw(at: placement.frame.origin)
+        NSGraphicsContext.restoreGraphicsState()
+        guard let pixels = PixelBuffer(image: context.makeImage()!) else { return nil }
+        var rows: [Int] = []
+        for y in 0..<pixels.height where (0..<pixels.width).contains(where: { pixels.pixel($0, y).r < 128 }) {
+            rows.append(y)
+        }
+        guard let first = rows.first, let last = rows.last else { return nil }
+        return CGFloat(first) / 2...CGFloat(last + 1) / 2
+    }
+
+    /// 审核第四轮（#12）：多行段落译成后备字体高的文字（缅甸文一行 31pt，14pt 原文的行距只有 20pt），
+    /// 行高按原文行距、封顶 1.9 倍字号的话字会压到上下行、伸出排版范围。
+    @Test func paragraphLineHeightFitsTallerFallbackScripts() throws {
+        let burmese = String(repeating: "မြန်မာစာ ဘာသာပြန် ", count: 10)
+        let lines = (0..<3).map { CGRect(x: 20, y: 30 + CGFloat($0) * 20, width: 300, height: 14) }
+        let canvas = CGSize(width: 400, height: 300)
+        let placement = try #require(ScreenshotTranslationLayout.plan(
+            [block(burmese, lines: lines, limits: .init(minX: 20, maxX: 320, maxY: 280, minY: 10))],
+            canvas: canvas
+        ).first)
+        let natural = ScreenshotTranslationLayout.systemMeasure(placement.text, placement.fontSize, placement.weight, nil, nil, []).size.height
+        #expect(natural > 1.9 * placement.fontSize, "这组数据要是后备字体高的文字，才测得出来")
+        #expect((placement.lineHeight ?? 0) >= natural - 0.5, "行高 \(placement.lineHeight ?? 0) 比译文本身的 \(natural) 矮")
+        let ink = try #require(inkRows(of: placement, canvas: canvas))
+        #expect(ink.lowerBound >= placement.frame.minY - 1 && ink.upperBound <= placement.frame.maxY + 1, "字画到了排版范围外面：\(ink) 对 \(placement.frame)")
+    }
+
+    /// 审核第四轮（#12）：单行也要查竖着放不放得下。上下都紧（按钮里）就缩小；只有下面有地方就往下挪、不缩。
+    @Test func singleLineStaysWithinTheVerticalBounds() throws {
+        let burmese = "မြန်မာစာ"
+        let line = CGRect(x: 20, y: 40, width: 60, height: 14)
+        let canvas = CGSize(width: 400, height: 300)
+        func ink(_ placement: ScreenshotTranslationLayout.Placement) throws -> ClosedRange<CGFloat> {
+            try #require(inkRows(of: placement, canvas: canvas))
+        }
+        let tight = ScreenshotTranslationLayout.Limits(minX: 10, maxX: 380, maxY: 57, minY: 37)
+        let squeezed = try #require(ScreenshotTranslationLayout.plan([block(burmese, lines: [line], limits: tight)], canvas: canvas).first)
+        #expect(squeezed.fontSize < 14)
+        let squeezedInk = try ink(squeezed)
+        #expect(squeezedInk.lowerBound >= tight.minY - 1 && squeezedInk.upperBound <= tight.maxY + 1, "墨迹 \(squeezedInk) 伸出了 \(tight.minY)…\(tight.maxY)")
+
+        let roomBelow = ScreenshotTranslationLayout.Limits(minX: 10, maxX: 380, maxY: 120, minY: 40)
+        let shifted = try #require(ScreenshotTranslationLayout.plan([block(burmese, lines: [line], limits: roomBelow)], canvas: canvas).first)
+        #expect(shifted.fontSize == 14)
+        #expect(try ink(shifted).lowerBound >= roomBelow.minY - 1)
     }
 
     @Test func paragraphShrinksWhenTheSpaceBelowIsTaken() throws {
@@ -390,6 +457,44 @@ struct ScreenshotTranslationRendererTests {
         let source = try #require(blocks.first { $0.text.hasPrefix("Upgrade") })
         #expect(abs(rect(of: drawn, in: shot.pointSize).midX - rect(of: source, in: shot.pointSize).midX) < 2)
         #expect(abs(rect(of: drawn, in: shot.pointSize).midX - button.midX) < 2)
+    }
+
+    /// 审核第四轮（#12）：按钮里的字译成缅甸文（15pt 时墨迹 22pt，「Continue」只有 12pt），紧凑的按钮（20pt 高）
+    /// 装得下原文、装不下原字号的缅甸文：要缩小，不能伸出按钮的上下沿。
+    @Test func tallScriptTranslationStaysInsideTheButton() async throws {
+        let button = CGRect(x: 30, y: 20, width: 180, height: 20)
+        let shot = scene(width: 320, height: 80) {
+            NSColor.white.setFill()
+            NSRect(x: 0, y: 0, width: 320, height: 80).fill()
+            NSColor.systemBlue.setFill()
+            NSBezierPath(roundedRect: button, xRadius: 8, yRadius: 8).fill()
+            let width = NSAttributedString(string: "Continue", attributes: [.font: NSFont.systemFont(ofSize: 15, weight: .semibold)]).size().width
+            let height = NSAttributedString(string: "Continue", attributes: [.font: NSFont.systemFont(ofSize: 15, weight: .semibold)]).size().height
+            text("Continue", at: CGPoint(x: button.midX - width / 2, y: button.midY - height / 2), size: 15, color: .white, weight: .semibold)
+        }
+        let blocks = await recognize(shot)
+        let output = try render(shot, blocks, ["Continue": "ဆက်လုပ်ပါ"])
+        #expect(try maxDifference(shot.cgImage, output, in: CGRect(x: 0, y: 0, width: 320, height: button.minY - 1)) == 0, "伸出了按钮上沿")
+        #expect(try maxDifference(shot.cgImage, output, in: CGRect(x: 0, y: button.maxY + 1, width: 320, height: 80 - button.maxY - 1)) == 0, "伸出了按钮下沿")
+        #expect(try maxDifference(shot.cgImage, output, in: button.insetBy(dx: 20, dy: 4)) > 0, "按钮里的字没画")
+    }
+
+    /// 白字蓝按钮放在白底上：按钮外面的白底和字同色，量墨迹上下边时不能当成字，不然矮按钮上的字号会量大。
+    @Test func whiteTextOnACompactButtonIsMeasuredInsideTheButton() async throws {
+        let button = CGRect(x: 30, y: 20, width: 180, height: 20)
+        let shot = scene(width: 320, height: 80) {
+            NSColor.white.setFill()
+            NSRect(x: 0, y: 0, width: 320, height: 80).fill()
+            NSColor.systemBlue.setFill()
+            NSBezierPath(roundedRect: button, xRadius: 8, yRadius: 8).fill()
+            let string = NSAttributedString(string: "Continue", attributes: [.font: NSFont.systemFont(ofSize: 15, weight: .semibold)])
+            text("Continue", at: CGPoint(x: button.midX - string.size().width / 2, y: button.midY - string.size().height / 2), size: 15, color: .white, weight: .semibold)
+        }
+        let block = try #require(await recognize(shot).first)
+        let style = ScreenshotTranslationRenderer.measureStyle(of: block, in: try #require(PixelBuffer(image: shot.cgImage)), scale: 2)
+        #expect(abs(style.fontSize - 15) / 15 < 0.05, "量成了 \(style.fontSize)pt")
+        #expect(style.lines[0].minY >= button.minY && style.lines[0].maxY <= button.maxY, "墨迹带 \(style.lines[0]) 伸出了按钮")
+        #expect(style.weight != .regular)
     }
 
     @Test func longTranslationStopsBeforeTheSwitchOnTheRight() async throws {
