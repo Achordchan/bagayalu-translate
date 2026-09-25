@@ -285,9 +285,8 @@ struct ScreenshotTranslationRendererTests {
         var pointSize: CGSize { image.size }
     }
 
-    /// 在 2 倍位图里画一张合成截图，左上原点、单位 pt。
-    private func scene(width: CGFloat, height: CGFloat, draw: () -> Void) -> Scene {
-        let scale: CGFloat = 2
+    /// 在位图里画一张合成截图（默认 2 倍），左上原点、单位 pt。
+    private func scene(width: CGFloat, height: CGFloat, scale: CGFloat = 2, draw: () -> Void) -> Scene {
         let context = CGContext(
             data: nil,
             width: Int(width * scale),
@@ -717,6 +716,80 @@ struct ScreenshotTranslationRendererTests {
 
         let placements = ScreenshotTranslationLayout.plan(layout, canvas: shot.pointSize)
         #expect(!collides(placements[0], placements[1]))
+    }
+
+    /// 审核第五轮（#12）：单个汉字「工」「王」的一横能占满文字框，不能当成按钮外面的底色——墨迹带要盖住整个字，
+    /// 抹字才抹得干净。
+    @Test func singleCharacterWithAWideStrokeIsErasedCompletely() async throws {
+        for character in ["工", "王"] {
+            let origin = CGPoint(x: 40, y: 20)
+            let shot = scene(width: 200, height: 70) {
+                NSColor.white.setFill()
+                NSRect(x: 0, y: 0, width: 200, height: 70).fill()
+                text(character, at: origin, size: 24)
+            }
+            // 真正的字形范围：原图上深色像素的上下左右。
+            let original = try #require(PixelBuffer(image: shot.cgImage))
+            var rows: [Int] = [], columns: [Int] = []
+            for y in 0..<original.height {
+                for x in 0..<original.width where original.pixel(x, y).r < 160 {
+                    rows.append(y)
+                    columns.append(x)
+                }
+            }
+            let glyph = CGRect(
+                x: CGFloat(columns.min()!) / 2, y: CGFloat(rows.min()!) / 2,
+                width: CGFloat(columns.max()! - columns.min()! + 1) / 2, height: CGFloat(rows.max()! - rows.min()! + 1) / 2
+            )
+
+            let blocks = await recognize(shot)
+            let block = try #require(blocks.first { $0.text == character }, "\(character) 没认出来：\(blocks.map(\.text))")
+            let style = ScreenshotTranslationRenderer.measureStyle(of: block, in: original, scale: 2)
+            #expect(style.lines[0].minY <= glyph.minY + 0.5 && style.lines[0].maxY >= glyph.maxY - 0.5, "\(character) 的墨迹带 \(style.lines[0]) 没盖住整个字 \(glyph)")
+
+            // 译成一个很小的「.」：除了新画的那一点，原来字的地方一个深色像素都不该剩。
+            let output = try #require(ScreenshotTranslationRenderer.render(.init(
+                image: shot.cgImage, pointSize: shot.pointSize, blocks: [block], translations: [block.id: "."]
+            )))
+            let rendered = try #require(PixelBuffer(image: output))
+            let dot = try #require(ScreenshotTranslationLayout.plan([ScreenshotTranslationLayout.Block(
+                id: block.id, text: ".", lines: style.lines, fontSize: style.fontSize, weight: style.weight,
+                alignment: style.alignment, limits: style.limits, obstacles: style.obstacles
+            )], canvas: shot.pointSize).first).frame
+            var leftover = 0
+            for y in Int(glyph.minY * 2)...Int(glyph.maxY * 2) {
+                for x in Int(glyph.minX * 2)...Int(glyph.maxX * 2) where rendered.pixel(x, y).r < 160 && !dot.contains(CGPoint(x: CGFloat(x) / 2, y: CGFloat(y) / 2)) {
+                    leftover += 1
+                }
+            }
+            #expect(leftover == 0, "\(character) 还剩 \(leftover) 个深色像素没抹掉")
+        }
+    }
+
+    /// 审核第五轮（#12）：1 倍屏上字后面紧贴着（两个像素）一条 1 像素的竖分隔线，扫描起点跳过了它；
+    /// 长译文不能越过分隔线伸进隔壁的单元格。
+    @Test func dividerRightAfterTheTextStopsTheTranslation() async throws {
+        let font = NSFont.systemFont(ofSize: 14)
+        let origin = CGPoint(x: 20, y: 12)
+        let inkMaxX = origin.x + CTLineGetBoundsWithOptions(
+            CTLineCreateWithAttributedString(NSAttributedString(string: "Install", attributes: [.font: font])), .useGlyphPathBounds
+        ).maxX
+        let divider = CGRect(x: ceil(inkMaxX) + 2, y: 2, width: 1, height: 36)
+        let shot = scene(width: 360, height: 40, scale: 1) {
+            NSColor.white.setFill()
+            NSRect(x: 0, y: 0, width: 360, height: 40).fill()
+            text("Install", at: origin, size: 14)
+            NSColor(white: 0.8, alpha: 1).setFill()
+            divider.fill()
+        }
+        let block = try #require(await recognize(shot).first { $0.text.hasPrefix("Install") })
+        let style = ScreenshotTranslationRenderer.measureStyle(of: block, in: try #require(PixelBuffer(image: shot.cgImage)), scale: 1)
+        #expect(style.limits.maxX <= divider.minX, "越过了分隔线：能长到 \(style.limits.maxX)，分隔线在 \(divider.minX)")
+        let placement = try #require(ScreenshotTranslationLayout.plan([ScreenshotTranslationLayout.Block(
+            id: block.id, text: "安装并重新启动应用程序", lines: style.lines, fontSize: style.fontSize, weight: style.weight,
+            alignment: style.alignment, limits: style.limits, obstacles: style.obstacles
+        )], canvas: shot.pointSize).first)
+        #expect(placement.frame.maxX <= divider.minX + 0.5)
     }
 
     @Test func renderingWithoutChangesReturnsTheOriginalImage() async throws {

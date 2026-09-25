@@ -208,8 +208,23 @@ enum ScreenshotTranslationRenderer {
             let box = boxes[0]
             let rows = pixels.clampedRows(Int(box.midY - 0.6 * em)...Int(box.midY + 0.6 * em))
             let reach = Int(40 * em)
-            let right = pixels.scanColumns(from: Int((box.maxX + clearance).rounded(.up)) + 2, step: 1, limit: reach, rows: rows, background: background, noise: noise)
-            let left = pixels.scanColumns(from: Int((box.minX - clearance).rounded(.down)) - 3, step: -1, limit: reach, rows: rows, background: background, noise: noise)
+            let rightStart = Int((box.maxX + clearance).rounded(.up)) + 2
+            let leftStart = Int((box.minX - clearance).rounded(.down)) - 3
+            var right = pixels.scanColumns(from: rightStart, step: 1, limit: reach, rows: rows, background: background, noise: noise)
+            var left = pixels.scanColumns(from: leftStart, step: -1, limit: reach, rows: rows, background: background, noise: noise)
+            // 起点前面跳过的那一小段留白里，紧挨着字的分隔线（1 倍屏上离字一两个像素）。
+            let band = (top: Int(bands[0].top), bottom: Int(bands[0].bottom))
+            let probe = max(3, Int(0.35 * em))
+            let above = band.top - 2 - probe >= 0 ? (band.top - 2 - probe)...(band.top - 2) : nil
+            let below = band.bottom + 1 + probe < pixels.height ? (band.bottom + 1)...(band.bottom + 1 + probe) : nil
+            if Int(box.maxX) < rightStart,
+               let x = pixels.dividerColumn(in: Array(Int(box.maxX)..<rightStart), above: above, below: below, background: background, noise: noise) {
+                right = (x, true)
+            }
+            if leftStart + 1 < Int(box.minX),
+               let x = pixels.dividerColumn(in: Array(((leftStart + 1)..<Int(box.minX)).reversed()), above: above, below: below, background: background, noise: noise) {
+                left = (x, true)
+            }
             let margin = 0.3 * em
             maxX = max(box.maxX, CGFloat(right.stop) - margin)
             minX = min(box.minX, CGFloat(left.stop + 1) + margin)
@@ -264,25 +279,43 @@ enum ScreenshotTranslationRenderer {
         // 只有少数竖条早早碰到的（段落右下角的图标），当成绕开的地方，不让它把整段都挡住。
         let columns = pixels.clampedColumns(Int(minX)...Int(maxX))
         let startRow = Int((bounds.maxY + clearance).rounded(.up)) + 2
+        // 起点上面跳过的那几行里，紧挨着字的横分隔线：在字的左右两头都连着才算。
+        let sideProbe = max(3, Int(0.35 * em))
+        let leftSide = Int(bounds.minX) - 2 - sideProbe >= 0 ? (Int(bounds.minX) - 2 - sideProbe)...(Int(bounds.minX) - 2) : nil
+        let rightSide = Int(bounds.maxX) + 1 + sideProbe < pixels.width ? (Int(bounds.maxX) + 1)...(Int(bounds.maxX) + 1 + sideProbe) : nil
+        let dividerBelow = Int(bounds.maxY) < startRow
+            ? pixels.dividerRow(in: Array(Int(bounds.maxY)..<startRow), left: leftSide, right: rightSide, background: background, noise: noise)
+            : nil
         let stripe = max(4, Int(2 * em))
         let stripes = stride(from: columns.lowerBound, through: columns.upperBound, by: stripe).map { x -> (columns: ClosedRange<Int>, stop: Int, hitEdge: Bool) in
             let range = x...min(columns.upperBound, x + stripe - 1)
             let scan = pixels.scanRows(from: startRow, step: 1, limit: Int(20 * em), columns: range, background: background, noise: noise)
             return (range, scan.stop, scan.hitEdge)
         }
-        let floorStripe = stripes.sorted { $0.stop < $1.stop }[stripes.count / 2]
+        var floorStripe = stripes.sorted { $0.stop < $1.stop }[stripes.count / 2]
+        if let row = dividerBelow {
+            floorStripe = (columns, row, true)
+        }
         let gapBelow = CGFloat(floorStripe.stop) - bounds.maxY
         let maxY = floorStripe.hitEdge
             ? max(bounds.maxY, CGFloat(floorStripe.stop) - max(0.3 * em, 0.5 * gapBelow))
             : min(CGFloat(pixels.height) - 0.2 * em, CGFloat(floorStripe.stop))
         // 往上：第一行上面紧挨着的东西（上一段、按钮的上沿、选区边）。段落不往上长，
         // 这里只用来别让字身高的译文（缅甸文、高棉文）越过去。
-        let above = pixels.scanRows(from: Int((bounds.minY - clearance).rounded(.down)) - 3, step: -1, limit: Int(3 * em), columns: columns, background: background, noise: noise)
-        let minY = above.hitEdge
-            ? min(bounds.minY, CGFloat(above.stop + 1) + 0.1 * em)
-            : max(0, CGFloat(above.stop + 1))
+        let aboveStart = Int((bounds.minY - clearance).rounded(.down)) - 3
+        var aboveScan = pixels.scanRows(from: aboveStart, step: -1, limit: Int(3 * em), columns: columns, background: background, noise: noise)
+        if aboveStart + 1 < Int(bounds.minY),
+           let row = pixels.dividerRow(in: Array(((aboveStart + 1)..<Int(bounds.minY)).reversed()), left: leftSide, right: rightSide, background: background, noise: noise) {
+            aboveScan = (row, true)
+        }
+        let minY = aboveScan.hitEdge
+            ? min(bounds.minY, CGFloat(aboveScan.stop + 1) + 0.1 * em)
+            : max(0, CGFloat(aboveScan.stop + 1))
         // 原来这一行的字身往下最多到哪：下面最近的边（任何一条竖条碰到的最高处），只留 0.1 个字宽。
-        let nearestBelow = stripes.min { $0.stop < $1.stop }!
+        var nearestBelow = stripes.min { $0.stop < $1.stop }!
+        if let row = dividerBelow, row < nearestBelow.stop {
+            nearestBelow = (columns, row, true)
+        }
         let bodyMaxY = nearestBelow.hitEdge
             ? max(bounds.maxY, CGFloat(nearestBelow.stop) - 0.1 * em)
             : min(CGFloat(pixels.height), CGFloat(nearestBelow.stop))
@@ -563,8 +596,12 @@ struct PixelBuffer {
         let searchBottom = min(height - 1, Int(min(rect.maxY + 0.35 * em, center + 0.75 * em)))
         guard x1 > x0, searchBottom > searchTop else { return fallback }
 
+        // 「整行同色」要看得比文字框宽：左右各放宽一个字宽，几乎整行都是墨迹色的才是和字同色的一整块
+        // （白字按钮外面的白底，一整片）；字的笔画不会伸到字外面，「工」「王」的一横占满文字框也照样算字。
+        let wideX0 = max(0, Int(rect.minX - em)), wideX1 = min(width - 1, Int(rect.maxX + em))
         var counts: [Int] = []
         var runs: [Int] = []
+        var solidRows: [Bool] = []
         for y in searchTop...searchBottom {
             var count = 0, runCount = 0, inside = false
             for x in x0...x1 {
@@ -575,14 +612,18 @@ struct PixelBuffer {
                 }
                 inside = isInk
             }
+            var wide = count
+            for x in wideX0..<x0 where pixel(x, y).squaredDistance(to: background) >= threshold { wide += 1 }
+            if x1 < wideX1 {
+                for x in (x1 + 1)...wideX1 where pixel(x, y).squaredDistance(to: background) >= threshold { wide += 1 }
+            }
             counts.append(count)
             runs.append(runCount)
+            solidRows.append(Double(wide) >= 0.85 * Double(wideX1 - wideX0 + 1))
         }
         let minimum = max(1, (x1 - x0) / 250)
-        // 几乎整行都是「墨迹色」的，不是字，是和字同色的一整块——白字按钮外面的白底。碰到就停，
-        // 不然矮按钮上的白字，墨迹带会一直伸到按钮外面，字宽、字号跟着量错。
-        let solid = Int(0.85 * Double(x1 - x0 + 1))
-        func isInk(_ row: Int) -> Bool { counts[row] >= minimum && counts[row] < solid }
+        // 碰到和字同色的一整块就停，不然矮按钮上的白字，墨迹带会一直伸到按钮外面，字宽、字号跟着量错。
+        func isInk(_ row: Int) -> Bool { counts[row] >= minimum && !solidRows[row] }
         let centerRow = Int(center) - searchTop
         guard let start = counts.indices
             .filter(isInk)
@@ -593,13 +634,13 @@ struct PixelBuffer {
         let maxGap = max(2, Int(0.2 * em))
         var top = start, bottom = start, gap = 0
         var row = start - 1
-        while row >= 0, counts[row] < solid {
+        while row >= 0, !solidRows[row] {
             if isInk(row) { top = row; gap = 0 } else { gap += 1; if gap > maxGap { break } }
             row -= 1
         }
         gap = 0
         row = start + 1
-        while row < counts.count, counts[row] < solid {
+        while row < counts.count, !solidRows[row] {
             if isInk(row) { bottom = row; gap = 0 } else { gap += 1; if gap > maxGap { break } }
             row += 1
         }
@@ -655,6 +696,30 @@ struct PixelBuffer {
             x += step
         }
         return (x, false)
+    }
+
+    /// 扫描跳过的那一小段留白（墨迹和扫描起点之间）里，有没有紧挨着字的分隔线。分隔线是一整条，在字的上方和下方
+    /// （`above`/`below`，不含贴着字的那一两行）都连着；字自己的抗锯齿只贴在笔画边上，不会伸到字外面。
+    /// `candidates` 按离字由近到远排，返回最近的那一列。
+    func dividerColumn(in candidates: [Int], above: ClosedRange<Int>?, below: ClosedRange<Int>?, background: RGB, noise: Double) -> Int? {
+        let differs = Int(pow(max(12, 4.5 * noise), 2))
+        func continuous(_ x: Int, _ rows: ClosedRange<Int>?) -> Bool {
+            guard let rows else { return false }
+            let hits = rows.filter { pixel(x, $0).squaredDistance(to: background) > differs }.count
+            return hits * 4 >= rows.count * 3
+        }
+        return candidates.first { continuous($0, above) && continuous($0, below) }
+    }
+
+    /// 同 `dividerColumn`，横着的分隔线：在字的左边和右边都连着。
+    func dividerRow(in candidates: [Int], left: ClosedRange<Int>?, right: ClosedRange<Int>?, background: RGB, noise: Double) -> Int? {
+        let differs = Int(pow(max(12, 4.5 * noise), 2))
+        func continuous(_ y: Int, _ columns: ClosedRange<Int>?) -> Bool {
+            guard let columns else { return false }
+            let hits = columns.filter { pixel($0, y).squaredDistance(to: background) > differs }.count
+            return hits * 4 >= columns.count * 3
+        }
+        return candidates.first { continuous($0, left) && continuous($0, right) }
     }
 
     /// 从第 `start` 行往下，找第一处连续三行都「没东西」（按 `scanRows` 的标准）的地方，也就是障碍的下沿。
