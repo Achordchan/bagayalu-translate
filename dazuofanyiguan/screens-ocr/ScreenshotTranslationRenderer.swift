@@ -342,7 +342,9 @@ enum ScreenshotTranslationRenderer {
         }
 
         // 抹字的范围：各行墨迹外扩一点，盖住抗锯齿的边，但不越过旁边的东西——紧贴着的分隔线（上下连着的一整条），
-        // 隔着一列干净背景之后才出现的颜色（字的抗锯齿是贴着笔画的），首行上面、末行下面量到的边，相邻两行的中线。
+        // 隔着一列干净背景之后才出现的颜色（字的抗锯齿是贴着笔画的），首行上面、末行下面量到的边。
+        // 只削外扩的那一圈，墨迹带本身整条照抹：行距紧时相邻两行的墨迹带会叠在一起（各自扩进了对方），
+        // 按两行的中线分开抹会削进上一行自己的字，它比下一行长出来的那一截就漏抹了。段落里相邻两行本来都要抹，不用互相让。
         let horizontalPad = 0.12 * em, verticalPad = max(1, 0.08 * em)
         let topLimit = aboveScan.hitEdge ? CGFloat(aboveScan.stop + 1) : 0
         let bottomLimit = nearestBelow.hitEdge ? CGFloat(nearestBelow.stop) : CGFloat(pixels.height)
@@ -363,10 +365,9 @@ enum ScreenshotTranslationRenderer {
                 ?? pixels.separatedContentColumn(in: leftZone, rows: rows, background: background, noise: noise) {
                 minX = max(minX, CGFloat(x + 1))
             }
-            var minY = line.minY - verticalPad, maxY = line.maxY + verticalPad
-            minY = max(minY, index == 0 ? topLimit : (lines[index - 1].maxY + line.minY) / 2)
-            maxY = min(maxY, index == lines.count - 1 ? bottomLimit : (line.maxY + lines[index + 1].minY) / 2)
-            return CGRect(x: minX, y: minY, width: max(1, maxX - minX), height: max(1, maxY - minY))
+            let minY = index == 0 ? max(line.minY - verticalPad, topLimit) : line.minY - verticalPad
+            let maxY = index == lines.count - 1 ? min(line.maxY + verticalPad, bottomLimit) : line.maxY + verticalPad
+            return CGRect(x: minX, y: minY, width: max(0, maxX - minX), height: max(0, maxY - minY)).union(line)
         }
 
         return MeasuredStyle(

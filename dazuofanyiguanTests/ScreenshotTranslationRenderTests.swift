@@ -844,6 +844,49 @@ struct ScreenshotTranslationRendererTests {
         #expect(try maxDifference(shot.cgImage, output, in: CGRect(x: origin.x, y: origin.y, width: divider.minX - origin.x - 1, height: 30)) > 0, "原文没换掉")
     }
 
+    /// 审核第六轮后自查（#12）：行距紧、第二行的行框往上伸进第一行（Vision 的行框会忽高忽低）时，两行的墨迹带
+    /// 叠在一起（各自扩进了对方）。按两行中线分开抹会削进第一行自己的字，它比第二行长出来的那一截，字的下沿漏抹。
+    @Test func tightParagraphLinesAreErasedCompletely() throws {
+        let font = NSFont.systemFont(ofSize: 14)
+        let size = CGSize(width: 300, height: 60)
+        func width(_ string: String) -> CGFloat { NSAttributedString(string: string, attributes: [.font: font]).size().width }
+        func normalized(_ rect: CGRect) -> CGRect {
+            CGRect(x: rect.minX / size.width, y: 1 - rect.maxY / size.height, width: rect.width / size.width, height: rect.height / size.height)
+        }
+        let white = PixelBuffer.RGB(r: 255, g: 255, b: 255)
+        for (first, second, pitch) in [("gypqgypqgypqgypqgypqgypq", "ÂÊÎÔ", CGFloat(14)), ("排版引擎在紧凑的段落里测量墨迹带", "中文短行", 15)] {
+            let shot = scene(width: size.width, height: size.height) {
+                NSColor.white.setFill()
+                NSRect(origin: .zero, size: size).fill()
+                text(first, at: CGPoint(x: 10, y: 8), size: 14)
+                text(second, at: CGPoint(x: 10, y: 8 + pitch), size: 14)
+            }
+            let block = VisionOCRService.OCRBlock(text: first + second, lines: [
+                .init(text: first, boundingBox: normalized(CGRect(x: 10, y: 9.5, width: width(first), height: 13.7))),
+                .init(text: second, boundingBox: normalized(CGRect(x: 10, y: 4.5 + pitch, width: width(second), height: 18.7)))
+            ])
+            let style = ScreenshotTranslationRenderer.measureStyle(of: block, in: try #require(PixelBuffer(image: shot.cgImage)), scale: 2)
+            #expect(style.lines[0].maxY > style.lines[1].minY, "\(first)：两行的墨迹带没叠在一起，场景没搭对")
+            for (line, erase) in zip(style.lines, style.eraseRects) {
+                #expect(erase.contains(line), "\(first)：抹字范围 \(erase) 没盖住墨迹带 \(line)")
+            }
+
+            let output = try #require(ScreenshotTranslationRenderer.render(.init(
+                image: shot.cgImage, pointSize: size, blocks: [block], translations: [block.id: "短句"]
+            )))
+            let rendered = try #require(PixelBuffer(image: output))
+            // 第一行比第二行长出来的那一截（新画的「短句」在最左边，不在这里）：原来的字一个深色像素都不剩。
+            let region = CGRect(x: style.lines[1].maxX + 20, y: 4, width: style.lines[0].maxX - style.lines[1].maxX - 20, height: 40)
+            var dark = 0
+            for y in Int(region.minY * 2)..<Int(region.maxY * 2) {
+                for x in Int(region.minX * 2)..<Int(region.maxX * 2) where rendered.pixel(x, y).squaredDistance(to: white) > 900 {
+                    dark += 1
+                }
+            }
+            #expect(dark == 0, "\(first)：第一行长出来的那一截还剩 \(dark) 个深色像素没抹掉")
+        }
+    }
+
     @Test func renderingWithoutChangesReturnsTheOriginalImage() async throws {
         let shot = scene(SyntheticScreenshot(name: "", width: 300, height: 60, texts: [SyntheticText(text: "Hello world", x: 20, y: 20, size: 14)]))
         let blocks = await recognize(shot)
