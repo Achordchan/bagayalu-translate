@@ -8,8 +8,9 @@ import AppKit
 /// - 译文只往空白处延伸，能延伸到哪由渲染器看像素定（`Limits`：碰到别的文字、图标、分隔线、色块边缘为止）。
 /// - 单行：尽量一行放下，放不下先往空白处延伸、再小幅缩小（最多到 82%），然后折行往下占空白，
 ///   还不行就继续缩小（最多到 70%），最后截断。居中的（按钮、表格里居中的字）以原来的中心为准左右对称地延伸。
-/// - 多行段落：在原段落的宽度里重排，行距跟原文，第一行和原文第一行对齐；放不下先往下占空白，
-///   再缩小（最多到 62%），最后截断。完整译文在「对照」里看。
+/// - 多行段落：在原段落的宽度里重排，行距跟原文，第一行和原文第一行对齐；段落外框里、短行旁边的图标或别的标签
+///   （`Block.obstacles`）绕开排。放不下先往下占空白，再缩小（最多到 62%），最后截断。完整译文在「对照」里看。
+/// - 最小字号不超过原字号：原文本来就很小（缩小的网页截图）时，宁可截断也不把字放大。
 /// - 只抹原文所在的地方：译文延伸出去的地方本来就是空白，不动它，按钮、卡片的边也就不会被抹掉。
 /// - 每段能延伸到哪是各自从原图量的，两段可能看中同一块空白（并排的两个居中标签都往中间长）。
 ///   排完再两两查，撞上了就把中间的空白分开重排，直到谁也不压着谁。
@@ -24,7 +25,9 @@ enum ScreenshotTranslationLayout {
         let weight: NSFont.Weight
         let alignment: NSTextAlignment
         /// 译文最多能占到哪。
-        let limits: Limits
+        var limits: Limits
+        /// 要绕开的地方（pt，选区坐标）：段落外框里短行旁边的图标、别的标签，往下长时挡在一部分宽度上的东西。
+        var obstacles: [CGRect] = []
 
         var bounds: CGRect {
             guard let first = lines.first else { return .zero }
@@ -39,7 +42,9 @@ enum ScreenshotTranslationLayout {
         }
 
         func with(limits: Limits) -> Block {
-            Block(id: id, text: text, lines: lines, fontSize: fontSize, weight: weight, alignment: alignment, limits: limits)
+            var block = self
+            block.limits = limits
+            return block
         }
     }
 
@@ -61,10 +66,21 @@ enum ScreenshotTranslationLayout {
         let weight: NSFont.Weight
         /// 要抹掉的范围：原文各行（各自外扩一点，盖住抗锯齿的边）。
         let eraseRects: [CGRect]
+        /// 排字时要绕开的地方，相对 `frame` 左上角。
+        var exclusions: [CGRect] = []
+        /// 放不下、要截断时最多排几行（末行加省略号）；0 表示不限。
+        var maximumLines = 0
     }
 
-    /// 量一段文字排出来的大小：`width` 为 nil 时不折行。
-    typealias Measure = (_ text: String, _ fontSize: CGFloat, _ weight: NSFont.Weight, _ width: CGFloat?, _ lineHeight: CGFloat?) -> CGSize
+    /// 量一段文字排出来的大小：`width` 为 nil 时不折行；`exclusions` 是要绕开的地方，相对文字左上角。
+    typealias Measure = (
+        _ text: String,
+        _ fontSize: CGFloat,
+        _ weight: NSFont.Weight,
+        _ width: CGFloat?,
+        _ lineHeight: CGFloat?,
+        _ exclusions: [CGRect]
+    ) -> CGSize
 
     /// 相近的字号（相差 12% 以内）归成一档、取中位数：Vision 的行框和字符宽度都有抖动，
     /// 不归档的话同一列表里的几行会译成大小不一的字。
@@ -170,7 +186,14 @@ enum ScreenshotTranslationLayout {
             line.insetBy(dx: -0.12 * size, dy: -max(0.5, 0.08 * size))
                 .intersection(CGRect(origin: .zero, size: canvas))
         }
-        func placement(_ frame: CGRect, _ fontSize: CGFloat, lineHeight: CGFloat?, alignment: NSTextAlignment) -> Placement {
+        func placement(
+            _ frame: CGRect,
+            _ fontSize: CGFloat,
+            lineHeight: CGFloat?,
+            alignment: NSTextAlignment,
+            exclusions: [CGRect] = [],
+            maximumLines: Int = 0
+        ) -> Placement {
             Placement(
                 id: block.id,
                 text: block.text,
@@ -179,12 +202,17 @@ enum ScreenshotTranslationLayout {
                 lineHeight: lineHeight,
                 alignment: alignment,
                 weight: block.weight,
-                eraseRects: erase
+                eraseRects: erase,
+                exclusions: exclusions,
+                maximumLines: maximumLines
             )
         }
-        let wrapFloor = max(8, size * 0.7)
+        // 缩小的下限不低于 8pt，但也不高于原字号：原文本来就很小时，宁可截断也不放大。
+        func shrinkFloor(_ ratio: CGFloat) -> CGFloat { min(size, max(8, size * ratio)) }
+        let singleLineFloor = shrinkFloor(0.82)
+        let wrapFloor = shrinkFloor(0.7)
         // 段落宁可再小一点也别截断：截掉的是整句话，单行截掉的多半只是个尾巴。
-        let paragraphFloor = max(8, size * 0.62)
+        let paragraphFloor = shrinkFloor(0.62)
 
         if block.lines.count == 1 {
             let line = block.lines[0]
@@ -202,7 +230,7 @@ enum ScreenshotTranslationLayout {
             let maxWidth = max(line.width, span.maxX - span.minX)
 
             func singleLine(_ fontSize: CGFloat, width: CGFloat) -> CGRect {
-                let height = measure("Ag字", fontSize, block.weight, nil, nil).height
+                let height = measure("Ag字", fontSize, block.weight, nil, nil, []).height
                 let x: CGFloat
                 switch block.alignment {
                 case .center: x = line.midX - width / 2
@@ -213,30 +241,30 @@ enum ScreenshotTranslationLayout {
             }
 
             // 1. 一行放下，最多缩到 82%。
-            for fontSize in sizes(from: size, downTo: max(8, size * 0.82)) {
-                let natural = measure(block.text, fontSize, block.weight, nil, nil)
+            for fontSize in sizes(from: size, downTo: singleLineFloor) {
+                let natural = measure(block.text, fontSize, block.weight, nil, nil, [])
                 if natural.width <= maxWidth {
                     return placement(singleLine(fontSize, width: natural.width + 1), fontSize, lineHeight: nil, alignment: block.alignment)
                 }
             }
-            // 2. 折行往下占空白，最多缩到 70%。
+            // 2. 折行往下占空白（绕开下面零星的东西），最多缩到 70%。
             for fontSize in sizes(from: size, downTo: wrapFloor) {
                 let first = singleLine(fontSize, width: maxWidth)
-                let height = measure(block.text, fontSize, block.weight, maxWidth, nil).height
+                let local = block.obstacles.map { $0.offsetBy(dx: -first.minX, dy: -first.minY) }
+                let height = measure(block.text, fontSize, block.weight, maxWidth, nil, local).height
                 if first.minY + height <= limits.maxY {
                     let frame = CGRect(x: first.minX, y: first.minY, width: maxWidth, height: height)
-                    return placement(frame, fontSize, lineHeight: nil, alignment: block.alignment)
+                    return placement(frame, fontSize, lineHeight: nil, alignment: block.alignment, exclusions: local)
                 }
             }
             // 3. 一行、缩到 70%，放不下截断。
-            for fontSize in sizes(from: max(8, size * 0.82), downTo: wrapFloor) {
-                let natural = measure(block.text, fontSize, block.weight, nil, nil)
-                if natural.width <= maxWidth || fontSize <= wrapFloor + 0.001 {
-                    let width = min(natural.width + 1, maxWidth)
-                    return placement(singleLine(fontSize, width: width), fontSize, lineHeight: nil, alignment: block.alignment)
+            for fontSize in sizes(from: singleLineFloor, downTo: wrapFloor) {
+                let natural = measure(block.text, fontSize, block.weight, nil, nil, [])
+                if natural.width <= maxWidth {
+                    return placement(singleLine(fontSize, width: natural.width + 1), fontSize, lineHeight: nil, alignment: block.alignment)
                 }
             }
-            return placement(singleLine(wrapFloor, width: maxWidth), wrapFloor, lineHeight: nil, alignment: block.alignment)
+            return placement(singleLine(wrapFloor, width: maxWidth), wrapFloor, lineHeight: nil, alignment: block.alignment, maximumLines: 1)
         }
 
         // 多行段落：在原宽度里重排，行距跟原文。
@@ -245,24 +273,40 @@ enum ScreenshotTranslationLayout {
         func lineHeight(for fontSize: CGFloat) -> CGFloat {
             min(max(pitch * fontSize / size, 1.12 * fontSize), 1.9 * fontSize)
         }
+        // TextKit 按整个行框（连上下的行距）判断碰没碰到绕开的地方，字身只占中间一截。先把绕开的地方
+        // 上下各收进行距多出来的那一半，等于拿字身去比：擦着行距的障碍不会把一整行劈成两截，
+        // 整个落在两行之间空当里的就不用绕。
+        func exclusions(top: CGFloat, fontSize: CGFloat) -> [CGRect] {
+            let natural = measure("Ag字", fontSize, block.weight, nil, nil, []).height
+            let inset = max(0, (lineHeight(for: fontSize) - natural) / 2)
+            return block.obstacles
+                .map { $0.insetBy(dx: 0, dy: inset).offsetBy(dx: -bounds.minX, dy: -top) }
+                .filter { !$0.isNull && $0.height > 0 }
+        }
         for fontSize in sizes(from: size, downTo: paragraphFloor) {
-            let height = measure(block.text, fontSize, block.weight, width, lineHeight(for: fontSize)).height
             let top = block.lines[0].midY - lineHeight(for: fontSize) / 2
+            let local = exclusions(top: top, fontSize: fontSize)
+            let height = measure(block.text, fontSize, block.weight, width, lineHeight(for: fontSize), local).height
             if top + height <= limits.maxY {
                 return placement(
                     CGRect(x: bounds.minX, y: top, width: width, height: height),
                     fontSize,
                     lineHeight: lineHeight(for: fontSize),
-                    alignment: block.alignment
+                    alignment: block.alignment,
+                    exclusions: local
                 )
             }
         }
-        let top = block.lines[0].midY - lineHeight(for: paragraphFloor) / 2
+        let lastLineHeight = lineHeight(for: paragraphFloor)
+        let top = block.lines[0].midY - lastLineHeight / 2
+        let height = max(lastLineHeight, limits.maxY - top)
         return placement(
-            CGRect(x: bounds.minX, y: top, width: width, height: max(lineHeight(for: paragraphFloor), limits.maxY - top)),
+            CGRect(x: bounds.minX, y: top, width: width, height: height),
             paragraphFloor,
-            lineHeight: lineHeight(for: paragraphFloor),
-            alignment: block.alignment
+            lineHeight: lastLineHeight,
+            alignment: block.alignment,
+            exclusions: exclusions(top: top, fontSize: paragraphFloor),
+            maximumLines: max(1, Int((height + 0.01) / lastLineHeight))
         )
     }
 
@@ -291,16 +335,52 @@ enum ScreenshotTranslationLayout {
         return NSAttributedString(string: text, attributes: attributes)
     }
 
-    static let systemMeasure: Measure = { text, fontSize, weight, width, lineHeight in
+    static let systemMeasure: Measure = { text, fontSize, weight, width, lineHeight, exclusions in
         let string = attributedString(text, fontSize: fontSize, weight: weight, color: .black, alignment: .left, lineHeight: lineHeight)
         guard let width else {
             let size = string.size()
             return CGSize(width: ceil(size.width), height: ceil(size.height))
         }
-        let rect = string.boundingRect(
-            with: CGSize(width: width, height: .greatestFiniteMagnitude),
-            options: [.usesLineFragmentOrigin, .usesFontLeading]
-        )
-        return CGSize(width: ceil(rect.width), height: ceil(rect.height))
+        let used = TextLayout(string, size: CGSize(width: width, height: 100_000), exclusions: exclusions).usedRect
+        return CGSize(width: ceil(used.maxX), height: ceil(used.maxY))
+    }
+
+    /// TextKit 排出来的一段文字。量和画用同一套排法，量出来的才和画出来的一致；绕开区域、末行截断也靠它。
+    /// 可以在后台线程用：头文件要求别的线程访问时关掉后台排版。一个实例只在一个线程里用。
+    final class TextLayout {
+        private let storage: NSTextStorage
+        private let manager = NSLayoutManager()
+        private let container: NSTextContainer
+
+        init(_ string: NSAttributedString, size: CGSize, exclusions: [CGRect] = [], maximumLines: Int = 0) {
+            storage = NSTextStorage(attributedString: string)
+            container = NSTextContainer(size: size)
+            container.lineFragmentPadding = 0
+            container.exclusionPaths = exclusions.map { NSBezierPath(rect: $0) }
+            container.maximumNumberOfLines = maximumLines
+            if maximumLines > 0 {
+                container.lineBreakMode = .byTruncatingTail
+            }
+            manager.backgroundLayoutEnabled = false
+            manager.addTextContainer(container)
+            storage.addLayoutManager(manager)
+            manager.ensureLayout(for: container)
+        }
+
+        var usedRect: CGRect { manager.usedRect(for: container) }
+
+        /// 每一行实际占到的范围（相对左上角）。
+        var lineRects: [CGRect] {
+            var rects: [CGRect] = []
+            manager.enumerateLineFragments(forGlyphRange: manager.glyphRange(for: container)) { _, used, _, _, _ in
+                rects.append(used)
+            }
+            return rects
+        }
+
+        /// 画在当前图形上下文里（要求是翻转的坐标系，左上原点）。
+        func draw(at origin: CGPoint) {
+            manager.drawGlyphs(forGlyphRange: manager.glyphRange(for: container), at: origin)
+        }
     }
 }

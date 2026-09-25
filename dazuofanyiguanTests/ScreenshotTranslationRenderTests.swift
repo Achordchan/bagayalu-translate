@@ -13,7 +13,7 @@ import Testing
 @Suite("截图翻译：回贴排版")
 struct ScreenshotTranslationLayoutTests {
     /// 假的量字：每个字 0.6 个字号宽，行高 1.2 个字号；给了宽度就按宽度折行。
-    private let measure: ScreenshotTranslationLayout.Measure = { text, fontSize, _, width, lineHeight in
+    private let measure: ScreenshotTranslationLayout.Measure = { text, fontSize, _, width, lineHeight, _ in
         let natural = CGFloat(text.count) * 0.6 * fontSize
         let line = lineHeight ?? 1.2 * fontSize
         guard let width else { return CGSize(width: natural, height: line) }
@@ -113,6 +113,38 @@ struct ScreenshotTranslationLayoutTests {
         let placements = ScreenshotTranslationLayout.plan([upper, lower], canvas: CGSize(width: 400, height: 300), measure: measure)
         #expect(placements.count == 2)
         #expect(placements[0].frame.maxY <= placements[1].frame.minY)
+    }
+
+    /// 审核第二轮（#12）：原文比 8pt 还小时，缩小的下限不能反过来把字放大。
+    @Test func tinyTextIsNeverEnlarged() throws {
+        let line = CGRect(x: 20, y: 10, width: 60, height: 6)
+        let fits = try place(block("小字", lines: [line], size: 6, limits: .init(minX: 0, maxX: 300, maxY: 20)))
+        #expect(fits.fontSize == 6)
+        let tooLong = try place(block(String(repeating: "字", count: 80), lines: [line], size: 6, limits: .init(minX: 0, maxX: 90, maxY: 14)))
+        #expect(tooLong.fontSize == 6)
+        #expect(tooLong.maximumLines == 1)
+        let paragraph = try place(block(String(repeating: "字", count: 200), lines: [line, line.offsetBy(dx: 0, dy: 8)], size: 6, limits: .init(minX: 20, maxX: 80, maxY: 30)))
+        #expect(paragraph.fontSize == 6)
+    }
+
+    /// 审核第二轮（#12）：段落外框里、短行旁边的东西要绕开。用真实的 TextKit 排，逐行查有没有压到它。
+    @Test func paragraphFlowsAroundAnObstacleInsideItsBounds() throws {
+        let lines = [CGRect(x: 20, y: 10, width: 300, height: 14), CGRect(x: 20, y: 32, width: 80, height: 14)]
+        let icon = CGRect(x: 140, y: 28, width: 180, height: 22)
+        var paragraph = block(String(repeating: "很长的译文", count: 12), lines: lines, limits: .init(minX: 20, maxX: 320, maxY: 200))
+        paragraph.obstacles = [icon]
+        let placement = try #require(ScreenshotTranslationLayout.plan([paragraph], canvas: CGSize(width: 400, height: 300)).first)
+        #expect(placement.exclusions.count == 1)
+        let string = ScreenshotTranslationLayout.attributedString(
+            placement.text, fontSize: placement.fontSize, weight: placement.weight, color: .black,
+            alignment: placement.alignment, lineHeight: placement.lineHeight
+        )
+        let layout = ScreenshotTranslationLayout.TextLayout(string, size: placement.frame.size, exclusions: placement.exclusions, maximumLines: placement.maximumLines)
+        let drawn = layout.lineRects.map { $0.offsetBy(dx: placement.frame.minX, dy: placement.frame.minY) }
+        #expect(drawn.count >= 3)
+        for rect in drawn {
+            #expect(!rect.insetBy(dx: 0, dy: 0.12 * placement.fontSize).intersects(icon), "\(rect) 压到了 \(icon)")
+        }
     }
 
     @Test func paragraphShrinksWhenTheSpaceBelowIsTaken() throws {
@@ -442,6 +474,53 @@ struct ScreenshotTranslationRendererTests {
         for y in stride(from: Int(row.minY * 2) + 6, to: Int(row.maxY * 2) - 6, by: 1) {
             #expect(rendered.pixel(middle, y).distance(to: .init(r: 255, g: 255, b: 255)) < 30, "中线上 y=\(y) 有字")
         }
+    }
+
+    /// 审核第二轮（#12）：段落第一行长、第二行短，短行旁边有个图标——在段落外框里面。译文变长也不能画到图标上。
+    @Test func translationDoesNotPaintOverAnIconBesideAShortLine() async throws {
+        let first = "Your subscription renews automatically every month and"
+        let font = NSFont.systemFont(ofSize: 14)
+        let secondWidth = NSAttributedString(string: "can be cancelled", attributes: [.font: font]).size().width
+        let icon = CGRect(x: 16 + secondWidth + 40, y: 38, width: 18, height: 18)
+        let shot = scene(width: 460, height: 120) {
+            NSColor.white.setFill()
+            NSRect(x: 0, y: 0, width: 460, height: 120).fill()
+            text(first, at: CGPoint(x: 16, y: 14), size: 14)
+            text("can be cancelled", at: CGPoint(x: 16, y: 38), size: 14)
+            NSColor.systemOrange.setFill()
+            NSBezierPath(ovalIn: icon).fill()
+        }
+        let blocks = await recognize(shot)
+        let paragraph = try #require(blocks.first { $0.text.hasPrefix("Your subscription") })
+        #expect(paragraph.lines.count == 2, "两行要拼成一段，这个用例才测得到段落外框里的空当：\(blocks.map(\.text))")
+        let style = ScreenshotTranslationRenderer.measureStyle(of: paragraph, in: try #require(PixelBuffer(image: shot.cgImage)), scale: 2)
+        #expect(!style.obstacles.isEmpty, "短行旁边的图标没被认成障碍")
+
+        let translation = "你的订阅会每个月自动续费，而且你随时都可以在账户设置里面取消这个订阅，取消之后本期结束前仍然可以继续使用全部功能。"
+        // 下面还有空地方：图标只挡住右边一截，段落照样能往下长，不用把字缩小。
+        let layout = ScreenshotTranslationLayout.Block(
+            id: paragraph.id, text: translation, lines: style.lines, fontSize: style.fontSize, weight: style.weight,
+            alignment: style.alignment, limits: style.limits, obstacles: style.obstacles
+        )
+        let placement = try #require(ScreenshotTranslationLayout.plan([layout], canvas: shot.pointSize).first)
+        #expect(placement.fontSize == style.fontSize, "图标把整段都挡住了，字缩到了 \(placement.fontSize)pt")
+        // 图标只在第二行旁边：没有哪一行被它劈成左右两截。
+        let string = ScreenshotTranslationLayout.attributedString(
+            placement.text, fontSize: placement.fontSize, weight: placement.weight, color: .black,
+            alignment: placement.alignment, lineHeight: placement.lineHeight
+        )
+        let fragments = ScreenshotTranslationLayout.TextLayout(string, size: placement.frame.size, exclusions: placement.exclusions, maximumLines: placement.maximumLines).lineRects
+        #expect(Set(fragments.map { Int($0.minY.rounded()) }).count == fragments.count, "有一行被劈成了两截：\(fragments)")
+
+        // 只绕开图标实际占的那几行：图标下面的地方照样排字，不留一截空。
+        for obstacle in style.obstacles {
+            #expect(obstacle.maxY <= icon.maxY + 0.6 * style.fontSize, "绕开的地方 \(obstacle) 一直伸到了图标下面")
+        }
+
+        let output = try render(shot, blocks, ["Your subscription": translation])
+        #expect(try maxDifference(shot.cgImage, output, in: icon.insetBy(dx: -1, dy: -1)) == 0)
+        // 第一行确实被换掉了（不是整段没画）。
+        #expect(try maxDifference(shot.cgImage, output, in: CGRect(x: 16, y: 14, width: 300, height: 16)) > 0)
     }
 
     @Test func renderingWithoutChangesReturnsTheOriginalImage() async throws {

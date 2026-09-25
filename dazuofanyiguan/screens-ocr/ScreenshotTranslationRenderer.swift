@@ -57,7 +57,8 @@ enum ScreenshotTranslationRenderer {
                 fontSize: fontSizes[index],
                 weight: styles[index].weight,
                 alignment: styles[index].alignment,
-                limits: styles[index].limits
+                limits: styles[index].limits,
+                obstacles: styles[index].obstacles
             )
         }
         let placements = ScreenshotTranslationLayout.plan(layoutBlocks, canvas: input.pointSize)
@@ -86,11 +87,12 @@ enum ScreenshotTranslationRenderer {
                     alignment: placement.alignment,
                     lineHeight: placement.lineHeight
                 )
-                string.draw(
-                    with: placement.frame,
-                    options: [.usesLineFragmentOrigin, .usesFontLeading, .truncatesLastVisibleLine],
-                    context: nil
-                )
+                ScreenshotTranslationLayout.TextLayout(
+                    string,
+                    size: placement.frame.size,
+                    exclusions: placement.exclusions,
+                    maximumLines: placement.maximumLines
+                ).draw(at: placement.frame.origin)
             }
         }
     }
@@ -114,6 +116,8 @@ enum ScreenshotTranslationRenderer {
         var alignment: NSTextAlignment
         /// 译文能延伸到的空白（pt）。
         var limits: ScreenshotTranslationLayout.Limits
+        /// 排译文时要绕开的东西（pt）：段落外框里各行旁边的，以及往下长时挡在一部分竖条上的。
+        var obstacles: [CGRect]
     }
 
     /// 按笔画宽度（墨迹横向连续的平均长度）是同条件下常规体的几倍定字重。
@@ -225,13 +229,68 @@ enum ScreenshotTranslationRenderer {
             }
         }
 
-        // 往下：碰到下一段时给它留出至少一半原有的间距，不然译文和下一段贴在一起，段落就分不清了。
+        // 段落外框里、每行左右的空当也要查：第一行长、第二行短时，短行旁边可能是图标或别的标签，
+        // 重排时绕开它（整行剩下的部分都算占用，宁可保守）。
+        // 绕开的地方左右留 0.3 个字宽；上下只留 0.1 个字宽——TextKit 按整行的行框（连行距）判断，
+        // 上下留多了，障碍下面那一行也会被劈成两截。
+        let sideMargin = 0.3 * em, edgeMargin = 0.1 * em
+        var obstacles: [CGRect] = []
+        if lines.count > 1 {
+            for line in lines {
+                let rows = pixels.clampedRows(Int(line.minY)...Int(line.maxY))
+                let top = line.minY - 0.15 * em, height = line.height + 0.3 * em
+                let rightStart = Int((line.maxX + clearance).rounded(.up)) + 2
+                if rightStart < Int(bounds.maxX) {
+                    let hit = pixels.scanColumns(from: rightStart, step: 1, limit: Int(bounds.maxX) - rightStart + 1, rows: rows, background: background, noise: noise)
+                    if hit.hitEdge, CGFloat(hit.stop) <= bounds.maxX {
+                        let x = CGFloat(hit.stop) - sideMargin
+                        obstacles.append(CGRect(x: x, y: top, width: bounds.maxX - x, height: height))
+                    }
+                }
+                let leftStart = Int((line.minX - clearance).rounded(.down)) - 3
+                if leftStart > Int(bounds.minX) {
+                    let hit = pixels.scanColumns(from: leftStart, step: -1, limit: leftStart - Int(bounds.minX) + 1, rows: rows, background: background, noise: noise)
+                    if hit.hitEdge, CGFloat(hit.stop) >= bounds.minX {
+                        let x = CGFloat(hit.stop + 1) + sideMargin
+                        obstacles.append(CGRect(x: bounds.minX, y: top, width: x - bounds.minX, height: height))
+                    }
+                }
+            }
+        }
+
+        // 往下：按竖条（每条两个字宽）各自往下扫。多数竖条碰到东西的地方（下一段、分隔线）是底线，
+        // 碰到下一段时给它留出至少一半原有的间距，不然译文和下一段贴在一起，段落就分不清了；
+        // 只有少数竖条早早碰到的（段落右下角的图标），当成绕开的地方，不让它把整段都挡住。
         let columns = pixels.clampedColumns(Int(minX)...Int(maxX))
-        let below = pixels.scanRows(from: Int((bounds.maxY + clearance).rounded(.up)) + 2, step: 1, limit: Int(20 * em), columns: columns, background: background, noise: noise)
-        let gapBelow = CGFloat(below.stop) - bounds.maxY
-        let maxY = below.hitEdge
-            ? max(bounds.maxY, CGFloat(below.stop) - max(0.3 * em, 0.5 * gapBelow))
-            : min(CGFloat(pixels.height) - 0.2 * em, CGFloat(below.stop))
+        let startRow = Int((bounds.maxY + clearance).rounded(.up)) + 2
+        let stripe = max(4, Int(2 * em))
+        let stripes = stride(from: columns.lowerBound, through: columns.upperBound, by: stripe).map { x -> (columns: ClosedRange<Int>, stop: Int, hitEdge: Bool) in
+            let range = x...min(columns.upperBound, x + stripe - 1)
+            let scan = pixels.scanRows(from: startRow, step: 1, limit: Int(20 * em), columns: range, background: background, noise: noise)
+            return (range, scan.stop, scan.hitEdge)
+        }
+        let floorStripe = stripes.sorted { $0.stop < $1.stop }[stripes.count / 2]
+        let gapBelow = CGFloat(floorStripe.stop) - bounds.maxY
+        let maxY = floorStripe.hitEdge
+            ? max(bounds.maxY, CGFloat(floorStripe.stop) - max(0.3 * em, 0.5 * gapBelow))
+            : min(CGFloat(pixels.height) - 0.2 * em, CGFloat(floorStripe.stop))
+        // 只绕开障碍实际占的那几行：找到它的下沿，同一竖条再往下还有东西就接着找。
+        for stripe in stripes where CGFloat(stripe.stop) < maxY {
+            var top = stripe.stop
+            while CGFloat(top) < maxY {
+                let bottom = pixels.firstClearRow(from: top, limit: Int(maxY) - top, columns: stripe.columns, background: background, noise: noise)
+                obstacles.append(CGRect(
+                    x: CGFloat(stripe.columns.lowerBound) - sideMargin,
+                    y: CGFloat(top) - edgeMargin,
+                    width: CGFloat(stripe.columns.count) + 2 * sideMargin,
+                    height: min(maxY, CGFloat(bottom) + edgeMargin) - (CGFloat(top) - edgeMargin)
+                ))
+                guard CGFloat(bottom) < maxY else { break }
+                let next = pixels.scanRows(from: bottom + 2, step: 1, limit: Int(maxY) - bottom, columns: stripe.columns, background: background, noise: noise)
+                guard CGFloat(next.stop) < maxY else { break }
+                top = next.stop
+            }
+        }
 
         return MeasuredStyle(
             lines: lines.map { CGRect(x: $0.minX / scale, y: $0.minY / scale, width: $0.width / scale, height: $0.height / scale) },
@@ -241,7 +300,8 @@ enum ScreenshotTranslationRenderer {
             weight: weight,
             strokeRatio: strokeRatio,
             alignment: alignment,
-            limits: .init(minX: minX / scale, maxX: maxX / scale, maxY: maxY / scale)
+            limits: .init(minX: minX / scale, maxX: maxX / scale, maxY: maxY / scale),
+            obstacles: obstacles.map { CGRect(x: $0.minX / scale, y: $0.minY / scale, width: $0.width / scale, height: $0.height / scale) }
         )
     }
 
@@ -557,7 +617,8 @@ struct PixelBuffer {
     /// 一列一列地往外扫（`step` 为 1 往右、-1 往左，`rows` 是要看的行），找第一处「有东西」的地方：
     /// - 突变：这一列和两列之前比，有几个像素明显变了色——文字、图标、分隔线、色块的边，`hitEdge` 为 true；
     /// - 走远了：和起点的背景差得太多——渐变走远了、慢慢换了底色，`hitEdge` 为 false。
-    /// 阈值按背景本身的噪点放大，照片、颗粒背景上的噪点不算东西。扫出 `limit` 个像素或者扫到图片外
+    /// 阈值按背景本身的噪点放大，照片、颗粒背景上的噪点不算东西；突变要有三个像素，免得噪点误判；
+    /// 走远了只要两个像素，一两个像素宽的分隔线也拦得住。扫出 `limit` 个像素或者扫到图片外
     /// （`width` 或 -1）都没碰到，返回停下的地方，`hitEdge` 为 false。
     func scanColumns(from start: Int, step: Int, limit: Int, rows: ClosedRange<Int>, background: RGB, noise: Double) -> (stop: Int, hitEdge: Bool) {
         let edge = Int(pow(max(12, 4.5 * noise), 2))
@@ -572,10 +633,32 @@ struct PixelBuffer {
                 if color.squaredDistance(to: background) > drift { drifts += 1 }
             }
             if edges >= 3 { return (x, true) }
-            if drifts >= 3 { return (x, false) }
+            if drifts >= 2 { return (x, false) }
             x += step
         }
         return (x, false)
+    }
+
+    /// 从第 `start` 行往下，找第一处连续三行都「没东西」（按 `scanRows` 的标准）的地方，也就是障碍的下沿。
+    /// 扫出 `limit` 行还没有，返回 `start + limit`。
+    func firstClearRow(from start: Int, limit: Int, columns: ClosedRange<Int>, background: RGB, noise: Double) -> Int {
+        let edge = Int(pow(max(12, 4.5 * noise), 2))
+        let drift = Int(pow(max(40, 5 * noise), 2))
+        let end = min(height, start + max(1, limit))
+        var clearRows = 0
+        var y = max(0, start)
+        while y < end {
+            var edges = 0, drifts = 0
+            for x in columns {
+                let color = pixel(x, y)
+                if color.squaredDistance(to: pixel(x, y - 2)) > edge { edges += 1 }
+                if color.squaredDistance(to: background) > drift { drifts += 1 }
+            }
+            clearRows = edges < 3 && drifts < 2 ? clearRows + 1 : 0
+            if clearRows >= 3 { return y - 2 }
+            y += 1
+        }
+        return start + max(1, limit)
     }
 
     /// 同 `scanColumns`，一行一行地扫。
@@ -592,7 +675,7 @@ struct PixelBuffer {
                 if color.squaredDistance(to: background) > drift { drifts += 1 }
             }
             if edges >= 3 { return (y, true) }
-            if drifts >= 3 { return (y, false) }
+            if drifts >= 2 { return (y, false) }
             y += step
         }
         return (y, false)
