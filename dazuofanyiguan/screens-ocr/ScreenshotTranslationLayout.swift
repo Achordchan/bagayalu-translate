@@ -11,6 +11,8 @@ import AppKit
 /// - 多行段落：在原段落的宽度里重排，行距跟原文，第一行和原文第一行对齐；放不下先往下占空白，
 ///   再缩小（最多到 62%），最后截断。完整译文在「对照」里看。
 /// - 只抹原文所在的地方：译文延伸出去的地方本来就是空白，不动它，按钮、卡片的边也就不会被抹掉。
+/// - 每段能延伸到哪是各自从原图量的，两段可能看中同一块空白（并排的两个居中标签都往中间长）。
+///   排完再两两查，撞上了就把中间的空白分开重排，直到谁也不压着谁。
 enum ScreenshotTranslationLayout {
     struct Block {
         let id: UUID
@@ -34,6 +36,10 @@ enum ScreenshotTranslationLayout {
             guard lines.count > 1 else { return nil }
             let pitches = zip(lines.dropFirst(), lines).map { $0.midY - $1.midY }.sorted()
             return pitches[pitches.count / 2]
+        }
+
+        func with(limits: Limits) -> Block {
+            Block(id: id, text: text, lines: lines, fontSize: fontSize, weight: weight, alignment: alignment, limits: limits)
         }
     }
 
@@ -84,10 +90,58 @@ enum ScreenshotTranslationLayout {
     }
 
     static func plan(_ blocks: [Block], canvas: CGSize, measure: Measure = systemMeasure) -> [Placement] {
-        blocks.compactMap { block in
-            guard !block.lines.isEmpty, block.fontSize > 0 else { return nil }
-            return place(block, canvas: canvas, measure: measure)
+        var blocks = blocks.filter { !$0.lines.isEmpty && $0.fontSize > 0 }
+        var placements = blocks.map { place($0, canvas: canvas, measure: measure) }
+        // 限制只会越收越紧，最坏收到原文自己的范围，所以几轮之内一定停得下来。
+        for _ in 0..<8 {
+            var changed: Set<Int> = []
+            for i in blocks.indices {
+                for j in blocks.indices where j > i && collide(placements[i], placements[j]) {
+                    if let (a, b) = separated(blocks[i], placements[i], blocks[j], placements[j]) {
+                        if a.limits != blocks[i].limits { blocks[i] = a; changed.insert(i) }
+                        if b.limits != blocks[j].limits { blocks[j] = b; changed.insert(j) }
+                    }
+                }
+            }
+            guard !changed.isEmpty else { break }
+            for index in changed {
+                placements[index] = place(blocks[index], canvas: canvas, measure: measure)
+            }
         }
+        return placements
+    }
+
+    /// 两段译文的字有没有压在一起。行框上下各有一截行距的空白，只拿字身那一截比。
+    private static func collide(_ a: Placement, _ b: Placement) -> Bool {
+        a.frame.insetBy(dx: 0, dy: 0.12 * a.fontSize)
+            .intersects(b.frame.insetBy(dx: 0, dy: 0.12 * b.fontSize))
+    }
+
+    /// 撞在一起的两段，把它们之间的空白分开：左右相邻的从两段原文正中间劈开；
+    /// 上下相邻的（上面那段折行往下长，下面那段横着长过来），上面那段停在下面那段的译文之上。
+    /// 两段原文本身就叠在一起（不该发生）时不管。
+    private static func separated(_ a: Block, _ pa: Placement, _ b: Block, _ pb: Placement) -> (Block, Block)? {
+        let boundsA = a.bounds, boundsB = b.bounds
+        let margin = 0.3 * min(a.fontSize, b.fontSize)
+        var limitsA = a.limits, limitsB = b.limits
+        if boundsB.minX >= boundsA.maxX || boundsA.minX >= boundsB.maxX {
+            let (left, right) = boundsA.minX < boundsB.minX ? (boundsA, boundsB) : (boundsB, boundsA)
+            let middle = (left.maxX + right.minX) / 2
+            if boundsA.minX < boundsB.minX {
+                limitsA.maxX = min(limitsA.maxX, max(boundsA.maxX, middle - margin / 2))
+                limitsB.minX = max(limitsB.minX, min(boundsB.minX, middle + margin / 2))
+            } else {
+                limitsB.maxX = min(limitsB.maxX, max(boundsB.maxX, middle - margin / 2))
+                limitsA.minX = max(limitsA.minX, min(boundsA.minX, middle + margin / 2))
+            }
+        } else if boundsB.minY >= boundsA.maxY {
+            limitsA.maxY = min(limitsA.maxY, max(boundsA.maxY, pb.frame.minY - margin))
+        } else if boundsA.minY >= boundsB.maxY {
+            limitsB.maxY = min(limitsB.maxY, max(boundsB.maxY, pa.frame.minY - margin))
+        } else {
+            return nil
+        }
+        return (a.with(limits: limitsA), b.with(limits: limitsB))
     }
 
     /// 缩小时每次减 2%，找能放下的最大字号。

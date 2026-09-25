@@ -86,6 +86,35 @@ struct ScreenshotTranslationLayoutTests {
         }
     }
 
+    /// 审核第一轮（#12）：两段各自量出来的空白可能是同一块。并排的两个居中标签都往中间长，排完不能叠在一起。
+    @Test func neighboursDoNotClaimTheSameGap() throws {
+        let a = block("第一个标签很长很长的译文", lines: [CGRect(x: 100, y: 10, width: 40, height: 14)], alignment: .center, limits: .init(minX: 60, maxX: 196, maxY: 26))
+        let b = block("第二个标签很长很长的译文", lines: [CGRect(x: 200, y: 10, width: 40, height: 14)], alignment: .center, limits: .init(minX: 144, maxX: 280, maxY: 26))
+        let unresolved = [a, b].map { try? place($0) }
+        #expect(unresolved[0]!.frame.intersects(unresolved[1]!.frame), "这组数据本来就会撞，才测得出来")
+
+        let placements = ScreenshotTranslationLayout.plan([a, b], canvas: CGSize(width: 400, height: 300), measure: measure)
+        #expect(placements.count == 2)
+        #expect(!placements[0].frame.intersects(placements[1].frame))
+        // 从两段原文正中间（x = 170）劈开。
+        #expect(placements[0].frame.maxX <= 170)
+        #expect(placements[1].frame.minX >= 170)
+        #expect(abs(placements[0].frame.midX - 120) < 0.01)
+        #expect(abs(placements[1].frame.midX - 220) < 0.01)
+    }
+
+    @Test func textGrowingDownStopsAboveTheTranslationBelow() throws {
+        // 上面一段折行往下长（限制给得很宽），下面一段的译文往右长到它下面。
+        let upper = block(String(repeating: "字", count: 100), lines: [CGRect(x: 20, y: 10, width: 180, height: 14)], limits: .init(minX: 20, maxX: 200, maxY: 200))
+        let lower = block("往右边长的一段比较长的译文", lines: [CGRect(x: 50, y: 70, width: 50, height: 14)], limits: .init(minX: 50, maxX: 380, maxY: 90))
+        let unresolved = [upper, lower].map { try? place($0) }
+        #expect(unresolved[0]!.frame.intersects(unresolved[1]!.frame), "这组数据本来就会撞，才测得出来")
+
+        let placements = ScreenshotTranslationLayout.plan([upper, lower], canvas: CGSize(width: 400, height: 300), measure: measure)
+        #expect(placements.count == 2)
+        #expect(placements[0].frame.maxY <= placements[1].frame.minY)
+    }
+
     @Test func paragraphShrinksWhenTheSpaceBelowIsTaken() throws {
         let lines = (0..<2).map { CGRect(x: 20, y: 10 + CGFloat($0) * 20, width: 200, height: 14) }
         // 60 个字在 14pt 要 5 行，只有两行多的地方：缩小，但不小于 62%。
@@ -352,6 +381,66 @@ struct ScreenshotTranslationRendererTests {
                     }
                 }
             }
+        }
+    }
+
+    /// 审核第一轮（#12）：1 倍屏上 0.15 个字宽才一个多像素，扫描不能把自己最后一笔竖画当成障碍。
+    @Test func smallTextOnA1xScreenStillGrowsIntoEmptySpace() async throws {
+        let shot = scene(SyntheticScreenshot(name: "1x", width: 360, height: 40, scale: 1, texts: [
+            SyntheticText(text: "Install", x: 20, y: 12, size: 11)
+        ]))
+        let block = try #require(await recognize(shot).first)
+        let style = ScreenshotTranslationRenderer.measureStyle(of: block, in: try #require(PixelBuffer(image: shot.cgImage)), scale: 1)
+        #expect(style.limits.maxX > 340, "右边全是空白，却只能长到 \(style.limits.maxX)")
+        #expect(style.limits.minX < 10, "左边全是空白，却只能长到 \(style.limits.minX)")
+
+        let layout = ScreenshotTranslationLayout.Block(
+            id: block.id,
+            text: "安装并重新启动所有的应用程序",
+            lines: style.lines,
+            fontSize: style.fontSize,
+            weight: style.weight,
+            alignment: style.alignment,
+            limits: style.limits
+        )
+        let placement = try #require(ScreenshotTranslationLayout.plan([layout], canvas: shot.pointSize).first)
+        #expect(placement.fontSize == style.fontSize, "有空白却缩到了 \(placement.fontSize)pt")
+    }
+
+    /// 审核第一轮（#12）：带边框的一行里两个等距的标签都判成居中，译文都变长时不能叠在一起。
+    @Test func evenlySpacedLabelsInABorderedRowDoNotOverlap() async throws {
+        let row = CGRect(x: 20, y: 16, width: 280, height: 30)
+        let font = NSFont.systemFont(ofSize: 14)
+        let widths = ["Home", "Mail"].map { NSAttributedString(string: $0, attributes: [.font: font]).size().width }
+        let gap = (row.width - widths[0] - widths[1]) / 3
+        let shot = scene(width: 320, height: 62) {
+            NSColor.white.setFill()
+            NSRect(x: 0, y: 0, width: 320, height: 62).fill()
+            NSColor(white: 0.75, alpha: 1).setStroke()
+            NSBezierPath(rect: row).stroke()
+            text("Home", at: CGPoint(x: row.minX + gap, y: 22), size: 14)
+            text("Mail", at: CGPoint(x: row.minX + 2 * gap + widths[0], y: 22), size: 14)
+        }
+        let blocks = await recognize(shot)
+        let pixels = try #require(PixelBuffer(image: shot.cgImage))
+        let home = try #require(blocks.first { $0.text.hasPrefix("Home") })
+        let mail = try #require(blocks.first { $0.text.hasPrefix("Mail") })
+        let styles = [home, mail].map { ScreenshotTranslationRenderer.measureStyle(of: $0, in: pixels, scale: 2) }
+        #expect(styles.allSatisfy { $0.alignment == .center }, "两个标签都该判成居中，这个用例才测得到抢空白")
+
+        let texts = ["返回首页查看最新的内容", "查看收件箱里所有的邮件"]
+        let layout = zip(zip([home, mail], styles), texts).map { pair, text in
+            ScreenshotTranslationLayout.Block(id: pair.0.id, text: text, lines: pair.1.lines, fontSize: pair.1.fontSize, weight: pair.1.weight, alignment: pair.1.alignment, limits: pair.1.limits)
+        }
+        let placements = ScreenshotTranslationLayout.plan(layout, canvas: shot.pointSize)
+        #expect(!placements[0].frame.intersects(placements[1].frame))
+
+        // 画出来：两段原文正中间那一列上没有字。
+        let output = try render(shot, blocks, ["Home": texts[0], "Mail": texts[1]])
+        let rendered = try #require(PixelBuffer(image: output))
+        let middle = Int((styles[0].lines[0].maxX + styles[1].lines[0].minX) * 2 / 2)  // 两段中点（像素）
+        for y in stride(from: Int(row.minY * 2) + 6, to: Int(row.maxY * 2) - 6, by: 1) {
+            #expect(rendered.pixel(middle, y).distance(to: .init(r: 255, g: 255, b: 255)) < 30, "中线上 y=\(y) 有字")
         }
     }
 

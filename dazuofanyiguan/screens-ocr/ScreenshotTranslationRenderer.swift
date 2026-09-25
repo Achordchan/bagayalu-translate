@@ -196,12 +196,15 @@ enum ScreenshotTranslationRenderer {
         var alignment = NSTextAlignment.left
         var minX = bounds.minX, maxX = bounds.maxX
 
+        // 扫描从墨迹外面开始：突变是拿这一列和两列之前比的，两列都得在墨迹（连同抗锯齿的边）外面，
+        // 否则 1 倍屏上的小字（0.15 个字宽才一个多像素）会把自己最后一笔竖画当成障碍。
+        let clearance = max(0.15 * em, 2)
         if lines.count == 1 {
             let box = boxes[0]
             let rows = pixels.clampedRows(Int(box.midY - 0.6 * em)...Int(box.midY + 0.6 * em))
             let reach = Int(40 * em)
-            let right = pixels.scanColumns(from: Int(box.maxX + 0.15 * em), step: 1, limit: reach, rows: rows, background: background, noise: noise)
-            let left = pixels.scanColumns(from: Int(box.minX - 0.15 * em), step: -1, limit: reach, rows: rows, background: background, noise: noise)
+            let right = pixels.scanColumns(from: Int((box.maxX + clearance).rounded(.up)) + 2, step: 1, limit: reach, rows: rows, background: background, noise: noise)
+            let left = pixels.scanColumns(from: Int((box.minX - clearance).rounded(.down)) - 3, step: -1, limit: reach, rows: rows, background: background, noise: noise)
             let margin = 0.3 * em
             maxX = max(box.maxX, CGFloat(right.stop) - margin)
             minX = min(box.minX, CGFloat(left.stop + 1) + margin)
@@ -224,7 +227,7 @@ enum ScreenshotTranslationRenderer {
 
         // 往下：碰到下一段时给它留出至少一半原有的间距，不然译文和下一段贴在一起，段落就分不清了。
         let columns = pixels.clampedColumns(Int(minX)...Int(maxX))
-        let below = pixels.scanRows(from: Int(bounds.maxY + 0.2 * em), step: 1, limit: Int(20 * em), columns: columns, background: background, noise: noise)
+        let below = pixels.scanRows(from: Int((bounds.maxY + clearance).rounded(.up)) + 2, step: 1, limit: Int(20 * em), columns: columns, background: background, noise: noise)
         let gapBelow = CGFloat(below.stop) - bounds.maxY
         let maxY = below.hitEdge
             ? max(bounds.maxY, CGFloat(below.stop) - max(0.3 * em, 0.5 * gapBelow))
