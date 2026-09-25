@@ -90,10 +90,12 @@ final class ScreenshotOCRCoordinator: ObservableObject {
             previousFrontmostAppPID = nil
         }
 
-        // 截图翻译只支持少量源语言选项（英语/俄语/西语），不提供自动检测。
-        // 如果用户在主界面设置了其它源语言，这里默认回退到英语。
-        let allowed: Set<String> = ["en", "ru", "es"]
-        let source = allowed.contains(settings.sourceLanguageCode) ? settings.sourceLanguageCode : "en"
+        // 源语言跟随主界面设置（默认自动检测）。主界面选的语言 Vision 认不出时退回自动检测：
+        // 以前是退回英语，中日韩文字会被当成英文去认，结果整段乱码。
+        let selectable = Set(VisionOCRService.selectableSourceLanguages.map(\.code))
+        let source = selectable.contains(settings.sourceLanguageCode)
+            ? settings.sourceLanguageCode
+            : LanguagePreset.auto.code
 
         let session = ScreenshotOCRSession(
             sourceLanguageCode: source,
@@ -173,21 +175,43 @@ final class ScreenshotOCRCoordinator: ObservableObject {
         }
 
         // 框选完成后仅截图缓存，不做 OCR。
+        session.resetResults()
         session.stage = .selected
-        session.ocrText = ""
-        session.translatedText = ""
-        session.ocrLines = []
-        session.translatedLines = []
-        session.capturedImage = nil
-        session.didExtractTextToPasteboard = false
-        session.showCompare = false
+        let generation = session.generation
 
         do {
-            session.capturedImage = try await captureImageExcludingOverlay(rect: rectInScreen, selectionWindow: selectionWindow)
+            let image = try await captureImageExcludingOverlay(rect: rectInScreen, selectionWindow: selectionWindow)
+            guard isCurrent(session, generation) else { return }
+            session.capturedImage = image
         } catch {
+            guard isCurrent(session, generation) else { return }
             session.stage = .failed(error.localizedDescription)
             toast.show(error.localizedDescription, style: .error)
         }
+    }
+
+    /// 异步步骤回来时，选区和源语言还是发起时那一份吗。
+    private func isCurrent(_ session: ScreenshotOCRSession, _ generation: Int) -> Bool {
+        self.session === session && session.generation == generation
+    }
+
+    /// 识别文字并写进 session。没认出字、或结果已经过期时返回 false。
+    private func recognizeText(in image: NSImage, session: ScreenshotOCRSession) async -> Bool {
+        let generation = session.generation
+        session.stage = .ocrRunning
+        let blocks = await VisionOCRService.recognizeBlocks(from: image, languageCode: session.sourceLanguageCode)
+        guard isCurrent(session, generation) else { return false }
+
+        session.ocrBlocks = blocks
+        session.translations = [:]
+        session.translatedText = ""
+        session.ocrText = blocks.map(\.text).joined(separator: "\n")
+        if blocks.isEmpty {
+            session.stage = .failed("未识别到文字")
+            return false
+        }
+        session.stage = .ocrReady
+        return true
     }
 
     private func runOCRAndTranslateIfPossible(settings: AppSettings, log: LogStore, toast: ToastCenter) async {
@@ -217,18 +241,13 @@ final class ScreenshotOCRCoordinator: ObservableObject {
         guard let image = session.capturedImage else { return }
 
         // 先 OCR
-        session.stage = .ocrRunning
-        let lines = await VisionOCRService.recognizeLines(from: image, preferredLanguageCode: session.sourceLanguageCode)
-        session.ocrLines = lines
-        session.ocrText = lines.map { $0.text }.joined(separator: "\n")
-
-        if session.ocrText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            session.stage = .failed("未识别到文字")
-            toast.show("未识别到文字", style: .warning)
+        let generation = session.generation
+        guard await recognizeText(in: image, session: session) else {
+            if isCurrent(session, generation) {
+                toast.show("未识别到文字", style: .warning)
+            }
             return
         }
-
-        session.stage = .ocrReady
 
         // 再翻译
         await runTranslateIfPossible(settings: settings, log: log, toast: toast)
@@ -263,19 +282,14 @@ final class ScreenshotOCRCoordinator: ObservableObject {
         }
         guard let image = session.capturedImage else { return }
 
-        session.stage = .ocrRunning
-        let lines = await VisionOCRService.recognizeLines(from: image, preferredLanguageCode: session.sourceLanguageCode)
-        session.ocrLines = lines
-        session.ocrText = lines.map { $0.text }.joined(separator: "\n")
-        let text = session.ocrText.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        if text.isEmpty {
-            session.stage = .failed("未识别到文字")
-            session.showHUD("未识别到文字", style: .warning)
+        let generation = session.generation
+        guard await recognizeText(in: image, session: session) else {
+            if isCurrent(session, generation) {
+                session.showHUD("未识别到文字", style: .warning)
+            }
             return
         }
-
-        session.stage = .ocrReady
+        let text = session.ocrText
 
         let pb = NSPasteboard.general
         pb.clearContents()
@@ -451,13 +465,13 @@ final class ScreenshotOCRCoordinator: ObservableObject {
 
     private func runTranslateIfPossible(settings: AppSettings, log: LogStore, toast: ToastCenter) async {
         guard let session else { return }
-        let sourceLines = session.ocrLines
-        if sourceLines.isEmpty {
-            let text = session.ocrText.trimmingCharacters(in: .whitespacesAndNewlines)
-            if text.isEmpty { return }
-        }
+        let blocks = session.ocrBlocks
+        guard !blocks.isEmpty else { return }
+        let generation = session.generation
+        let targetLanguageCode = session.targetLanguageCode
 
         session.stage = .translating
+        session.translations = [:]
 
         switch settings.engineType {
         case .apple:
@@ -470,155 +484,158 @@ final class ScreenshotOCRCoordinator: ObservableObject {
             log.info("截图翻译引擎：OpenAI 通用接口")
         }
 
-        // OpenAI：优先批量翻译，减少逐行导致的上下文缺失与随机错误。
-        // 通过 [[DAZUO_NL]] 保持行分隔，翻译后再按分隔符切回每行。
-        if !sourceLines.isEmpty, settings.engineType == .openAICompatible {
-            // 大段内容一次性请求更容易不稳定/超限，这里做分块：每块多行一次请求。
-            // 这样既能保留上下文，又能提高成功率。
-            let maxLinesPerChunk = 14
-            let maxCharsPerChunk = 2200
-
-            var translatedAll: [VisionOCRService.OCRLine] = []
-            translatedAll.reserveCapacity(sourceLines.count)
-
-            var startIndex = 0
-            while startIndex < sourceLines.count {
-                var endIndex = startIndex
-                var chars = 0
-
-                while endIndex < sourceLines.count {
-                    let next = sourceLines[endIndex].text
-                    let add = next.count + 14
-                    if endIndex > startIndex {
-                        if (endIndex - startIndex) >= maxLinesPerChunk { break }
-                        if (chars + add) > maxCharsPerChunk { break }
-                    }
-                    chars += add
-                    endIndex += 1
-                }
-
-                let chunk = Array(sourceLines[startIndex ..< endIndex])
-                let joined = chunk.map { $0.text }.joined(separator: " [[DAZUO_NL]] ")
-
-                let result = await translate(
-                    text: joined,
-                    sourceLanguageCode: session.sourceLanguageCode,
-                    targetLanguageCode: session.targetLanguageCode,
-                    settings: settings,
-                    log: log,
-                    toast: toast,
-                    onPhaseChange: nil
-                )
-
-                func fallbackTranslateChunkLineByLine() async -> Bool {
-                    for line in chunk {
-                        let r = await translate(
-                            text: line.text,
-                            sourceLanguageCode: session.sourceLanguageCode,
-                            targetLanguageCode: session.targetLanguageCode,
-                            settings: settings,
-                            log: log,
-                            toast: toast,
-                            onPhaseChange: nil
-                        )
-
-                        switch r {
-                        case .success(let t):
-                            translatedAll.append(.init(text: t, boundingBox: line.boundingBox))
-                        case .failure(let error):
-                            session.stage = .failed(error.localizedDescription)
-                            toast.show(error.localizedDescription, style: .error)
-                            return false
-                        }
-                    }
-                    return true
-                }
-
-                switch result {
-                case .success(let translatedText):
-                    let rawParts = translatedText.components(separatedBy: "[[DAZUO_NL]]")
-                    let parts = rawParts.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-
-                    if parts.count >= chunk.count {
-                        for (src, t) in zip(chunk, parts.prefix(chunk.count)) {
-                            translatedAll.append(.init(text: t, boundingBox: src.boundingBox))
-                        }
-                    } else {
-                        log.warn("OpenAI 批量翻译分行失败：expected=\(chunk.count), got=\(parts.count)，该块降级逐行")
-                        let ok = await fallbackTranslateChunkLineByLine()
-                        if !ok { return }
-                    }
-
-                case .failure(let error):
-                    log.warn("OpenAI 批量翻译失败：\(error.localizedDescription)，该块降级逐行")
-                    let ok = await fallbackTranslateChunkLineByLine()
-                    if !ok { return }
-                }
-
-                startIndex = endIndex
-            }
-
-            session.translatedLines = translatedAll
-            session.translatedText = translatedAll.map { $0.text }.joined(separator: "\n")
-            session.stage = .translated
-            return
-        }
-
-        // 默认：逐条翻译以保持“你在翻译哪一条”的对应关系。
-        if !sourceLines.isEmpty {
-            var translated: [VisionOCRService.OCRLine] = []
-            translated.reserveCapacity(sourceLines.count)
-
-            for line in sourceLines {
-                let result = await translate(
-                    text: line.text,
-                    sourceLanguageCode: session.sourceLanguageCode,
-                    targetLanguageCode: session.targetLanguageCode,
-                    settings: settings,
-                    log: log,
-                    toast: toast,
-                    onPhaseChange: nil
-                )
-
-                switch result {
-                case .success(let t):
-                    translated.append(.init(text: t, boundingBox: line.boundingBox))
-                case .failure(let error):
-                    session.stage = .failed(error.localizedDescription)
-                    toast.show(error.localizedDescription, style: .error)
-                    return
-                }
-            }
-
-            session.translatedLines = translated
-            session.translatedText = translated.map { $0.text }.joined(separator: "\n")
-            session.stage = .translated
-            return
-        }
-
-        // fallback：没有行数据时仍然整段翻译
-        let text = session.ocrText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let result = await translate(
-            text: text,
+        // 按段翻译（折行已经拼回整段），每段各自判断源语言；已经是目标语言的段落原样保留。
+        let sources = ScreenshotTranslationSourceResolver.resolve(
+            blockTexts: blocks.map(\.text),
             sourceLanguageCode: session.sourceLanguageCode,
-            targetLanguageCode: session.targetLanguageCode,
-            settings: settings,
-            log: log,
-            toast: toast,
-            onPhaseChange: nil
+            targetLanguageCode: targetLanguageCode
         )
+        var translations: [UUID: String] = [:]
+        var jobs: [TranslationJob] = []
+        for (block, source) in zip(blocks, sources) {
+            if let source {
+                jobs.append(TranslationJob(block: block, sourceLanguageCode: source))
+            } else {
+                translations[block.id] = block.text
+            }
+        }
 
-        switch result {
-        case .success(let translated):
-            session.translatedText = translated
-            session.translatedLines = []
+        guard !jobs.isEmpty else {
+            session.translations = translations
+            session.translatedText = session.ocrText
             session.stage = .translated
-        case .failure(let error):
+            session.showHUD("选区里没有需要翻译成\(LanguagePreset.displayName(for: targetLanguageCode))的文字", style: .info)
+            return
+        }
+
+        var succeeded = 0
+        var failures: [Error] = []
+
+        func translateOne(_ job: TranslationJob) async {
+            let result = await translate(
+                text: job.block.text,
+                sourceLanguageCode: job.sourceLanguageCode,
+                targetLanguageCode: targetLanguageCode,
+                settings: settings,
+                log: log,
+                toast: toast,
+                onPhaseChange: nil
+            )
+            switch result {
+            case .success(let text):
+                translations[job.block.id] = text
+                succeeded += 1
+            case .failure(let error):
+                translations[job.block.id] = job.block.text
+                failures.append(error)
+            }
+        }
+
+        // 第一段就失败多半是整体问题（断网、密钥无效、语言包没装），直接报错，别让后面几十段挨个超时。
+        func shouldAbort() -> Bool { succeeded == 0 && !failures.isEmpty }
+
+        if settings.engineType == .apple {
+            for job in jobs {
+                guard isCurrent(session, generation) else { return }
+                await translateOne(job)
+                if shouldAbort() { break }
+                guard isCurrent(session, generation) else { return }
+                session.translations = translations
+            }
+        } else {
+            // 在线引擎：相邻、同源语言的段落合成一批，用换行分隔一次请求翻完，
+            // 省掉几十次往返；译文分不回原来的段数就退回逐段。
+            for batch in Self.translationBatches(jobs) {
+                guard isCurrent(session, generation) else { return }
+                var handled = false
+                if batch.count > 1 {
+                    let result = await translate(
+                        text: batch.map(\.block.text).joined(separator: "\n"),
+                        sourceLanguageCode: batch[0].sourceLanguageCode,
+                        targetLanguageCode: targetLanguageCode,
+                        settings: settings,
+                        log: log,
+                        toast: toast,
+                        onPhaseChange: nil
+                    )
+                    switch result {
+                    case .success(let text):
+                        let parts = text.components(separatedBy: "\n")
+                            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                            .filter { !$0.isEmpty }
+                        if parts.count == batch.count {
+                            for (job, part) in zip(batch, parts) {
+                                translations[job.block.id] = part
+                            }
+                            succeeded += batch.count
+                            handled = true
+                        } else {
+                            log.warn("截图翻译批量分段失败：expected=\(batch.count), got=\(parts.count)，该批改为逐段翻译")
+                        }
+                    case .failure(let error):
+                        log.warn("截图翻译批量请求失败：\(error.localizedDescription)，该批改为逐段翻译")
+                    }
+                }
+                if !handled {
+                    for job in batch {
+                        guard isCurrent(session, generation) else { return }
+                        await translateOne(job)
+                        if shouldAbort() { break }
+                    }
+                }
+                if shouldAbort() { break }
+                guard isCurrent(session, generation) else { return }
+                session.translations = translations
+            }
+        }
+
+        guard isCurrent(session, generation) else { return }
+        if shouldAbort(), let error = failures.first {
+            session.translations = [:]
             session.stage = .failed(error.localizedDescription)
             toast.show(error.localizedDescription, style: .error)
+            return
+        }
+
+        session.translations = translations
+        session.translatedText = blocks.map { translations[$0.id] ?? $0.text }.joined(separator: "\n")
+        session.stage = .translated
+        if !failures.isEmpty {
+            session.showHUD("有 \(failures.count) 段没翻译成功，已保留原文", style: .warning)
         }
     }
 
+    struct TranslationJob {
+        let block: VisionOCRService.OCRBlock
+        let sourceLanguageCode: String
+    }
+
+    /// 每批最多 14 段、约 2200 字，沿用原先 OpenAI 分块的上限：一次太长容易超限或不稳定。
+    nonisolated static func translationBatches(_ jobs: [TranslationJob]) -> [[TranslationJob]] {
+        let maxBlocksPerBatch = 14
+        let maxCharactersPerBatch = 2200
+
+        var batches: [[TranslationJob]] = []
+        var current: [TranslationJob] = []
+        var characters = 0
+        for job in jobs {
+            let length = job.block.text.count + 1
+            if let first = current.first,
+               first.sourceLanguageCode != job.sourceLanguageCode
+                || current.count >= maxBlocksPerBatch
+                || characters + length > maxCharactersPerBatch {
+                batches.append(current)
+                current = []
+                characters = 0
+            }
+            current.append(job)
+            characters += length
+        }
+        if !current.isEmpty {
+            batches.append(current)
+        }
+        return batches
+    }
 
     private func translate(
         text: String,

@@ -26,7 +26,7 @@ struct HelpAboutSettingsPane: View {
                 faqItem(
                     index: 2,
                     question: "截图翻译识别不准怎么办？",
-                    answer: "尽量选择清晰、对比度高的文字区域。能直接复制文字时，文字快捷翻译通常更准确。"
+                    answer: "尽量选择清晰、对比度高的文字区域。源语言默认自动识别，个别情况（比如全是汉字的日文）可以在截图工具栏里手动指定源语言再翻译。能直接复制文字时，文字快捷翻译通常更准确。"
                 )
                 Divider()
                 faqItem(
