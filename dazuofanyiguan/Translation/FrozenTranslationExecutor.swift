@@ -23,7 +23,8 @@ enum FrozenTranslationExecutor {
                 model: request.openAIModel,
                 endpointMode: request.openAIEndpointMode,
                 onPhaseChange: onPhaseChange,
-                onPartialText: onPartialText
+                onPartialText: onPartialText,
+                cleansRussianOCRNoise: request.cleansRussianOCRNoise
             )
         }
     }

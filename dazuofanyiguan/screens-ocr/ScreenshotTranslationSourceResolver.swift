@@ -1,4 +1,5 @@
 import Foundation
+import NaturalLanguage
 
 /// 截图里每一段该用什么源语言去翻。返回 nil 表示这一段不用翻：
 /// 本来就是目标语言，或者根本没有文字（纯数字、符号）。
@@ -16,6 +17,7 @@ import Foundation
 ///
 /// 判成目标语言、准备跳过之前，还要看有没有夹着够分量的外文：中文段落里的一句英文说明要翻，
 /// 而且要按那句外文的语言翻——交给引擎自动检测的话，它会把整段认成中文、原样返回。
+/// 两种都查：书写系统不同的（中文里的英文），逐句识别语种查同一种书写系统的（英文里的西班牙语）。
 /// 零星的品牌名、型号（「打开 Wi-Fi 设置」）不算，照旧跳过。
 enum ScreenshotTranslationSourceResolver {
     static func resolve(
@@ -114,16 +116,37 @@ enum ScreenshotTranslationSourceResolver {
         targetLanguageCode: String,
         detectLanguage: (String) -> String?
     ) -> String? {
-        guard let foreign = foreignText(in: text, targetLanguageCode: targetLanguageCode) else { return nil }
-        let scripts = TextScriptPresence(in: foreign)
-        let unspaced = scripts.containsHan || scripts.containsKana || scripts.containsThai
-        let letters = foreign.filter(\.isLetter).count
-        let words = foreign.split(separator: " ").filter { $0.count >= 2 }.count
-        guard unspaced ? letters >= 4 : (words >= 3 || letters >= 15) else { return nil }
+        if let foreign = foreignText(in: text, targetLanguageCode: targetLanguageCode), isSubstantial(foreign) {
+            let scripts = TextScriptPresence(in: foreign)
+            if let language = detectLanguage(foreign) ?? guessLanguage(of: scripts, text: foreign),
+               language != targetLanguageCode {
+                return language
+            }
+        }
+        // 同一种书写系统的外语只能靠识别语种：逐句认，够长的句子认出别的语言就按它翻。
+        let tokenizer = NLTokenizer(unit: .sentence)
+        tokenizer.string = text
+        var foreignLanguage: String?
+        tokenizer.enumerateTokens(in: text.startIndex..<text.endIndex) { range, _ in
+            let sentence = text[range].trimmingCharacters(in: .whitespacesAndNewlines)
+            guard isSubstantial(sentence),
+                  let language = detectLanguage(sentence),
+                  language != targetLanguageCode else { return true }
+            foreignLanguage = language
+            return false
+        }
+        return foreignLanguage
+    }
 
-        let language = detectLanguage(foreign) ?? guessLanguage(of: scripts, text: foreign)
-        guard let language, language != targetLanguageCode else { return nil }
-        return language
+    /// 够不够分量：有空格的书写系统 ≥3 个词（每词 ≥2 个字母）或 ≥15 个字母；汉字、假名、泰文 ≥4 个字。
+    private static func isSubstantial(_ text: String) -> Bool {
+        let scripts = TextScriptPresence(in: text)
+        let letters = text.filter(\.isLetter).count
+        if scripts.containsHan || scripts.containsKana || scripts.containsThai {
+            return letters >= 4
+        }
+        let words = text.split(whereSeparator: { !$0.isLetter }).filter { $0.count >= 2 }.count
+        return words >= 3 || letters >= 15
     }
 
     /// 把不属于目标语言书写系统的字母挑出来，词与词之间留一个空格。目标语言的书写系统认不出时返回 nil。

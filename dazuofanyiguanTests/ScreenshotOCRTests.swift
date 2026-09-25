@@ -412,6 +412,46 @@ struct ScreenshotTranslationSourceResolverTests {
         #expect(result == ["zh-CN"])
     }
 
+    /// 审核第六轮：同一种书写系统里的外语句子也要查。英文段落里夹一句西班牙语说明，
+    /// 字母全是拉丁字母，只看书写系统查不出来，要按句子识别。
+    @Test func foreignSentenceInTheSameScriptIsStillTranslated() {
+        let mixed = "Please follow these steps carefully. Abra la aplicación y toque el botón de inicio."
+        let result = resolve(
+            [mixed],
+            target: "en",
+            detected: [mixed: "en", "Abra la aplicación y toque el botón de inicio.": "es"],
+            overall: "en"
+        )
+        #expect(result == ["es"])
+    }
+
+    @Test func paragraphWhoseSentencesAreAllInTheTargetLanguageIsSkipped() {
+        let text = "Please follow these steps carefully. Open the app and tap the start button."
+        let result = resolve(
+            [text],
+            target: "en",
+            detected: [text: "en", "Please follow these steps carefully.": "en", "Open the app and tap the start button.": "en"],
+            overall: "en"
+        )
+        #expect(result == [nil])
+    }
+
+    /// 用真实的语种识别器走一遍：整段被认成英文（置信度 1.0），里面那句西班牙语照样要翻；
+    /// 全是英文的段落照旧跳过。
+    @Test func realDetectorFindsASpanishSentenceInsideAnEnglishParagraph() {
+        let english = "Please read the following instructions carefully before you continue with the installation of the new version on your computer."
+        let mixed = english + " Abra la aplicación y toque el botón de inicio para continuar."
+        let resolveWithRealDetector = { (texts: [String]) in
+            ScreenshotTranslationSourceResolver.resolve(
+                blockTexts: texts,
+                sourceLanguageCode: LanguagePreset.auto.code,
+                targetLanguageCode: "en"
+            )
+        }
+        #expect(resolveWithRealDetector([mixed]) == ["es"])
+        #expect(resolveWithRealDetector([english]) == [nil])
+    }
+
     @Test func shortChineseLabelOnAnEnglishPageIsSkippedForAChineseTarget() {
         #expect(resolve(["Install updates automatically", "设置"], detected: ["Install updates automatically": "en"], overall: "en") == ["en", nil])
     }
@@ -561,6 +601,17 @@ struct ScreenshotBlockTranslatorTests {
         #expect(ScreenshotBlockTranslator.isRequestWide(invalidKey))
         #expect(!ScreenshotBlockTranslator.isRequestWide(badInput))
         #expect(ScreenshotBlockTranslator.isRequestWide(geminiOverloaded))
+    }
+
+    /// 审核第六轮：引擎自己包装过的整体性错误也要认出来（Google 的 405/501、微软的限流、OpenAI 的配置错误）。
+    @Test func engineSpecificRequestWideErrorsAreRecognized() {
+        #expect(ScreenshotBlockTranslator.isRequestWide(GoogleTranslateEngine.EngineError.methodNotAllowed))
+        #expect(ScreenshotBlockTranslator.isRequestWide(MicrosoftTranslateEngine.EngineError.rateLimited))
+        #expect(ScreenshotBlockTranslator.isRequestWide(OpenAICompatibleEngine.EngineError.missingAPIKey))
+        #expect(ScreenshotBlockTranslator.isRequestWide(OpenAICompatibleEngine.EngineError.invalidBaseURL()))
+        #expect(!ScreenshotBlockTranslator.isRequestWide(OpenAICompatibleEngine.EngineError.emptyResponse))
+        #expect(!ScreenshotBlockTranslator.isRequestWide(MicrosoftTranslateEngine.EngineError.badRequest(detail: "")))
+        #expect(!ScreenshotBlockTranslator.isRequestWide(GoogleTranslateEngine.EngineError.invalidResponse))
     }
 
     @Test func progressIsReportedAfterEachBatch() async throws {

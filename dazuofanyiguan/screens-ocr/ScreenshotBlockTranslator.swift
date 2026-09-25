@@ -152,8 +152,23 @@ struct ScreenshotBlockTranslator {
         if error is CancellationError || error is URLError {
             return true
         }
-        if error is OpenAICompatibleEngine.RateLimitError {
+        if error is OpenAICompatibleEngine.RateLimitError || error is OpenAICompatibleEngine.ResponsesCompatibilityError {
             return true
+        }
+        // 各引擎自己包装过的：Google 的 405/501（这个接口用不了）、微软的限流、OpenAI 的配置错误。
+        if case .methodNotAllowed? = error as? GoogleTranslateEngine.EngineError {
+            return true
+        }
+        if case .rateLimited? = error as? MicrosoftTranslateEngine.EngineError {
+            return true
+        }
+        if let engineError = error as? OpenAICompatibleEngine.EngineError {
+            switch engineError {
+            case .missingAPIKey, .missingModel, .invalidBaseURL:
+                return true
+            case .emptyResponse:
+                return false
+            }
         }
         if case .badStatus(let code, _)? = error as? HTTPClient.HTTPError {
             return isRequestWideStatus(code)

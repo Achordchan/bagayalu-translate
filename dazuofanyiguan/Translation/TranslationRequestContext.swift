@@ -10,6 +10,8 @@ struct TranslationRequestContext: Equatable {
     let openAIEndpointMode: OpenAIEndpointMode
     let preparedText: String
     let rawText: String
+    /// 是否对俄语做「旧版 OCR 噪声」清洗（见 `OpenAICompatibleEngine.cleansRussianOCRNoise`）。
+    var cleansRussianOCRNoise: Bool = true
 
     static let newlineMarker = "[[DAZUO_NL]]"
 
@@ -25,7 +27,8 @@ struct TranslationRequestContext: Equatable {
         targetLanguageCode: String,
         openAIBaseURL: String,
         openAIModel: String,
-        openAIEndpointMode: OpenAIEndpointMode
+        openAIEndpointMode: OpenAIEndpointMode,
+        cleansRussianOCRNoise: Bool = true
     ) -> TranslationRequestContext? {
         let rawText = text
         let normalizedText = rawText
@@ -50,7 +53,8 @@ struct TranslationRequestContext: Equatable {
             openAIModel: openAIModel,
             openAIEndpointMode: openAIEndpointMode,
             preparedText: preparedText,
-            rawText: rawText
+            rawText: rawText,
+            cleansRussianOCRNoise: cleansRussianOCRNoise
         )
     }
 
@@ -59,7 +63,8 @@ struct TranslationRequestContext: Equatable {
         text: String,
         settings: AppSettings,
         sourceLanguageCode: String,
-        targetLanguageCode: String
+        targetLanguageCode: String,
+        cleansRussianOCRNoise: Bool = true
     ) -> TranslationRequestContext? {
         make(
             text: text,
@@ -68,7 +73,8 @@ struct TranslationRequestContext: Equatable {
             targetLanguageCode: targetLanguageCode,
             openAIBaseURL: settings.openAIBaseURL,
             openAIModel: settings.openAIModel,
-            openAIEndpointMode: settings.openAIEndpointMode
+            openAIEndpointMode: settings.openAIEndpointMode,
+            cleansRussianOCRNoise: cleansRussianOCRNoise
         )
     }
 

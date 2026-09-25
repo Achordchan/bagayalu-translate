@@ -88,6 +88,24 @@ private final class OpenAISDKRequestRecorder: @unchecked Sendable {
     }
 }
 
+private final class OpenAISDKBodyRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var bodies: [String] = []
+
+    func append(_ body: String) {
+        lock.lock()
+        bodies.append(body)
+        lock.unlock()
+    }
+
+    func snapshot() -> [String] {
+        lock.lock()
+        let value = bodies
+        lock.unlock()
+        return value
+    }
+}
+
 private func requestBodyData(from request: URLRequest) throws -> Data {
     if let body = request.httpBody { return body }
     guard let stream = request.httpBodyStream else { throw URLError(.cannotDecodeContentData) }
@@ -1294,6 +1312,54 @@ struct dazuofanyiguanTests {
         #expect(recorded.body["messages"] != nil)
     }
 
+
+    /// 截图翻译送的是 Vision 干净的识别结果：按俄语翻中俄混排的段落时，
+    /// 不能再走给手动粘贴 OCR 文本准备的俄语清洗（它会删掉所有汉字）。主窗口仍保留那层清洗。
+    @MainActor
+    @Test func screenshotTranslationKeepsHanCharactersInRussianRequests() async throws {
+        let mixed = "Нажмите 设置 чтобы продолжить"
+        let request = try #require(ScreenshotTranslationService.makeRequest(
+            text: mixed,
+            engineType: .openAICompatible,
+            sourceLanguageCode: "ru",
+            targetLanguageCode: "zh-CN",
+            openAIBaseURL: "https://example.com/v1",
+            openAIModel: "test-model",
+            openAIEndpointMode: .chatCompletions
+        ))
+        #expect(!request.cleansRussianOCRNoise)
+        let engine = try #require(FrozenTranslationExecutor.makeEngine(for: request, apiKey: "test-key") as? OpenAICompatibleEngine)
+        #expect(!engine.cleansRussianOCRNoise)
+
+        for (cleans, host) in [(false, "screenshot-ru.example.com"), (true, "main-window-ru.example.com")] {
+            let bodies = OpenAISDKBodyRecorder()
+            OpenAISDKMockURLProtocol.setHandler(for: host) { request in
+                bodies.append(String(decoding: try requestBodyData(from: request), as: UTF8.self))
+                let success = """
+                {"id": "chat-test", "object": "chat.completion", "created": 1, "model": "test-model",
+                 "choices": [{"index": 0, "message": {"role": "assistant", "content": "请点击设置以继续"}, "finish_reason": "stop"}]}
+                """
+                return (200, Data(success.utf8))
+            }
+            defer { OpenAISDKMockURLProtocol.setHandler(for: host, nil) }
+
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [OpenAISDKMockURLProtocol.self]
+            let engine = OpenAICompatibleEngine(
+                baseURL: "https://\(host)/v1",
+                apiKey: "test-key",
+                model: "test-model",
+                endpointMode: .chatCompletions,
+                onPhaseChange: nil,
+                session: URLSession(configuration: configuration),
+                cleansRussianOCRNoise: cleans
+            )
+            _ = try await engine.translate(text: mixed, sourceLanguageCode: "ru", targetLanguageCode: "zh-CN")
+
+            let body = try #require(bodies.snapshot().first)
+            #expect(body.contains("设置") == !cleans, "cleansRussianOCRNoise=\(cleans)")
+        }
+    }
 
     @Test func legacyKeychainItemPolicyOnlyMatchesMissingOrEmptyService() {
         #expect(LegacyKeychainItemPolicy.isLegacyService(nil))

@@ -51,6 +51,9 @@ struct OpenAICompatibleEngine: TranslationEngine {
     let onPhaseChange: ((String) -> Void)?
     let onPartialText: (@MainActor (_ text: String, _ replacesPreviousText: Bool) -> Void)?
     let session: URLSession
+    /// 源语言是俄语时，先按「旧版 OCR 把西里尔字母认成拉丁字母」的假设清洗一遍（会删掉汉字）。
+    /// 给手动粘贴的 OCR 文本用；截图翻译送来的是 Vision 干净的识别结果，要关掉，否则混排里的中文会被删掉。
+    let cleansRussianOCRNoise: Bool
 
     init(
         baseURL: String,
@@ -59,7 +62,8 @@ struct OpenAICompatibleEngine: TranslationEngine {
         endpointMode: OpenAIEndpointMode,
         onPhaseChange: ((String) -> Void)?,
         onPartialText: (@MainActor (_ text: String, _ replacesPreviousText: Bool) -> Void)? = nil,
-        session: URLSession = .shared
+        session: URLSession = .shared,
+        cleansRussianOCRNoise: Bool = true
     ) {
         self.baseURL = baseURL
         self.apiKey = apiKey
@@ -68,6 +72,7 @@ struct OpenAICompatibleEngine: TranslationEngine {
         self.onPhaseChange = onPhaseChange
         self.onPartialText = onPartialText
         self.session = session
+        self.cleansRussianOCRNoise = cleansRussianOCRNoise
     }
 
     private func parseRateLimitError(body: String, httpStatusCode: Int) -> RateLimitError {
@@ -382,7 +387,9 @@ struct OpenAICompatibleEngine: TranslationEngine {
         // - 但用户手动粘贴 OCR 文本到输入框时，没有这层清洗。
         // 这里统一做一下，让两条路径表现一致。
         var preparedText = text
-        if sourceLanguageCode == "ru" || (!isAutoDetect && sourceLanguageCode.hasPrefix("ru-")) {
+        if !cleansRussianOCRNoise {
+            // 截图翻译：Vision 的识别结果已经是干净的，不做这层清洗。
+        } else if sourceLanguageCode == "ru" || (!isAutoDetect && sourceLanguageCode.hasPrefix("ru-")) {
             preparedText = fixRussianOCRNoise(preparedText)
         } else if isAutoDetect, looksLikeRussianOCRArtifacts(preparedText) {
             preparedText = fixRussianOCRNoise(preparedText)

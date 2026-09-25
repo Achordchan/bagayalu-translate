@@ -3,6 +3,29 @@ import Foundation
 /// 截图 OCR 流程使用的翻译调度，与主窗口 ViewModel 解耦。
 @MainActor
 enum ScreenshotTranslationService {
+    /// 截图翻译送的是 Vision 干净的识别结果，关掉给手动粘贴的 OCR 文本准备的俄语清洗：
+    /// 那层清洗会删掉所有汉字，混排段落按俄语翻时里面的中文就没了。
+    static func makeRequest(
+        text: String,
+        engineType: TranslationEngineType,
+        sourceLanguageCode: String,
+        targetLanguageCode: String,
+        openAIBaseURL: String,
+        openAIModel: String,
+        openAIEndpointMode: OpenAIEndpointMode
+    ) -> TranslationRequestContext? {
+        TranslationRequestContext.make(
+            text: text,
+            engineType: engineType,
+            sourceLanguageCode: sourceLanguageCode,
+            targetLanguageCode: targetLanguageCode,
+            openAIBaseURL: openAIBaseURL,
+            openAIModel: openAIModel,
+            openAIEndpointMode: openAIEndpointMode,
+            cleansRussianOCRNoise: false
+        )
+    }
+
     static func translate(
         text: String,
         sourceLanguageCode: String,
@@ -13,11 +36,14 @@ enum ScreenshotTranslationService {
         appleTranslationCoordinator: AppleTranslationCoordinator,
         onPhaseChange: ((String) -> Void)?
     ) async -> Result<String, Error> {
-        guard let request = TranslationRequestContext.make(
+        guard let request = makeRequest(
             text: text,
-            settings: settings,
+            engineType: settings.engineType,
             sourceLanguageCode: sourceLanguageCode,
-            targetLanguageCode: targetLanguageCode
+            targetLanguageCode: targetLanguageCode,
+            openAIBaseURL: settings.openAIBaseURL,
+            openAIModel: settings.openAIModel,
+            openAIEndpointMode: settings.openAIEndpointMode
         ) else {
             return .success("")
         }
