@@ -1,4 +1,5 @@
 import Foundation
+import OpenAI
 
 /// 截图翻译按段翻译的调度：在线引擎分批、分不回原段数时逐段重来、失败怎么处理。
 /// 不碰界面和具体引擎，翻译调用从外部传进来，方便单测。
@@ -155,8 +156,27 @@ struct ScreenshotBlockTranslator {
             return true
         }
         if case .badStatus(let code, _)? = error as? HTTPClient.HTTPError {
-            return code == 401 || code == 403 || code == 429 || code >= 500
+            return isRequestWideStatus(code)
+        }
+        // OpenAI SDK 的三种失败形态：流式请求带状态码；普通请求能解码出错误体时只有 type / code；
+        // Gemini 格式的错误体里 code 就是状态码。
+        if case .statusError(_, let code)? = error as? OpenAIError {
+            return isRequestWideStatus(code)
+        }
+        if let response = error as? APIErrorResponse {
+            let fields = [response.error.type, response.error.code ?? ""].map { $0.lowercased() }
+            let markers = ["auth", "permission", "invalid_api_key", "quota", "billing", "rate_limit",
+                           "server_error", "overloaded", "model_not_found"]
+            return fields.contains { field in markers.contains { field.contains($0) } }
+        }
+        if let response = error as? GeminiAPIErrorResponse {
+            return isRequestWideStatus(response.error.code)
         }
         return (error as NSError).domain == NSURLErrorDomain
+    }
+
+    /// 鉴权失败、没权限、限流、服务端出错：换一段文字也一样。
+    nonisolated private static func isRequestWideStatus(_ code: Int) -> Bool {
+        code == 401 || code == 403 || code == 429 || code >= 500
     }
 }

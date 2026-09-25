@@ -6,6 +6,7 @@
 //
 
 import AppKit
+import OpenAI
 import Testing
 @testable import 大佐翻译官v1
 
@@ -388,6 +389,29 @@ struct ScreenshotTranslationSourceResolverTests {
         #expect(resolve(["다운로드 Save"], target: "ko") == [LanguagePreset.auto.code])
     }
 
+    /// 审核第五轮：识别器认出是目标语言，也要先看有没有夹着够分量的外文。中文段落里的一句英文说明
+    /// 要翻，而且要按英文翻——交给引擎自动检测的话，它会把整段认成中文、原样返回。
+    @Test func detectedTargetLanguageWithSubstantialForeignTextIsStillTranslated() {
+        let mixed = "下载方法：Open the App Store and search for Xcode"
+        let result = resolve(
+            [mixed],
+            detected: [mixed: "zh-CN", "Open the App Store and search for Xcode": "en"],
+            overall: "zh-CN"
+        )
+        #expect(result == ["en"])
+    }
+
+    @Test func detectedTargetLanguageWithOnlyABrandNameIsSkipped() {
+        let text = "打开 Wi-Fi 设置后重新连接网络"
+        #expect(resolve([text], detected: [text: "zh-CN"], overall: "zh-CN") == [nil])
+    }
+
+    @Test func chineseSentenceInsideAnEnglishParagraphIsTranslatedAsChinese() {
+        let mixed = "Please read the notice below: 请在周五之前提交季度报告"
+        let result = resolve([mixed], target: "en", detected: [mixed: "en"], overall: "en")
+        #expect(result == ["zh-CN"])
+    }
+
     @Test func shortChineseLabelOnAnEnglishPageIsSkippedForAChineseTarget() {
         #expect(resolve(["Install updates automatically", "设置"], detected: ["Install updates automatically": "en"], overall: "en") == ["en", nil])
     }
@@ -518,6 +542,25 @@ struct ScreenshotBlockTranslatorTests {
         #expect(!ScreenshotBlockTranslator.isLanguagePairUnavailable(AppleTranslationError.unableToIdentifyLanguage))
         #expect(!ScreenshotBlockTranslator.isLanguagePairUnavailable(HTTPClient.HTTPError.badStatus(code: 400, body: "")))
         #expect(!ScreenshotBlockTranslator.isLanguagePairUnavailable(Unsupported()))
+    }
+
+    /// 审核第五轮：OpenAI SDK 的 HTTP 失败也要按鉴权 / 限流 / 服务端错误归为整体性失败。
+    @Test func openAISDKFailuresAreClassifiedLikeHTTPFailures() throws {
+        let url = try #require(URL(string: "https://api.example.com/v1/responses"))
+        func status(_ code: Int) throws -> OpenAIError {
+            .statusError(response: try #require(HTTPURLResponse(url: url, statusCode: code, httpVersion: nil, headerFields: nil)), statusCode: code)
+        }
+        #expect(ScreenshotBlockTranslator.isRequestWide(try status(401)))
+        #expect(ScreenshotBlockTranslator.isRequestWide(try status(503)))
+        #expect(!ScreenshotBlockTranslator.isRequestWide(try status(400)))
+
+        let decoder = JSONDecoder()
+        let invalidKey = try decoder.decode(APIErrorResponse.self, from: Data(#"{"error":{"message":"Incorrect API key","type":"invalid_request_error","code":"invalid_api_key"}}"#.utf8))
+        let badInput = try decoder.decode(APIErrorResponse.self, from: Data(#"{"error":{"message":"bad input","type":"invalid_request_error","code":"invalid_value"}}"#.utf8))
+        let geminiOverloaded = try decoder.decode(GeminiAPIErrorResponse.self, from: Data(#"{"error":{"code":503,"message":"overloaded","status":"UNAVAILABLE"}}"#.utf8))
+        #expect(ScreenshotBlockTranslator.isRequestWide(invalidKey))
+        #expect(!ScreenshotBlockTranslator.isRequestWide(badInput))
+        #expect(ScreenshotBlockTranslator.isRequestWide(geminiOverloaded))
     }
 
     @Test func progressIsReportedAfterEachBatch() async throws {

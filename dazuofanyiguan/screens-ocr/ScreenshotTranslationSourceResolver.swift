@@ -13,6 +13,10 @@ import Foundation
 ///   拿整页主语言当翻译的源语言；但它恰好等于目标语言时不能据此跳过——
 ///   英文页面上单独的法文「Bonjour」也是拉丁字母。这种情况交给翻译引擎自动检测。
 /// 两档都不沾的（只有一个「Bonjour」、没有整页语言可参考）同样交给引擎自动检测。
+///
+/// 判成目标语言、准备跳过之前，还要看有没有夹着够分量的外文：中文段落里的一句英文说明要翻，
+/// 而且要按那句外文的语言翻——交给引擎自动检测的话，它会把整段认成中文、原样返回。
+/// 零星的品牌名、型号（「打开 Wi-Fi 设置」）不算，照旧跳过。
 enum ScreenshotTranslationSourceResolver {
     static func resolve(
         blockTexts: [String],
@@ -41,7 +45,12 @@ enum ScreenshotTranslationSourceResolver {
                 return LanguagePreset.auto.code
             }
             if inference.code == targetLanguageCode {
-                return inference.isDecisive ? nil : LanguagePreset.auto.code
+                guard inference.isDecisive else { return LanguagePreset.auto.code }
+                return languageOfForeignText(
+                    in: blockTexts[index],
+                    targetLanguageCode: targetLanguageCode,
+                    detectLanguage: detectLanguage
+                )
             }
             return inference.code
         }
@@ -96,6 +105,75 @@ enum ScreenshotTranslationSourceResolver {
         if let pageLanguage, isWritten(scripts, inScriptOf: pageLanguage) {
             return Inference(code: pageLanguage, isDecisive: false)
         }
+        return nil
+    }
+
+    /// 夹在目标语言里、够分量的外文是什么语言；没有这样的外文时返回 nil（整段不用翻）。
+    private static func languageOfForeignText(
+        in text: String,
+        targetLanguageCode: String,
+        detectLanguage: (String) -> String?
+    ) -> String? {
+        guard let foreign = foreignText(in: text, targetLanguageCode: targetLanguageCode) else { return nil }
+        let scripts = TextScriptPresence(in: foreign)
+        let unspaced = scripts.containsHan || scripts.containsKana || scripts.containsThai
+        let letters = foreign.filter(\.isLetter).count
+        let words = foreign.split(separator: " ").filter { $0.count >= 2 }.count
+        guard unspaced ? letters >= 4 : (words >= 3 || letters >= 15) else { return nil }
+
+        let language = detectLanguage(foreign) ?? guessLanguage(of: scripts, text: foreign)
+        guard let language, language != targetLanguageCode else { return nil }
+        return language
+    }
+
+    /// 把不属于目标语言书写系统的字母挑出来，词与词之间留一个空格。目标语言的书写系统认不出时返回 nil。
+    private static func foreignText(in text: String, targetLanguageCode: String) -> String? {
+        guard let isNative = nativeScriptTest(for: targetLanguageCode) else { return nil }
+        var result = ""
+        for character in text {
+            let scripts = TextScriptPresence(in: String(character))
+            let cjkSymbol = character.unicodeScalars.allSatisfy { (0x3000...0x303F).contains($0.value) }
+            if scripts.containsLetters, !cjkSymbol, !isNative(scripts) {
+                result.append(character)
+            } else if result.last != " " {
+                result.append(" ")
+            }
+        }
+        let trimmed = result.trimmingCharacters(in: .whitespaces)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func nativeScriptTest(for languageCode: String) -> ((TextScriptPresence) -> Bool)? {
+        switch languageCode {
+        case "zh-CN", "zh-TW": return { $0.containsHan || $0.containsBopomofo }
+        case "ja": return { $0.containsHan || $0.containsKana }
+        case "ko": return { $0.containsHangul || $0.containsHan }
+        case "ru", "uk", "bg": return { $0.containsCyrillic }
+        case "ar", "fa", "ur": return { $0.containsArabic }
+        case "he": return { $0.containsHebrew }
+        case "el": return { $0.containsGreek }
+        case "th": return { $0.containsThai }
+        case "hi": return { $0.containsDevanagari }
+        case "bn": return { $0.containsBengali }
+        case "ta": return { $0.containsTamil }
+        case _ where latinScriptLanguages.contains(languageCode): return { $0.containsLatin }
+        default: return nil
+        }
+    }
+
+    /// 识别器弃权时，按书写系统猜外文的语言。这里是在决定「要不要翻、按什么翻」，
+    /// 猜错顶多译得不准；交给引擎自动检测反而会被整段的主语言带偏、原样返回。
+    private static func guessLanguage(of scripts: TextScriptPresence, text: String) -> String? {
+        if scripts.containsKana { return "ja" }
+        if scripts.containsHangul { return "ko" }
+        if scripts.containsHan || scripts.containsBopomofo {
+            return chineseVariant(of: text, bopomofo: scripts.containsBopomofo) ?? "zh-CN"
+        }
+        if let language = languageOfUniqueScript(scripts) { return language }
+        if scripts.containsArabic { return "ar" }
+        if scripts.containsDevanagari { return "hi" }
+        if scripts.containsCyrillic { return "ru" }
+        if scripts.containsLatin { return "en" }
         return nil
     }
 
