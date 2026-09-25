@@ -383,10 +383,12 @@ struct ScreenshotTranslationSourceResolverTests {
     }
 
     /// 审核第四轮：混排的短标签不能因为含某种书写系统就整段判成那门语言再跳过。
+    /// 审核第七轮：也不交给引擎自动检测（会被目标语言带偏、原样返回），按外文那部分的语言翻。
     @Test func mixedScriptLabelIsNotSkippedBecauseOfOneScript() {
-        #expect(resolve(["下载 Save"], target: "zh-CN") == [LanguagePreset.auto.code])
-        #expect(resolve(["ダウンロード Save"], target: "ja") == [LanguagePreset.auto.code])
-        #expect(resolve(["다운로드 Save"], target: "ko") == [LanguagePreset.auto.code])
+        #expect(resolve(["下载 Save"], target: "zh-CN") == ["en"])
+        #expect(resolve(["ダウンロード Save"], target: "ja") == ["en"])
+        #expect(resolve(["다운로드 Save"], target: "ko") == ["en"])
+        #expect(resolve(["Save 下载"], target: "en") == ["zh-CN"])
     }
 
     /// 审核第五轮：识别器认出是目标语言，也要先看有没有夹着够分量的外文。中文段落里的一句英文说明
@@ -401,9 +403,39 @@ struct ScreenshotTranslationSourceResolverTests {
         #expect(result == ["en"])
     }
 
-    @Test func detectedTargetLanguageWithOnlyABrandNameIsSkipped() {
-        let text = "打开 Wi-Fi 设置后重新连接网络"
-        #expect(resolve([text], detected: [text: "zh-CN"], overall: "zh-CN") == [nil])
+    /// 审核第七轮：夹着的外文哪怕只有一个词也要翻。光看长短分不出「Save」这样的按钮名和「Wi-Fi」这样的品牌名，
+    /// 品牌名交给引擎原样保留。
+    @Test func detectedTargetLanguageWithAShortForeignWordIsStillTranslated() {
+        let instruction = "请点击 Save 按钮后继续操作"
+        #expect(resolve([instruction], detected: [instruction: "zh-CN"], overall: "zh-CN") == ["en"])
+        let brand = "打开 Wi-Fi 设置后重新连接网络"
+        #expect(resolve([brand], detected: [brand: "zh-CN"], overall: "zh-CN") == ["en"])
+        // 只有目标语言的字（数字、符号不算外文）照旧跳过。
+        let plain = "第 3 步：打开设置（约 2 分钟）"
+        #expect(resolve([plain], detected: [plain: "zh-CN"], overall: "zh-CN") == [nil])
+    }
+
+    /// 审核第七轮：简繁混用的短标签两种转换都会变，要按另一种字形翻（转换），不能当成简繁同形跳过。
+    @Test func mixedChineseVariantsAreConvertedToTheTargetVariant() {
+        #expect(resolve(["发佈"], target: "zh-CN") == ["zh-TW"])
+        #expect(resolve(["发佈"], target: "zh-TW") == ["zh-CN"])
+        // 简繁同形、或者已经是目标字形的照旧跳过。
+        #expect(resolve(["中文"], target: "zh-CN") == [nil])
+        #expect(resolve(["中文"], target: "zh-TW") == [nil])
+        #expect(resolve(["设置"], target: "zh-CN") == [nil])
+        #expect(resolve(["設置"], target: "zh-TW") == [nil])
+    }
+
+    /// 识别器把整段认成另一种中文变体时，也按字形判断要不要转：没有要转的字就跳过。
+    @Test func detectorVariantDoesNotOverrideGlyphsForAChineseTarget() {
+        let simplified = "本次更新修复了若干已知问题。请重新启动应用以完成安装。"
+        let detected = [
+            simplified: "zh-TW",
+            "本次更新修复了若干已知问题。": "zh-TW",
+            "请重新启动应用以完成安装。": "zh-TW"
+        ]
+        #expect(resolve([simplified], target: "zh-CN", detected: detected, overall: "zh-TW") == [nil])
+        #expect(resolve([simplified], target: "zh-TW", detected: detected, overall: "zh-TW") == ["zh-CN"])
     }
 
     @Test func chineseSentenceInsideAnEnglishParagraphIsTranslatedAsChinese() {
@@ -452,6 +484,19 @@ struct ScreenshotTranslationSourceResolverTests {
         #expect(resolveWithRealDetector([english]) == [nil])
     }
 
+    /// 真实识别器：中文里夹一个英文按钮名，按英文翻；纯中文照旧跳过。
+    @Test func realDetectorKeepsAShortEnglishLabelInsideChineseEligible() {
+        let resolveWithRealDetector = { (texts: [String]) in
+            ScreenshotTranslationSourceResolver.resolve(
+                blockTexts: texts,
+                sourceLanguageCode: LanguagePreset.auto.code,
+                targetLanguageCode: "zh-CN"
+            )
+        }
+        #expect(resolveWithRealDetector(["请点击 Save 按钮后继续操作"]) == ["en"])
+        #expect(resolveWithRealDetector(["请点击保存按钮后继续操作"]) == [nil])
+    }
+
     @Test func shortChineseLabelOnAnEnglishPageIsSkippedForAChineseTarget() {
         #expect(resolve(["Install updates automatically", "设置"], detected: ["Install updates automatically": "en"], overall: "en") == ["en", nil])
     }
@@ -473,6 +518,16 @@ struct ScreenshotBlockTranslatorTests {
             job("Help", "en")
         ])
         #expect(batches.map { $0.map(\.text) } == [["Sign in", "Forgot password?"], ["Annuler"], ["Help"]])
+    }
+
+    /// 审核第七轮：源语言是自动检测的段各自单独一批，它们不一定是同一种语言。
+    @Test func autoDetectedJobsAreNeverBatchedTogether() {
+        let batches = ScreenshotBlockTranslator.batches([
+            job("مرحبا", "auto"), job("Hello", "auto"),
+            job("Sign in", "en"), job("Cancel", "en"),
+            job("Bonjour", "auto")
+        ])
+        #expect(batches.map { $0.map(\.text) } == [["مرحبا"], ["Hello"], ["Sign in", "Cancel"], ["Bonjour"]])
     }
 
     @Test func batchesRespectTheJobAndCharacterLimits() {

@@ -116,6 +116,8 @@ struct ScreenshotBlockTranslator {
 
     /// 相邻、同源语言的段合成一批；每批最多 14 段、约 2200 字，沿用原先 OpenAI 分块的上限：
     /// 一次太长容易超限或不稳定。
+    /// 源语言没定下来（`auto`）的段各自单独一批：它们不一定是同一种语言，合成一段请求时
+    /// 引擎只会整体认一次语言，分回原段数也查不出译错。
     nonisolated static func batches(_ jobs: [Job]) -> [[Job]] {
         let maxJobsPerBatch = 14
         let maxCharactersPerBatch = 2200
@@ -124,6 +126,15 @@ struct ScreenshotBlockTranslator {
         var current: [Job] = []
         var characters = 0
         for job in jobs {
+            if job.sourceLanguageCode == LanguagePreset.auto.code {
+                if !current.isEmpty {
+                    batches.append(current)
+                    current = []
+                    characters = 0
+                }
+                batches.append([job])
+                continue
+            }
             let length = job.text.count + 1
             if let first = current.first,
                first.sourceLanguageCode != job.sourceLanguageCode

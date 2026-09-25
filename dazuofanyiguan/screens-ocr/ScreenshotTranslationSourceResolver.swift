@@ -15,10 +15,12 @@ import NaturalLanguage
 ///   英文页面上单独的法文「Bonjour」也是拉丁字母。这种情况交给翻译引擎自动检测。
 /// 两档都不沾的（只有一个「Bonjour」、没有整页语言可参考）同样交给引擎自动检测。
 ///
-/// 判成目标语言、准备跳过之前，还要看有没有夹着够分量的外文：中文段落里的一句英文说明要翻，
-/// 而且要按那句外文的语言翻——交给引擎自动检测的话，它会把整段认成中文、原样返回。
-/// 两种都查：书写系统不同的（中文里的英文），逐句识别语种查同一种书写系统的（英文里的西班牙语）。
-/// 零星的品牌名、型号（「打开 Wi-Fi 设置」）不算，照旧跳过。
+/// 判成目标语言、准备跳过之前，还要看有没有夹着外文：中文段落里的英文要翻，
+/// 而且要按那段外文的语言翻——交给引擎自动检测的话，它会把整段认成中文、原样返回。
+/// 两种都查：书写系统不同的（中文里的英文），哪怕只有一个词（「请点击 Save 按钮」）也翻——
+/// 光看长短分不出按钮名和品牌名，品牌名、型号交给引擎原样保留；同一种书写系统的（英文里的西班牙语）
+/// 只能逐句识别语种，句子够长才认得准。
+/// 目标是中文、这段也是中文时，只看要不要简繁转换：转成目标字形会变（哪怕简繁混用、只有两个字），就要翻。
 enum ScreenshotTranslationSourceResolver {
     static func resolve(
         blockTexts: [String],
@@ -37,24 +39,32 @@ enum ScreenshotTranslationSourceResolver {
 
         let overall = detectLanguage(blockTexts.joined(separator: "\n"))
         return blockTexts.indices.map { index in
+            let text = blockTexts[index]
             guard hasLetters[index] else { return nil }
-            guard let inference = inferLanguage(
-                of: blockTexts[index],
+            let inference = inferLanguage(
+                of: text,
                 pageLanguage: overall,
                 targetLanguageCode: targetLanguageCode,
                 detectLanguage: detectLanguage
-            ) else {
+            )
+            guard let inference, inference.isDecisive || inference.code != targetLanguageCode else {
+                // 认不准，交给引擎自动检测。但夹着目标语言的字时，引擎会整段认成目标语言、原样返回，
+                // 这时按外文那部分的语言翻（「下载 Save」）。
+                if containsNativeLetters(text, targetLanguageCode: targetLanguageCode),
+                   let source = sourceOfDifferentScriptText(in: text, targetLanguageCode: targetLanguageCode, detectLanguage: detectLanguage) {
+                    return source
+                }
                 return LanguagePreset.auto.code
             }
-            if inference.code == targetLanguageCode {
-                guard inference.isDecisive else { return LanguagePreset.auto.code }
-                return languageOfForeignText(
-                    in: blockTexts[index],
-                    targetLanguageCode: targetLanguageCode,
-                    detectLanguage: detectLanguage
-                )
+
+            let bothChinese = isChinese(inference.code) && isChinese(targetLanguageCode)
+            if bothChinese, let source = variantToConvert(text, to: targetLanguageCode) {
+                return source
             }
-            return inference.code
+            guard bothChinese || inference.code == targetLanguageCode else { return inference.code }
+            // 已经是目标语言：夹着的外文照样要翻。
+            return sourceOfDifferentScriptText(in: text, targetLanguageCode: targetLanguageCode, detectLanguage: detectLanguage)
+                ?? sourceOfSameScriptSentences(in: text, targetLanguageCode: targetLanguageCode, detectLanguage: detectLanguage)
         }
     }
 
@@ -110,20 +120,26 @@ enum ScreenshotTranslationSourceResolver {
         return nil
     }
 
-    /// 夹在目标语言里、够分量的外文是什么语言；没有这样的外文时返回 nil（整段不用翻）。
-    private static func languageOfForeignText(
+    /// 夹着的、书写系统和目标语言不同的外文按什么语言翻：先让识别器认，认不出按书写系统猜，
+    /// 还猜不出就交给引擎自动检测。没有这样的外文时返回 nil。
+    private static func sourceOfDifferentScriptText(
         in text: String,
         targetLanguageCode: String,
         detectLanguage: (String) -> String?
     ) -> String? {
-        if let foreign = foreignText(in: text, targetLanguageCode: targetLanguageCode), isSubstantial(foreign) {
-            let scripts = TextScriptPresence(in: foreign)
-            if let language = detectLanguage(foreign) ?? guessLanguage(of: scripts, text: foreign),
-               language != targetLanguageCode {
-                return language
-            }
-        }
-        // 同一种书写系统的外语只能靠识别语种：逐句认，够长的句子认出别的语言就按它翻。
+        guard let foreign = foreignText(in: text, targetLanguageCode: targetLanguageCode) else { return nil }
+        let language = detectLanguage(foreign) ?? guessLanguage(of: TextScriptPresence(in: foreign), text: foreign)
+        guard let language, language != targetLanguageCode else { return LanguagePreset.auto.code }
+        return language
+    }
+
+    /// 同一种书写系统的外语只能靠识别语种：逐句认，够长的句子认出别的语言就按它翻。都是目标语言时返回 nil。
+    /// 目标是中文时，识别器说这句是简体还是繁体不算数：要不要转换已经按字形判断过了。
+    private static func sourceOfSameScriptSentences(
+        in text: String,
+        targetLanguageCode: String,
+        detectLanguage: (String) -> String?
+    ) -> String? {
         let tokenizer = NLTokenizer(unit: .sentence)
         tokenizer.string = text
         var foreignLanguage: String?
@@ -131,14 +147,16 @@ enum ScreenshotTranslationSourceResolver {
             let sentence = text[range].trimmingCharacters(in: .whitespacesAndNewlines)
             guard isSubstantial(sentence),
                   let language = detectLanguage(sentence),
-                  language != targetLanguageCode else { return true }
+                  language != targetLanguageCode,
+                  !(isChinese(language) && isChinese(targetLanguageCode)) else { return true }
             foreignLanguage = language
             return false
         }
         return foreignLanguage
     }
 
-    /// 够不够分量：有空格的书写系统 ≥3 个词（每词 ≥2 个字母）或 ≥15 个字母；汉字、假名、泰文 ≥4 个字。
+    /// 句子够不够长、识别语种认得准不准：有空格的书写系统 ≥3 个词（每词 ≥2 个字母）或 ≥15 个字母；
+    /// 汉字、假名、泰文 ≥4 个字。
     private static func isSubstantial(_ text: String) -> Bool {
         let scripts = TextScriptPresence(in: text)
         let letters = text.filter(\.isLetter).count
@@ -164,6 +182,23 @@ enum ScreenshotTranslationSourceResolver {
         }
         let trimmed = result.trimmingCharacters(in: .whitespaces)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// 有没有目标语言书写系统的字母。
+    private static func containsNativeLetters(_ text: String, targetLanguageCode: String) -> Bool {
+        guard let isNative = nativeScriptTest(for: targetLanguageCode) else { return false }
+        return text.contains { isNative(TextScriptPresence(in: String($0))) }
+    }
+
+    /// 目标是中文时要不要做简繁转换：转成目标字形会变，就返回另一种字形（按它翻就是转换）。
+    /// 简繁混用的（「发佈」）两种转换都会变，同样要转；简繁同形的转不转都一样。
+    private static func variantToConvert(_ text: String, to targetLanguageCode: String) -> String? {
+        let (transform, otherVariant) = targetLanguageCode == "zh-TW"
+            ? ("Hans-Hant", "zh-CN")
+            : ("Hant-Hans", "zh-TW")
+        guard let converted = text.applyingTransform(StringTransform(transform), reverse: false),
+              converted != text else { return nil }
+        return otherVariant
     }
 
     private static func nativeScriptTest(for languageCode: String) -> ((TextScriptPresence) -> Bool)? {
