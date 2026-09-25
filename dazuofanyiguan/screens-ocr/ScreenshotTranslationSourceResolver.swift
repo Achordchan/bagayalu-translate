@@ -6,7 +6,12 @@ import Foundation
 /// 自动检测时逐段判断，而不是整张图定一个语言：截图里中英混排很常见，
 /// 中文网页上的英文按钮要翻，中文正文要跳过。短文本上识别器会弃权，这时依次看：
 /// 它和整张图的主语言是不是同一种书写系统（法文页面里的「Annuler」按法语翻）；
-/// 不是的话按书写系统兜底（中文页面里的「Sign in」按英语翻）。
+/// 不是的话按书写系统兜底。
+///
+/// 只有「有把握」的判断才能决定跳过：识别器认出来的、或整页主语言且书写系统对得上的，
+/// 以及汉字、假名、谚文这类本身就能确定语言的书写系统。拉丁字母、西里尔字母只能猜
+/// （兜底默认英语、俄语），猜出来的交给翻译引擎自动检测——整张图只有「Bonjour」、
+/// 目标是英语时，把它猜成英语再判成「不用翻」就错了。
 enum ScreenshotTranslationSourceResolver {
     static func resolve(
         blockTexts: [String],
@@ -26,23 +31,54 @@ enum ScreenshotTranslationSourceResolver {
         let overall = detectLanguage(blockTexts.joined(separator: "\n"))
         return blockTexts.indices.map { index in
             guard hasLetters[index] else { return nil }
-            let text = blockTexts[index]
-            let code = detectLanguage(text)
-                ?? overall.flatMap { isWritten(text, inScriptOf: $0) ? $0 : nil }
-                ?? LanguageScriptFallback.sourceLanguageCode(
-                    for: text,
-                    preferredChineseVariant: targetLanguageCode
-                )
-                ?? overall
-                ?? LanguagePreset.auto.code
+            guard let code = confidentLanguage(
+                of: blockTexts[index],
+                pageLanguage: overall,
+                targetLanguageCode: targetLanguageCode,
+                detectLanguage: detectLanguage
+            ) else {
+                return LanguagePreset.auto.code
+            }
             return code == targetLanguageCode ? nil : code
         }
     }
 
+    /// 有把握时返回语言代码；只能靠猜时返回 nil。
+    private static func confidentLanguage(
+        of text: String,
+        pageLanguage: String?,
+        targetLanguageCode: String,
+        detectLanguage: (String) -> String?
+    ) -> String? {
+        if let detected = detectLanguage(text) {
+            return detected
+        }
+        if let pageLanguage, isWritten(text, inScriptOf: pageLanguage) {
+            return pageLanguage
+        }
+        let scripts = TextScriptPresence(in: text)
+        guard scripts.containsKana || scripts.containsHangul
+            || scripts.containsHan || scripts.containsBopomofo else {
+            return nil
+        }
+        return LanguageScriptFallback.sourceLanguageCode(
+            for: text,
+            preferredChineseVariant: targetLanguageCode
+        )
+    }
+
+    private static let latinScriptLanguages: Set<String> = [
+        "en", "it", "fr", "de", "es", "pt", "nl", "sv", "da", "no", "fi",
+        "pl", "cs", "hu", "ro", "tr", "vi", "id", "ms", "fil", "sw"
+    ]
+
     /// 这段文字用的书写系统和这门语言对得上吗。
-    /// 阿拉伯文、泰文等 TextScriptPresence 不认识的书写系统一律算对不上，交给后面的兜底。
     private static func isWritten(_ text: String, inScriptOf languageCode: String) -> Bool {
         let scripts = TextScriptPresence(in: text)
+        let hasRecognizedScript = scripts.containsLatin || scripts.containsCyrillic
+            || scripts.containsHan || scripts.containsKana
+            || scripts.containsHangul || scripts.containsBopomofo
+
         switch languageCode {
         case "ja":
             return scripts.containsKana || (scripts.containsHan && !scripts.containsHangul)
@@ -53,10 +89,14 @@ enum ScreenshotTranslationSourceResolver {
             return scripts.containsHangul
         case "ru", "uk", "bg":
             return scripts.containsCyrillic
-        default:
+        case _ where latinScriptLanguages.contains(languageCode):
             return scripts.containsLatin
                 && !scripts.containsHan && !scripts.containsKana
                 && !scripts.containsHangul && !scripts.containsCyrillic
+        default:
+            // 阿拉伯文、泰文、希腊文等 TextScriptPresence 认不出的书写系统：
+            // 有字母、又不属于任何认得出的书写系统，才算对得上。
+            return scripts.containsLetters && !hasRecognizedScript
         }
     }
 }

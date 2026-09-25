@@ -287,8 +287,9 @@ struct ScreenshotTranslationSourceResolverTests {
         #expect(result == [nil, "en"])
     }
 
-    @Test func shortLatinLabelOnAChinesePageIsTranslatedAsEnglish() {
-        #expect(resolve(["本次更新修复了若干已知问题", "Sign in"], detected: ["本次更新修复了若干已知问题": "zh-CN"], overall: "zh-CN") == [nil, "en"])
+    /// 中文页面上的短英文按钮：书写系统对不上整页主语言，只能按拉丁字母猜，交给引擎自动检测。
+    @Test func shortLatinLabelOnAChinesePageIsLeftToTheEngineToDetect() {
+        #expect(resolve(["本次更新修复了若干已知问题", "Sign in"], detected: ["本次更新修复了若干已知问题": "zh-CN"], overall: "zh-CN") == [nil, LanguagePreset.auto.code])
     }
 
     @Test func shortLabelFollowsThePageLanguageWhenTheScriptMatches() {
@@ -306,6 +307,31 @@ struct ScreenshotTranslationSourceResolverTests {
 
     @Test func numbersAndSymbolsAreNeverSentForTranslation() {
         #expect(resolve(["12:30", "$9.99", "→"], overall: "en") == [nil, nil, nil])
+    }
+
+    /// 审核发现：整张图只有 Bonjour、目标英语时，识别器弃权、书写系统兜底猜成英语，
+    /// 旧逻辑据此判成「不需要翻译」。猜出来的语言不能作为跳过的依据。
+    @Test func aGuessThatMatchesTheTargetDoesNotSkipTheBlock() {
+        #expect(resolve(["Bonjour"], target: "en") == [LanguagePreset.auto.code])
+    }
+
+    /// 审核发现：旧逻辑把没列出的语言一律当拉丁文，阿拉伯文页面上的 Sign in 被当成阿拉伯文。
+    @Test func shortLatinLabelOnAnArabicPageIsNotTreatedAsArabic() {
+        let arabic = "هذا نص عربي طويل بما يكفي للكشف عن اللغة"
+        let result = resolve([arabic, "Sign in"], target: "ar", detected: [arabic: "ar"], overall: "ar")
+        #expect(result == [nil, LanguagePreset.auto.code])
+    }
+
+    /// 审核发现：书写系统对不上、兜底也认不出时，旧逻辑又把整页主语言塞回来，
+    /// 中文页面上的阿拉伯文标签被当成中文、在目标为中文时被跳过。
+    @Test func unknownScriptLabelOnAChinesePageIsNotSkipped() {
+        let result = resolve(["本次更新修复了若干已知问题", "حفظ"], detected: ["本次更新修复了若干已知问题": "zh-CN"], overall: "zh-CN")
+        #expect(result == [nil, LanguagePreset.auto.code])
+    }
+
+    @Test func shortLabelInThePageScriptFollowsANonLatinPageLanguage() {
+        let arabic = "هذا نص عربي طويل بما يكفي للكشف عن اللغة"
+        #expect(resolve([arabic, "حفظ"], target: "en", detected: [arabic: "ar"], overall: "ar") == ["ar", "ar"])
     }
 
     @Test func shortChineseLabelOnAnEnglishPageIsSkippedForAChineseTarget() {
