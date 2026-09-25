@@ -547,10 +547,11 @@ final class ScreenshotOCRCoordinator: ObservableObject {
         session.translations = translations
         session.translatedText = blocks.map { translations[$0.id] ?? $0.text }.joined(separator: "\n")
         session.stage = .translated
-        let untranslated = jobs.count - outcome.succeeded
-        if untranslated > 0 {
-            let reason = outcome.failures.first.map { "（\($0.localizedDescription)）" } ?? ""
-            session.showHUD("有 \(untranslated) 段没翻译成功，已保留原文\(reason)", style: .warning)
+        if let warning = outcome.incompleteWarning(
+            jobCount: jobs.count,
+            targetName: LanguagePreset.displayName(for: targetLanguageCode)
+        ) {
+            session.showHUD(warning, style: .warning)
         }
     }
 

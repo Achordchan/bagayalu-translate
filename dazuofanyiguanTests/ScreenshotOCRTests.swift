@@ -736,6 +736,68 @@ struct ScreenshotBlockTranslatorTests {
         #expect(outcome.translations[jobs[0].id] == "請點擊 保存 按鈕")
         #expect(outcome.succeeded == 1)
         #expect(outcome.failures.count == 1)
+        // 审核第九轮：第一遍都成功了，补翻失败也要让用户知道。
+        #expect(outcome.unconverted == 1)
+        let warning = try #require(outcome.incompleteWarning(jobCount: 1, targetName: "简体中文"))
+        #expect(warning.hasPrefix("有 1 段没转换成简体中文，已保留未转换的译文"))
+    }
+
+    @Test func incompleteWarningCoversUntranslatedAndUnconvertedBlocks() {
+        var outcome = ScreenshotBlockTranslator.Outcome()
+        outcome.succeeded = 3
+        #expect(outcome.incompleteWarning(jobCount: 3, targetName: "简体中文") == nil)
+        outcome.succeeded = 2
+        #expect(outcome.incompleteWarning(jobCount: 3, targetName: "简体中文") == "有 1 段没翻译成功，已保留原文")
+        outcome.unconverted = 1
+        #expect(outcome.incompleteWarning(jobCount: 3, targetName: "简体中文") == "有 1 段没翻译成功，已保留原文；另有 1 段没转换成简体中文")
+    }
+
+    /// 审核第九轮：一段超过单次请求的上限就按句子拆开翻，译完拼回原段（英文带空格、中文不带）。
+    @Test func oversizedBlocksAreSplitBySentenceAndReassembled() async throws {
+        let english = job("First sentence here. Second sentence here. Third one is here.", "en")
+        let chinese = job("第一句话写在这里。第二句话写在这里。第三句话写在这里。", "zh-CN")
+        var requests: [String] = []
+        var translator = ScreenshotBlockTranslator(batchesRequests: false) { text, _ in
+            requests.append(text)
+            return .success(text.hasPrefix("第") ? "〔\(text)〕" : "[\(text)]")
+        }
+        translator.maxCharactersPerRequest = 22
+        var progress: [[UUID: String]] = []
+        let outcome = try #require(await translator.run([english, chinese], shouldContinue: { true }, onProgress: { progress.append($0) }))
+
+        #expect(requests == [
+            "First sentence here.", "Second sentence here.", "Third one is here.",
+            "第一句话写在这里。第二句话写在这里。", "第三句话写在这里。"
+        ])
+        #expect(outcome.translations[english.id] == "[First sentence here.] [Second sentence here.] [Third one is here.]")
+        #expect(outcome.translations[chinese.id] == "〔第一句话写在这里。第二句话写在这里。〕〔第三句话写在这里。〕")
+        #expect(outcome.succeeded == 2)
+        // 拆开的段要等所有块都有结果才出现在进度里。
+        #expect(progress.map(\.count) == [0, 0, 1, 1, 2])
+
+        let long = String(repeating: "长", count: 50)
+        let pieces = ScreenshotBlockTranslator.split(job(long, "zh-CN"), maxCharacters: 22)
+        #expect(pieces.map(\.text.count) == [22, 22, 6])
+        #expect(pieces.map(\.text).joined() == long)
+    }
+
+    @Test func oneFailedChunkKeepsTheWholeBlockOriginal() async throws {
+        let paragraph = job("First sentence here. Second sentence here.", "en")
+        var translator = ScreenshotBlockTranslator(batchesRequests: false) { text, _ in
+            text.hasPrefix("Second") ? .failure(HTTPClient.HTTPError.badStatus(code: 400, body: "")) : .success("译")
+        }
+        translator.maxCharactersPerRequest = 22
+        let outcome = try #require(await translator.run([paragraph], shouldContinue: { true }, onProgress: { _ in }))
+        #expect(outcome.translations[paragraph.id] == paragraph.text)
+        #expect(outcome.succeeded == 0)
+    }
+
+    @Test func defaultRequestLimitIsWithinEveryEngineLimit() {
+        let limit = ScreenshotBlockTranslator.defaultMaxCharactersPerRequest
+        // 合批时每段之间的换行会换成换行标记，一批最多 14 段。
+        let markerOverhead = 13 * (" \(TranslationRequestContext.newlineMarker) ".count - 1)
+        #expect(limit + markerOverhead <= GoogleTranslateEngine.maxTotalCharacters)
+        #expect(limit + markerOverhead <= MicrosoftTranslateEngine.maxTotalCharacters)
     }
 
     @Test func progressIsReportedAfterEachBatch() async throws {

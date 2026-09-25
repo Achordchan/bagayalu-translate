@@ -1,7 +1,8 @@
 import Foundation
+import NaturalLanguage
 import OpenAI
 
-/// 截图翻译按段翻译的调度：在线引擎分批、分不回原段数时逐段重来、失败怎么处理。
+/// 截图翻译按段翻译的调度：在线引擎分批、分不回原段数时逐段重来、太长的段拆开翻、失败怎么处理。
 /// 不碰界面和具体引擎，翻译调用从外部传进来，方便单测。
 ///
 /// 失败分三类：
@@ -12,8 +13,11 @@ import OpenAI
 ///
 /// 没翻成的段一律保留原文。
 ///
+/// 一段超过单次请求的上限（`maxCharactersPerRequest`）就按句子拆成几块分别翻，译完拼回原来的段；
+/// 有一块没翻成，整段保留原文，免得半段原文半段译文。
+///
 /// 第一遍译完，`followUpSource` 说还要补翻的（目标是中文、译文里还留着另一种字形的字），按第一遍的译文再翻一次；
-/// 补翻失败就保留第一遍的译文，也不重复计入成功段数。
+/// 补翻失败就保留第一遍的译文，不重复计入成功段数，但记进 `Outcome.unconverted`，提示用户。
 @MainActor
 struct ScreenshotBlockTranslator {
     struct Job {
@@ -29,43 +33,86 @@ struct ScreenshotBlockTranslator {
         var failures: [Error] = []
         /// 因为整体性失败提前停下了。
         var stoppedEarly = false
+        /// 第一遍翻好了、补翻（简繁转换）没成功的段数；这些段保留第一遍的译文。
+        var unconverted = 0
+
+        /// 没翻完整时给用户的提示；都翻好了返回 nil。`targetName` 是目标语言的名字。
+        func incompleteWarning(jobCount: Int, targetName: String) -> String? {
+            let untranslated = jobCount - succeeded
+            let reason = failures.first.map { "（\($0.localizedDescription)）" } ?? ""
+            switch (untranslated > 0, unconverted > 0) {
+            case (true, true):
+                return "有 \(untranslated) 段没翻译成功，已保留原文；另有 \(unconverted) 段没转换成\(targetName)\(reason)"
+            case (true, false):
+                return "有 \(untranslated) 段没翻译成功，已保留原文\(reason)"
+            case (false, true):
+                return "有 \(unconverted) 段没转换成\(targetName)，已保留未转换的译文\(reason)"
+            case (false, false):
+                return nil
+            }
+        }
     }
+
+    /// 单次请求最多多少字：合批不超过它，单独一段超过它就拆开。取 2200，是原先 OpenAI 分块的大小，
+    /// 也在 Google（8000）、微软（30000）的单次上限以内——请求里的换行标记会让实际长度再多一点。
+    nonisolated static let defaultMaxCharactersPerRequest = 2200
 
     /// 在线引擎合批请求；Apple 本地翻译逐段翻。
     let batchesRequests: Bool
     let translate: (_ text: String, _ sourceLanguageCode: String) async -> Result<String, Error>
     /// 第一遍的译文还要不要按另一种源语言补翻一次；nil 表示不用。
     var followUpSource: (_ translation: String) -> String? = { _ in nil }
+    var maxCharactersPerRequest = Self.defaultMaxCharactersPerRequest
 
     /// `shouldContinue` 返回 false 时（选区已经换了）立即放弃，返回 nil。
-    /// `onProgress` 在每段 / 每批翻完后带上目前为止的结果调用。
+    /// `onProgress` 在每段 / 每批翻完后带上目前为止的结果调用（只含已经有结果的段）。
     func run(
         _ jobs: [Job],
         shouldContinue: () -> Bool,
         onProgress: ([UUID: String]) -> Void
     ) async -> Outcome? {
-        var outcome = Outcome()
-        var failedSources: Set<String> = []
+        // 以下都按「块」记：没拆的段就是一块、沿用段的 id。
+        let pieces = jobs.map { Self.split($0, maxCharacters: maxCharactersPerRequest) }
+        var translations: [UUID: String] = [:]
         var translatedIDs: Set<UUID> = []
+        var convertedIDs: Set<UUID> = []
+        var failures: [Error] = []
+        var stoppedEarly = false
+        var failedSources: Set<String> = []
 
-        // 补翻（`isFollowUp`）失败时不覆盖第一遍的译文，成功也不重复计数。
+        /// 拼回按段的结果：所有块都有了结果才算这一段有结果；有一块没翻成，整段保留原文。
+        func assembled() -> [UUID: String] {
+            var result: [UUID: String] = [:]
+            for (job, chunks) in zip(jobs, pieces) {
+                let parts = chunks.compactMap { translatedIDs.contains($0.id) ? translations[$0.id] : nil }
+                if parts.count == chunks.count {
+                    result[job.id] = parts.dropFirst().reduce(parts[0]) { OCRParagraphGrouper.joinLines($0, $1) }
+                } else if chunks.allSatisfy({ translations[$0.id] != nil }) {
+                    result[job.id] = job.text
+                }
+            }
+            return result
+        }
+
+        // 补翻（`isFollowUp`）失败时不覆盖第一遍的译文。
         func translateOne(_ job: Job, isFollowUp: Bool) async {
             if failedSources.contains(job.sourceLanguageCode) {
-                if !isFollowUp { outcome.translations[job.id] = job.text }
+                if !isFollowUp { translations[job.id] = job.text }
                 return
             }
             switch await translate(job.text, job.sourceLanguageCode) {
             case .success(let text):
-                outcome.translations[job.id] = text
-                if !isFollowUp {
-                    outcome.succeeded += 1
+                translations[job.id] = text
+                if isFollowUp {
+                    convertedIDs.insert(job.id)
+                } else {
                     translatedIDs.insert(job.id)
                 }
             case .failure(let error):
-                if !isFollowUp { outcome.translations[job.id] = job.text }
-                outcome.failures.append(error)
+                if !isFollowUp { translations[job.id] = job.text }
+                failures.append(error)
                 if Self.isRequestWide(error) {
-                    outcome.stoppedEarly = true
+                    stoppedEarly = true
                 } else if Self.isLanguagePairUnavailable(error),
                           job.sourceLanguageCode != LanguagePreset.auto.code {
                     failedSources.insert(job.sourceLanguageCode)
@@ -75,19 +122,21 @@ struct ScreenshotBlockTranslator {
 
         /// 翻一轮；选区换了返回 false。
         func translateAll(_ jobs: [Job], isFollowUp: Bool) async -> Bool {
-            let groups = batchesRequests ? Self.batches(jobs) : jobs.map { [$0] }
+            let groups = batchesRequests
+                ? Self.batches(jobs, maxCharacters: maxCharactersPerRequest)
+                : jobs.map { [$0] }
             for group in groups {
                 guard shouldContinue() else { return false }
-                if outcome.stoppedEarly {
+                if stoppedEarly {
                     if !isFollowUp {
-                        for job in group { outcome.translations[job.id] = job.text }
+                        for job in group { translations[job.id] = job.text }
                     }
                     continue
                 }
 
                 var handled = false
                 if group.count > 1, !failedSources.contains(group[0].sourceLanguageCode) {
-                    // 一批里的段用换行分隔，走现有的换行标记机制；分不回原来的段数就逐段重来。
+                    // 一批里的块用换行分隔，走现有的换行标记机制；分不回原来的块数就逐块重来。
                     let result = await translate(group.map(\.text).joined(separator: "\n"), group[0].sourceLanguageCode)
                     guard shouldContinue() else { return false }
                     switch result {
@@ -97,21 +146,22 @@ struct ScreenshotBlockTranslator {
                             .filter { !$0.isEmpty }
                         if parts.count == group.count {
                             for (job, part) in zip(group, parts) {
-                                outcome.translations[job.id] = part
+                                translations[job.id] = part
                             }
-                            if !isFollowUp {
-                                outcome.succeeded += group.count
+                            if isFollowUp {
+                                convertedIDs.formUnion(group.map(\.id))
+                            } else {
                                 translatedIDs.formUnion(group.map(\.id))
                             }
                             handled = true
                         }
                     case .failure(let error):
-                        // 整体性失败不用再逐段试一遍。
+                        // 整体性失败不用再逐块试一遍。
                         if Self.isRequestWide(error) {
-                            outcome.failures.append(error)
-                            outcome.stoppedEarly = true
+                            failures.append(error)
+                            stoppedEarly = true
                             if !isFollowUp {
-                                for job in group { outcome.translations[job.id] = job.text }
+                                for job in group { translations[job.id] = job.text }
                             }
                             handled = true
                         }
@@ -120,41 +170,104 @@ struct ScreenshotBlockTranslator {
                 if !handled {
                     for job in group {
                         guard shouldContinue() else { return false }
-                        if outcome.stoppedEarly {
-                            if !isFollowUp { outcome.translations[job.id] = job.text }
+                        if stoppedEarly {
+                            if !isFollowUp { translations[job.id] = job.text }
                         } else {
                             await translateOne(job, isFollowUp: isFollowUp)
                         }
                     }
                 }
                 guard shouldContinue() else { return false }
-                onProgress(outcome.translations)
+                onProgress(assembled())
             }
             return true
         }
 
-        guard await translateAll(jobs, isFollowUp: false) else { return nil }
+        guard await translateAll(pieces.flatMap { $0 }, isFollowUp: false) else { return nil }
 
-        let followUps = jobs.compactMap { job -> Job? in
-            guard translatedIDs.contains(job.id),
-                  let translation = outcome.translations[job.id],
+        let followUps = pieces.flatMap { $0 }.compactMap { chunk -> Job? in
+            guard translatedIDs.contains(chunk.id),
+                  let translation = translations[chunk.id],
                   let source = followUpSource(translation),
-                  source != job.sourceLanguageCode else { return nil }
-            return Job(id: job.id, text: translation, sourceLanguageCode: source)
+                  source != chunk.sourceLanguageCode else { return nil }
+            return Job(id: chunk.id, text: translation, sourceLanguageCode: source)
         }
-        if !followUps.isEmpty, !outcome.stoppedEarly {
+        if !followUps.isEmpty, !stoppedEarly {
             guard await translateAll(followUps, isFollowUp: true) else { return nil }
         }
+
+        let followUpIDs = Set(followUps.map(\.id))
+        let fullyTranslated = pieces.filter { $0.allSatisfy { translatedIDs.contains($0.id) } }
+        var outcome = Outcome()
+        outcome.translations = assembled()
+        outcome.succeeded = fullyTranslated.count
+        outcome.failures = failures
+        outcome.stoppedEarly = stoppedEarly
+        outcome.unconverted = fullyTranslated.filter { chunks in
+            chunks.contains { followUpIDs.contains($0.id) && !convertedIDs.contains($0.id) }
+        }.count
         return outcome
     }
 
-    /// 相邻、同源语言的段合成一批；每批最多 14 段、约 2200 字，沿用原先 OpenAI 分块的上限：
+    /// 超过上限的段按句子拆成几块，一句本身太长再按空白、最后按字数硬拆。没超的原样返回（沿用原来的 id）。
+    nonisolated static func split(_ job: Job, maxCharacters: Int) -> [Job] {
+        guard job.text.count > maxCharacters, maxCharacters > 0 else { return [job] }
+        let text = job.text
+        let tokenizer = NLTokenizer(unit: .sentence)
+        tokenizer.string = text
+        var sentences = tokenizer.tokens(for: text.startIndex..<text.endIndex).map { text[$0] }
+        if sentences.isEmpty { sentences = [text[...]] }
+        // 分句器不管句子之间的空白，补回去，拼起来和原文一模一样。
+        var pieces: [Substring] = []
+        var cursor = text.startIndex
+        for sentence in sentences {
+            if cursor < sentence.startIndex { pieces.append(text[cursor..<sentence.startIndex]) }
+            pieces.append(sentence)
+            cursor = sentence.endIndex
+        }
+        if cursor < text.endIndex { pieces.append(text[cursor...]) }
+
+        var chunks: [String] = []
+        var current = ""
+        for piece in pieces.flatMap({ hardSplit($0, maxCharacters: maxCharacters) }) {
+            if current.count + piece.count > maxCharacters, !current.isEmpty {
+                chunks.append(current)
+                current = ""
+            }
+            current += piece
+        }
+        if !current.isEmpty { chunks.append(current) }
+
+        return chunks
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .map { Job(id: UUID(), text: $0, sourceLanguageCode: job.sourceLanguageCode) }
+    }
+
+    /// 比上限还长的一句：在上限以内最后一个空白处断开，没有空白（中日文）就按字数断。
+    nonisolated private static func hardSplit(_ text: Substring, maxCharacters: Int) -> [Substring] {
+        var result: [Substring] = []
+        var rest = text
+        while rest.count > maxCharacters {
+            let limit = rest.index(rest.startIndex, offsetBy: maxCharacters)
+            var end = limit
+            if let space = rest[..<limit].lastIndex(where: \.isWhitespace), space > rest.startIndex {
+                end = rest.index(after: space)
+            }
+            result.append(rest[..<end])
+            rest = rest[end...]
+        }
+        if !rest.isEmpty { result.append(rest) }
+        return result
+    }
+
+    /// 相邻、同源语言的段合成一批；每批最多 14 段、`maxCharacters` 字，沿用原先 OpenAI 分块的上限：
     /// 一次太长容易超限或不稳定。
     /// 源语言没定下来（`auto`）的段各自单独一批：它们不一定是同一种语言，合成一段请求时
     /// 引擎只会整体认一次语言，分回原段数也查不出译错。
-    nonisolated static func batches(_ jobs: [Job]) -> [[Job]] {
+    nonisolated static func batches(_ jobs: [Job], maxCharacters: Int = defaultMaxCharactersPerRequest) -> [[Job]] {
         let maxJobsPerBatch = 14
-        let maxCharactersPerBatch = 2200
+        let maxCharactersPerBatch = maxCharacters
 
         var batches: [[Job]] = []
         var current: [Job] = []
