@@ -58,7 +58,8 @@ enum ScreenshotTranslationRenderer {
                 weight: styles[index].weight,
                 alignment: styles[index].alignment,
                 limits: styles[index].limits,
-                obstacles: styles[index].obstacles
+                obstacles: styles[index].obstacles,
+                eraseRects: styles[index].eraseRects
             )
         }
         let placements = ScreenshotTranslationLayout.plan(layoutBlocks, canvas: input.pointSize)
@@ -119,6 +120,8 @@ enum ScreenshotTranslationRenderer {
         var limits: ScreenshotTranslationLayout.Limits
         /// 排译文时要绕开的东西（pt）：段落外框里各行旁边的，以及往下长时挡在一部分竖条上的。
         var obstacles: [CGRect]
+        /// 要抹掉的范围（pt）：各行墨迹外扩一点，但不越过旁边量到的东西。
+        var eraseRects: [CGRect]
     }
 
     /// 按笔画宽度（墨迹横向连续的平均长度）是同条件下常规体的几倍定字重。
@@ -338,6 +341,34 @@ enum ScreenshotTranslationRenderer {
             }
         }
 
+        // 抹字的范围：各行墨迹外扩一点，盖住抗锯齿的边，但不越过旁边的东西——紧贴着的分隔线（上下连着的一整条），
+        // 隔着一列干净背景之后才出现的颜色（字的抗锯齿是贴着笔画的），首行上面、末行下面量到的边，相邻两行的中线。
+        let horizontalPad = 0.12 * em, verticalPad = max(1, 0.08 * em)
+        let topLimit = aboveScan.hitEdge ? CGFloat(aboveScan.stop + 1) : 0
+        let bottomLimit = nearestBelow.hitEdge ? CGFloat(nearestBelow.stop) : CGFloat(pixels.height)
+        let eraseRects: [CGRect] = lines.indices.map { index in
+            let line = lines[index]
+            let rows = pixels.clampedRows(Int(line.minY)...max(Int(line.minY), Int(line.maxY) - 1))
+            let probe = max(3, Int(0.35 * em))
+            let above = Int(line.minY) - 2 - probe >= 0 ? (Int(line.minY) - 2 - probe)...(Int(line.minY) - 2) : nil
+            let below = Int(line.maxY) + 1 + probe < pixels.height ? (Int(line.maxY) + 1)...(Int(line.maxY) + 1 + probe) : nil
+            var maxX = line.maxX + horizontalPad, minX = line.minX - horizontalPad
+            let rightZone = Array(Int(line.maxX)...Int(maxX.rounded(.up)))
+            if let x = pixels.dividerColumn(in: rightZone, above: above, below: below, background: background, noise: noise)
+                ?? pixels.separatedContentColumn(in: rightZone, rows: rows, background: background, noise: noise) {
+                maxX = min(maxX, CGFloat(x))
+            }
+            let leftZone = Array((Int(minX.rounded(.down))...max(Int(minX.rounded(.down)), Int(line.minX) - 1)).reversed())
+            if let x = pixels.dividerColumn(in: leftZone, above: above, below: below, background: background, noise: noise)
+                ?? pixels.separatedContentColumn(in: leftZone, rows: rows, background: background, noise: noise) {
+                minX = max(minX, CGFloat(x + 1))
+            }
+            var minY = line.minY - verticalPad, maxY = line.maxY + verticalPad
+            minY = max(minY, index == 0 ? topLimit : (lines[index - 1].maxY + line.minY) / 2)
+            maxY = min(maxY, index == lines.count - 1 ? bottomLimit : (line.maxY + lines[index + 1].minY) / 2)
+            return CGRect(x: minX, y: minY, width: max(1, maxX - minX), height: max(1, maxY - minY))
+        }
+
         return MeasuredStyle(
             lines: lines.map { CGRect(x: $0.minX / scale, y: $0.minY / scale, width: $0.width / scale, height: $0.height / scale) },
             fontSize: em / scale,
@@ -347,7 +378,8 @@ enum ScreenshotTranslationRenderer {
             strokeRatio: strokeRatio,
             alignment: alignment,
             limits: .init(minX: minX / scale, maxX: maxX / scale, maxY: maxY / scale, minY: minY / scale, bodyMaxY: bodyMaxY / scale),
-            obstacles: obstacles.map { CGRect(x: $0.minX / scale, y: $0.minY / scale, width: $0.width / scale, height: $0.height / scale) }
+            obstacles: obstacles.map { CGRect(x: $0.minX / scale, y: $0.minY / scale, width: $0.width / scale, height: $0.height / scale) },
+            eraseRects: eraseRects.map { CGRect(x: $0.minX / scale, y: $0.minY / scale, width: $0.width / scale, height: $0.height / scale) }
         )
     }
 
@@ -709,6 +741,22 @@ struct PixelBuffer {
             return hits * 4 >= rows.count * 3
         }
         return candidates.first { continuous($0, above) && continuous($0, below) }
+    }
+
+    /// 从墨迹边上往外（`candidates` 按由近到远排），先碰到一列干净的背景、再碰到有颜色的列——那是别的东西，
+    /// 不是字的抗锯齿（抗锯齿贴着笔画，中间不会隔着干净的背景）。返回那一列。
+    func separatedContentColumn(in candidates: [Int], rows: ClosedRange<Int>, background: RGB, noise: Double) -> Int? {
+        let differs = Int(pow(max(12, 4.5 * noise), 2))
+        var sawClean = false
+        for x in candidates where x >= 0 && x < width {
+            let hits = rows.filter { pixel(x, $0).squaredDistance(to: background) > differs }.count
+            if hits <= rows.count / 20 {
+                sawClean = true
+            } else if sawClean {
+                return x
+            }
+        }
+        return nil
     }
 
     /// 同 `dividerColumn`，横着的分隔线：在字的左边和右边都连着。

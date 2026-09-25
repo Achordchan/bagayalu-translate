@@ -109,6 +109,13 @@ final class ScreenshotOCRSession: ObservableObject {
         }
     }
 
+    /// 一次回贴渲染的结果：画出来了换上新图；画不出来就清掉旧图（旧图只有前几批的译文），
+    /// 让界面退回卡片列出最新的译文。
+    func applyOverlayRender(_ image: NSImage?) {
+        translatedImage = image
+        overlayUnavailable = image == nil
+    }
+
     func showHUD(_ message: String, style: HUDToast.Style = .info, duration: TimeInterval = 1.8) {
         let toast = HUDToast(style: style, message: message)
         hudToast = toast

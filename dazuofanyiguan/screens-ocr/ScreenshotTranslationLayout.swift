@@ -12,7 +12,8 @@ import CoreText
 /// - 多行段落：在原段落的宽度里重排，行距跟原文，第一行和原文第一行对齐；段落外框里、短行旁边的图标或别的标签
 ///   （`Block.obstacles`）绕开排。放不下先往下占空白，再缩小（最多到 62%），最后截断。完整译文在「对照」里看。
 /// - 最小字号不超过原字号：原文本来就很小（缩小的网页截图）时，宁可截断也不把字放大。
-/// - 只抹原文所在的地方：译文延伸出去的地方本来就是空白，不动它，按钮、卡片的边也就不会被抹掉。
+/// - 只抹原文所在的地方：译文延伸出去的地方本来就是空白，不动它，按钮、卡片的边也就不会被抹掉；
+///   原文外扩的那一点边距也不越过旁边的东西（渲染器量好传进来）。
 /// - 每段能延伸到哪是各自从原图量的，两段可能看中同一块空白（并排的两个居中标签都往中间长）。
 ///   排完再两两查，撞上了就把中间的空白分开重排，直到谁也不压着谁；两段原文的外框本来就叠在一起的
 ///   （段落短行旁边的标签落在段落外框里），让段落绕开标签的译文排。
@@ -30,6 +31,8 @@ enum ScreenshotTranslationLayout {
         var limits: Limits
         /// 要绕开的地方（pt，选区坐标）：段落外框里短行旁边的图标、别的标签，往下长时挡在一部分宽度上的东西。
         var obstacles: [CGRect] = []
+        /// 要抹掉的范围（pt）：渲染器量好的，不越过旁边的东西；nil 时按各行外扩一点算。
+        var eraseRects: [CGRect]? = nil
 
         var bounds: CGRect {
             guard let first = lines.first else { return .zero }
@@ -217,10 +220,8 @@ enum ScreenshotTranslationLayout {
             minY: max(0, min(block.limits.minY, bounds.minY)),
             bodyMaxY: min(canvas.height, max(block.limits.bodyMaxY ?? block.limits.maxY, bounds.maxY))
         )
-        let erase = block.lines.map { line in
-            line.insetBy(dx: -0.12 * size, dy: -max(0.5, 0.08 * size))
-                .intersection(CGRect(origin: .zero, size: canvas))
-        }
+        let erase = (block.eraseRects ?? block.lines.map { $0.insetBy(dx: -0.12 * size, dy: -max(0.5, 0.08 * size)) })
+            .map { $0.intersection(CGRect(origin: .zero, size: canvas)) }
         func placement(
             _ frame: CGRect,
             _ fontSize: CGFloat,

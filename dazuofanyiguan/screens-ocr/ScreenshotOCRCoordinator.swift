@@ -593,11 +593,7 @@ final class ScreenshotOCRCoordinator: ObservableObject {
                     ScreenshotTranslationRenderer.render(input)
                 }.value
                 guard self.isCurrent(session, generation) else { continue }
-                if let rendered {
-                    session.translatedImage = NSImage(cgImage: rendered, size: pointSize)
-                } else {
-                    session.overlayUnavailable = true
-                }
+                session.applyOverlayRender(rendered.map { NSImage(cgImage: $0, size: pointSize) })
             }
             self?.overlayRenderTask = nil
         }

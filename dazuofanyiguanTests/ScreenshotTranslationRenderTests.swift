@@ -277,6 +277,27 @@ struct ScreenshotTranslationLayoutTests {
 }
 
 @MainActor
+@Suite("截图翻译：回贴图的状态")
+struct ScreenshotOverlayStateTests {
+    /// 审核第六轮（#12）：前几批画成功、后面一次画失败时，旧图（只有前几批的译文）要清掉，界面才会退回卡片列出最新的译文。
+    @Test func failedRenderClearsTheStaleImage() {
+        let session = ScreenshotOCRSession(sourceLanguageCode: LanguagePreset.auto.code, targetLanguageCode: "zh-CN")
+        let image = NSImage(size: NSSize(width: 10, height: 10))
+        session.applyOverlayRender(image)
+        #expect(session.translatedImage === image)
+        #expect(!session.overlayUnavailable)
+
+        session.applyOverlayRender(nil)
+        #expect(session.translatedImage == nil)
+        #expect(session.overlayUnavailable)
+
+        session.applyOverlayRender(image)
+        #expect(session.translatedImage === image)
+        #expect(!session.overlayUnavailable)
+    }
+}
+
+@MainActor
 @Suite("截图翻译：回贴渲染")
 struct ScreenshotTranslationRendererTests {
     private struct Scene {
@@ -790,6 +811,37 @@ struct ScreenshotTranslationRendererTests {
             alignment: style.alignment, limits: style.limits, obstacles: style.obstacles
         )], canvas: shot.pointSize).first)
         #expect(placement.frame.maxX <= divider.minX + 0.5)
+
+        // 审核第六轮：画出来也不能把分隔线抹掉。
+        let output = try #require(ScreenshotTranslationRenderer.render(.init(
+            image: shot.cgImage, pointSize: shot.pointSize, blocks: [block], translations: [block.id: "安装并重新启动应用程序"]
+        )))
+        let rendered = try #require(PixelBuffer(image: output)), original = try #require(PixelBuffer(image: shot.cgImage))
+        for y in Int(divider.minY)..<Int(divider.maxY) {
+            #expect(rendered.pixel(Int(divider.minX), y) == original.pixel(Int(divider.minX), y), "分隔线 y=\(y) 被动了")
+        }
+    }
+
+    /// 审核第六轮（#12）：抹字的外扩边距不能越过旁边的东西。24pt 黑字离浅灰分隔线只有 1pt，
+    /// 外扩 0.12 个字宽（2.88pt）会把分隔线也抹掉。
+    @Test func erasingKeepsADividerOnePointAfterTheText() async throws {
+        let font = NSFont.systemFont(ofSize: 24)
+        let origin = CGPoint(x: 20, y: 14)
+        let inkMaxX = origin.x + CTLineGetBoundsWithOptions(
+            CTLineCreateWithAttributedString(NSAttributedString(string: "Install", attributes: [.font: font])), .useGlyphPathBounds
+        ).maxX
+        let divider = CGRect(x: ceil(inkMaxX) + 1, y: 4, width: 1, height: 52)
+        let shot = scene(width: 360, height: 60) {
+            NSColor.white.setFill()
+            NSRect(x: 0, y: 0, width: 360, height: 60).fill()
+            text("Install", at: origin, size: 24)
+            NSColor(white: 0.82, alpha: 1).setFill()
+            divider.fill()
+        }
+        let blocks = await recognize(shot)
+        let output = try render(shot, blocks, ["Install": "安装"])
+        #expect(try maxDifference(shot.cgImage, output, in: divider) == 0, "分隔线被抹掉了")
+        #expect(try maxDifference(shot.cgImage, output, in: CGRect(x: origin.x, y: origin.y, width: divider.minX - origin.x - 1, height: 30)) > 0, "原文没换掉")
     }
 
     @Test func renderingWithoutChangesReturnsTheOriginalImage() async throws {
