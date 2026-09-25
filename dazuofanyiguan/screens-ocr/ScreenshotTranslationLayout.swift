@@ -13,7 +13,8 @@ import AppKit
 /// - 最小字号不超过原字号：原文本来就很小（缩小的网页截图）时，宁可截断也不把字放大。
 /// - 只抹原文所在的地方：译文延伸出去的地方本来就是空白，不动它，按钮、卡片的边也就不会被抹掉。
 /// - 每段能延伸到哪是各自从原图量的，两段可能看中同一块空白（并排的两个居中标签都往中间长）。
-///   排完再两两查，撞上了就把中间的空白分开重排，直到谁也不压着谁。
+///   排完再两两查，撞上了就把中间的空白分开重排，直到谁也不压着谁；两段原文的外框本来就叠在一起的
+///   （段落短行旁边的标签落在段落外框里），让段落绕开标签的译文排。
 enum ScreenshotTranslationLayout {
     struct Block {
         let id: UUID
@@ -112,10 +113,16 @@ enum ScreenshotTranslationLayout {
         for _ in 0..<8 {
             var changed: Set<Int> = []
             for i in blocks.indices {
-                for j in blocks.indices where j > i && collide(placements[i], placements[j]) {
+                for j in blocks.indices where j > i && collide(blocks[i], placements[i], blocks[j], placements[j]) {
                     if let (a, b) = separated(blocks[i], placements[i], blocks[j], placements[j]) {
                         if a.limits != blocks[i].limits { blocks[i] = a; changed.insert(i) }
                         if b.limits != blocks[j].limits { blocks[j] = b; changed.insert(j) }
+                    } else {
+                        // 外框叠在一起，从中间劈不开：行数多的那段（段落）绕开另一段的译文排。
+                        let (host, guest) = blocks[i].lines.count >= blocks[j].lines.count ? (i, j) : (j, i)
+                        let margin = 0.3 * min(blocks[i].fontSize, blocks[j].fontSize)
+                        blocks[host].obstacles.append(placements[guest].frame.insetBy(dx: -margin, dy: 0))
+                        changed.insert(host)
                     }
                 }
             }
@@ -127,10 +134,14 @@ enum ScreenshotTranslationLayout {
         return placements
     }
 
-    /// 两段译文的字有没有压在一起。行框上下各有一截行距的空白，只拿字身那一截比。
-    private static func collide(_ a: Placement, _ b: Placement) -> Bool {
-        a.frame.insetBy(dx: 0, dy: 0.12 * a.fontSize)
-            .intersects(b.frame.insetBy(dx: 0, dy: 0.12 * b.fontSize))
+    /// 两段译文的字有没有压在一起。行框上下各有一截行距的空白，只拿字身那一截比；
+    /// 一段已经在绕开另一段的译文（外框叠在一起的那种），就不算撞。
+    private static func collide(_ blockA: Block, _ a: Placement, _ blockB: Block, _ b: Placement) -> Bool {
+        let bodyA = a.frame.insetBy(dx: 0, dy: 0.12 * a.fontSize)
+        let bodyB = b.frame.insetBy(dx: 0, dy: 0.12 * b.fontSize)
+        guard bodyA.intersects(bodyB) else { return false }
+        let avoided = blockA.obstacles.contains { $0.contains(bodyB) } || blockB.obstacles.contains { $0.contains(bodyA) }
+        return !avoided
     }
 
     /// 撞在一起的两段，把它们之间的空白分开：左右相邻的从两段原文正中间劈开；
@@ -216,6 +227,15 @@ enum ScreenshotTranslationLayout {
 
         if block.lines.count == 1 {
             let line = block.lines[0]
+            // 同一行里要绕开的东西（别的段的译文）：左右最多长到它跟前。它下面的交给折行时绕开。
+            var limits = limits
+            for obstacle in block.obstacles where obstacle.minY < line.maxY && obstacle.maxY > line.minY {
+                if obstacle.minX >= line.maxX - 1 {
+                    limits.maxX = max(line.maxX, min(limits.maxX, obstacle.minX))
+                } else if obstacle.maxX <= line.minX + 1 {
+                    limits.minX = min(line.minX, max(limits.minX, obstacle.maxX))
+                }
+            }
             // 可用宽度：左对齐往右延伸；居中以原中心左右对称；右对齐往左延伸。
             let span: (minX: CGFloat, maxX: CGFloat)
             switch block.alignment {
@@ -229,8 +249,10 @@ enum ScreenshotTranslationLayout {
             }
             let maxWidth = max(line.width, span.maxX - span.minX)
 
+            // 行高按译文本身量：换了后备字体的文字（缅甸文、高棉文、藏文）一行比「Ag字」高得多，
+            // 按「Ag字」定行框，字会溢出、竖直位置也偏。
             func singleLine(_ fontSize: CGFloat, width: CGFloat) -> CGRect {
-                let height = measure("Ag字", fontSize, block.weight, nil, nil, []).height
+                let height = measure(block.text, fontSize, block.weight, nil, nil, []).height
                 let x: CGFloat
                 switch block.alignment {
                 case .center: x = line.midX - width / 2
@@ -277,7 +299,7 @@ enum ScreenshotTranslationLayout {
         // 上下各收进行距多出来的那一半，等于拿字身去比：擦着行距的障碍不会把一整行劈成两截，
         // 整个落在两行之间空当里的就不用绕。
         func exclusions(top: CGFloat, fontSize: CGFloat) -> [CGRect] {
-            let natural = measure("Ag字", fontSize, block.weight, nil, nil, []).height
+            let natural = measure(block.text, fontSize, block.weight, nil, nil, []).height
             let inset = max(0, (lineHeight(for: fontSize) - natural) / 2)
             return block.obstacles
                 .map { $0.insetBy(dx: 0, dy: inset).offsetBy(dx: -bounds.minX, dy: -top) }
@@ -335,13 +357,11 @@ enum ScreenshotTranslationLayout {
         return NSAttributedString(string: text, attributes: attributes)
     }
 
+    /// 不折行也用 TextKit 量：画的时候用的就是它。行高要算上后备字体——缅甸文、高棉文一行比系统字体高出近一倍，
+    /// `NSAttributedString.size()` 却只按主字体算，拿它定行框，译文会溢出、竖直位置也偏。
     static let systemMeasure: Measure = { text, fontSize, weight, width, lineHeight, exclusions in
         let string = attributedString(text, fontSize: fontSize, weight: weight, color: .black, alignment: .left, lineHeight: lineHeight)
-        guard let width else {
-            let size = string.size()
-            return CGSize(width: ceil(size.width), height: ceil(size.height))
-        }
-        let used = TextLayout(string, size: CGSize(width: width, height: 100_000), exclusions: exclusions).usedRect
+        let used = TextLayout(string, size: CGSize(width: width ?? 100_000, height: 100_000), exclusions: exclusions).usedRect
         return CGSize(width: ceil(used.maxX), height: ceil(used.maxY))
     }
 
@@ -368,6 +388,11 @@ enum ScreenshotTranslationLayout {
         }
 
         var usedRect: CGRect { manager.usedRect(for: container) }
+
+        /// 字是不是都排进去了（容器太矮时 TextKit 会整行不排）。
+        var laysOutEverything: Bool {
+            manager.characterRange(forGlyphRange: manager.glyphRange(for: container), actualGlyphRange: nil).length == storage.length
+        }
 
         /// 每一行实际占到的范围（相对左上角）。
         var lineRects: [CGRect] {

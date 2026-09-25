@@ -337,7 +337,8 @@ enum ScreenshotTranslationRenderer {
             .foregroundColor: NSColor(colorSpace: space, components: components(ink), count: 4)
         ])
         let size = string.size()
-        let padding = ceil(0.5 * fontSize)
+        // 上下多留一些：后备字体（缅甸文、藏文）的字比 `size()` 给的行高高，别被位图切掉。
+        let padding = ceil(1.0 * fontSize)
         let width = Int(ceil((size.width + 2 * padding) * scale)), height = Int(ceil((size.height + 2 * padding) * scale))
         guard size.width > 0, scale > 0, width < 16_000, height < 4_000,
               let context = CGContext(

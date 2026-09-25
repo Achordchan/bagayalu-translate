@@ -147,6 +147,59 @@ struct ScreenshotTranslationLayoutTests {
         }
     }
 
+    /// 审核第三轮（#12）：标签落在段落外框里（短行旁边），两段外框叠在一起、从中间劈不开；
+    /// 两段都译长时，段落要绕开标签的译文排。用真实的 TextKit 排，逐行查。
+    @Test func paragraphFlowsAroundATranslatedLabelInsideItsBounds() throws {
+        let label = CGRect(x: 140, y: 32, width: 40, height: 14)
+        var paragraph = block(String(repeating: "很长的译文", count: 12), lines: [
+            CGRect(x: 20, y: 10, width: 300, height: 14), CGRect(x: 20, y: 32, width: 80, height: 14)
+        ], limits: .init(minX: 20, maxX: 320, maxY: 200))
+        // 渲染器量出来的：段落绕开标签原文所在的地方。
+        paragraph.obstacles = [label.insetBy(dx: -4, dy: -1.4)]
+        let guest = block("查看这项订阅的详细信息", lines: [label], limits: .init(minX: 104, maxX: 380, maxY: 200))
+
+        func lineRects(_ placement: ScreenshotTranslationLayout.Placement) -> [CGRect] {
+            let string = ScreenshotTranslationLayout.attributedString(
+                placement.text, fontSize: placement.fontSize, weight: placement.weight, color: .black,
+                alignment: placement.alignment, lineHeight: placement.lineHeight
+            )
+            return ScreenshotTranslationLayout.TextLayout(string, size: placement.frame.size, exclusions: placement.exclusions, maximumLines: placement.maximumLines)
+                .lineRects.map { $0.offsetBy(dx: placement.frame.minX, dy: placement.frame.minY) }
+        }
+        func overlaps(_ host: ScreenshotTranslationLayout.Placement, _ guest: ScreenshotTranslationLayout.Placement) -> Bool {
+            lineRects(host).contains { $0.insetBy(dx: 0, dy: 0.12 * host.fontSize).intersects(guest.frame.insetBy(dx: 0, dy: 0.12 * guest.fontSize)) }
+        }
+
+        let canvas = CGSize(width: 400, height: 300)
+        let alone = [paragraph, guest].compactMap { ScreenshotTranslationLayout.plan([$0], canvas: canvas).first }
+        #expect(overlaps(alone[0], alone[1]), "这组数据各排各的本来就会撞，才测得出来")
+
+        let placements = ScreenshotTranslationLayout.plan([paragraph, guest], canvas: canvas)
+        #expect(placements.count == 2)
+        #expect(!overlaps(placements[0], placements[1]))
+    }
+
+    /// 审核第三轮（#12）：单行的行框按译文本身、按 TextKit 实际排出来的量。缅甸文用后备字体，一行 31pt，
+    /// 系统字体（和 `NSAttributedString.size()`）只有 17pt；按那个定行框，字溢出、竖直位置偏下。
+    @Test func singleLineFrameFitsTheTranslationsOwnLineHeight() throws {
+        let burmese = "မြန်မာစာ ဘာသာပြန်"
+        let line = CGRect(x: 20, y: 30, width: 200, height: 14)
+        let placement = try #require(ScreenshotTranslationLayout.plan(
+            [block(burmese, lines: [line], limits: .init(minX: 0, maxX: 380, maxY: 80))],
+            canvas: CGSize(width: 400, height: 300)
+        ).first)
+        let string = ScreenshotTranslationLayout.attributedString(
+            placement.text, fontSize: placement.fontSize, weight: placement.weight, color: .black,
+            alignment: placement.alignment, lineHeight: placement.lineHeight
+        )
+        let layout = ScreenshotTranslationLayout.TextLayout(string, size: placement.frame.size, maximumLines: placement.maximumLines)
+        let actual = try #require(layout.lineRects.first)
+        #expect(actual.height > string.size().height + 4, "这组数据要是后备字体更高的文字，才测得出来")
+        #expect(placement.frame.height >= actual.height - 0.5)
+        #expect(abs(placement.frame.minY + actual.midY - line.midY) < 1, "译文这一行没有居中在原文那一行上")
+        #expect(layout.laysOutEverything)
+    }
+
     @Test func paragraphShrinksWhenTheSpaceBelowIsTaken() throws {
         let lines = (0..<2).map { CGRect(x: 20, y: 10 + CGFloat($0) * 20, width: 200, height: 14) }
         // 60 个字在 14pt 要 5 行，只有两行多的地方：缩小，但不小于 62%。
@@ -521,6 +574,44 @@ struct ScreenshotTranslationRendererTests {
         #expect(try maxDifference(shot.cgImage, output, in: icon.insetBy(dx: -1, dy: -1)) == 0)
         // 第一行确实被换掉了（不是整段没画）。
         #expect(try maxDifference(shot.cgImage, output, in: CGRect(x: 16, y: 14, width: 300, height: 16)) > 0)
+    }
+
+    /// 审核第三轮（#12）：真实截图——段落短行旁边是一个单独的标签，两段都译长，段落的字不压到标签的译文。
+    @Test func translatedLabelBesideAShortParagraphLineDoesNotCollide() async throws {
+        let font = NSFont.systemFont(ofSize: 14)
+        let secondWidth = NSAttributedString(string: "can be cancelled", attributes: [.font: font]).size().width
+        // 选区收窄：标签的译文在右边一行放不下，只能折行往下长，和段落往下长的第三行抢地方。
+        let shot = scene(width: 390, height: 130) {
+            NSColor.white.setFill()
+            NSRect(x: 0, y: 0, width: 390, height: 130).fill()
+            text("Your subscription renews automatically every month and", at: CGPoint(x: 16, y: 14), size: 14)
+            text("can be cancelled", at: CGPoint(x: 16, y: 38), size: 14)
+            text("Details", at: CGPoint(x: 16 + secondWidth + 90, y: 38), size: 14, color: .systemBlue)
+        }
+        let blocks = await recognize(shot)
+        let paragraph = try #require(blocks.first { $0.text.hasPrefix("Your subscription") })
+        let label = try #require(blocks.first { $0.text == "Details" }, "标签要单独成段：\(blocks.map(\.text))")
+        #expect(paragraph.lines.count == 2)
+        let pixels = try #require(PixelBuffer(image: shot.cgImage))
+        let styles = [paragraph, label].map { ScreenshotTranslationRenderer.measureStyle(of: $0, in: pixels, scale: 2) }
+        let texts = ["你的订阅会每个月自动续费，而且你随时都可以在账户设置里面取消这个订阅，取消之后本期结束前仍然可以继续使用全部功能。", "查看这项订阅的详细信息和历史账单"]
+        let layout = zip(zip([paragraph, label], styles), texts).map { pair, text in
+            ScreenshotTranslationLayout.Block(
+                id: pair.0.id, text: text, lines: pair.1.lines, fontSize: pair.1.fontSize, weight: pair.1.weight,
+                alignment: pair.1.alignment, limits: pair.1.limits, obstacles: pair.1.obstacles
+            )
+        }
+        func collides(_ host: ScreenshotTranslationLayout.Placement, _ guest: ScreenshotTranslationLayout.Placement) -> Bool {
+            let string = ScreenshotTranslationLayout.attributedString(host.text, fontSize: host.fontSize, weight: host.weight, color: .black, alignment: host.alignment, lineHeight: host.lineHeight)
+            return ScreenshotTranslationLayout.TextLayout(string, size: host.frame.size, exclusions: host.exclusions, maximumLines: host.maximumLines)
+                .lineRects.map { $0.offsetBy(dx: host.frame.minX, dy: host.frame.minY) }
+                .contains { $0.insetBy(dx: 0, dy: 0.12 * host.fontSize).intersects(guest.frame.insetBy(dx: 0, dy: 0.12 * guest.fontSize)) }
+        }
+        let alone = layout.compactMap { ScreenshotTranslationLayout.plan([$0], canvas: shot.pointSize).first }
+        #expect(collides(alone[0], alone[1]), "各排各的本来就会撞，这个用例才测得出来")
+
+        let placements = ScreenshotTranslationLayout.plan(layout, canvas: shot.pointSize)
+        #expect(!collides(placements[0], placements[1]))
     }
 
     @Test func renderingWithoutChangesReturnsTheOriginalImage() async throws {
