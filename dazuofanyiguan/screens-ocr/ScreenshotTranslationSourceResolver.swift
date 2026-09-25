@@ -64,13 +64,21 @@ enum ScreenshotTranslationSourceResolver {
         }
 
         let scripts = TextScriptPresence(in: text)
-        if scripts.containsKana {
+        // 书写系统能确定语言的前提是整段只用这一种（日文算假名加汉字）：混排的「下载 Save」
+        // 不能因为有汉字就整段算中文、再在目标是中文时跳过，里面的英文还没翻。
+        let noOtherScripts = !scripts.containsLatin && !scripts.containsCyrillic
+            && !scripts.containsArabic && !scripts.containsHebrew && !scripts.containsGreek
+            && !scripts.containsThai && !scripts.containsDevanagari && !scripts.containsBengali
+            && !scripts.containsTamil && !scripts.containsUnclassifiedLetters
+        let chineseOnly = (scripts.containsHan || scripts.containsBopomofo)
+            && !scripts.containsKana && !scripts.containsHangul && noOtherScripts
+        if scripts.containsKana, !scripts.containsHangul, !scripts.containsBopomofo, noOtherScripts {
             return Inference(code: "ja", isDecisive: true)
         }
-        if scripts.containsHangul {
+        if scripts.containsHangul, !scripts.containsKana, !scripts.containsBopomofo, noOtherScripts {
             return Inference(code: "ko", isDecisive: true)
         }
-        if scripts.containsHan || scripts.containsBopomofo {
+        if chineseOnly {
             // 日文页面里只有汉字的标签按日文算。
             if pageLanguage == "ja", !scripts.containsBopomofo {
                 return Inference(code: "ja", isDecisive: true)

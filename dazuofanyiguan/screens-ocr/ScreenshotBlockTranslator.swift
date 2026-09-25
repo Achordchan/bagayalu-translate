@@ -3,12 +3,11 @@ import Foundation
 /// 截图翻译按段翻译的调度：在线引擎分批、分不回原段数时逐段重来、失败怎么处理。
 /// 不碰界面和具体引擎，翻译调用从外部传进来，方便单测。
 ///
-/// 失败分两类：
+/// 失败分三类：
 /// - 整体性的（断网、超时、被取消、鉴权失败、限流、服务端出错）：后面的段再试也一样，立刻停下。
-/// - 和语言有关的（Apple 不支持这个语言对、语言包没装上、服务端拒绝这门语言）：
-///   只影响用这个源语言的段。记下这门语言，同语言的其他段不再尝试（免得同一个缺失的语言包
-///   一段一段反复弹下载框），换别的语言的段照常翻。自动检测（`auto`）的段不这样熔断：
-///   每一段实际是什么语言可能都不一样。
+/// - 语言组合本身用不了（Apple 报告不支持这个语言对）：同语言的其他段不再尝试，换别的语言的段照常翻。
+///   自动检测（`auto`）的段不这样熔断：每一段实际是什么语言可能都不一样。
+/// - 其余都只算这一次请求的问题（空响应、个别请求被拒）：这一段保留原文，其他段照常翻。
 ///
 /// 没翻成的段一律保留原文。
 @MainActor
@@ -56,7 +55,8 @@ struct ScreenshotBlockTranslator {
                 outcome.failures.append(error)
                 if Self.isRequestWide(error) {
                     outcome.stoppedEarly = true
-                } else if job.sourceLanguageCode != LanguagePreset.auto.code {
+                } else if Self.isLanguagePairUnavailable(error),
+                          job.sourceLanguageCode != LanguagePreset.auto.code {
                     failedSources.insert(job.sourceLanguageCode)
                 }
             }
@@ -139,6 +139,11 @@ struct ScreenshotBlockTranslator {
             batches.append(current)
         }
         return batches
+    }
+
+    /// 这个语言组合本身用不了。
+    nonisolated static func isLanguagePairUnavailable(_ error: Error) -> Bool {
+        (error as? AppleTranslationError)?.isLanguagePairUnavailable ?? false
     }
 
     /// 后面的段再试也一样会失败的错误。

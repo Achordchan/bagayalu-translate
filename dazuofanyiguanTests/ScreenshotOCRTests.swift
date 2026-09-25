@@ -381,6 +381,13 @@ struct ScreenshotTranslationSourceResolverTests {
         #expect(result == [nil, LanguagePreset.auto.code])
     }
 
+    /// 审核第四轮：混排的短标签不能因为含某种书写系统就整段判成那门语言再跳过。
+    @Test func mixedScriptLabelIsNotSkippedBecauseOfOneScript() {
+        #expect(resolve(["下载 Save"], target: "zh-CN") == [LanguagePreset.auto.code])
+        #expect(resolve(["ダウンロード Save"], target: "ja") == [LanguagePreset.auto.code])
+        #expect(resolve(["다운로드 Save"], target: "ko") == [LanguagePreset.auto.code])
+    }
+
     @Test func shortChineseLabelOnAnEnglishPageIsSkippedForAChineseTarget() {
         #expect(resolve(["Install updates automatically", "设置"], detected: ["Install updates automatically": "en"], overall: "en") == ["en", nil])
     }
@@ -446,7 +453,7 @@ struct ScreenshotBlockTranslatorTests {
         var attempted: [String] = []
         let translator = ScreenshotBlockTranslator(batchesRequests: false) { text, source in
             attempted.append(text)
-            return source == "el" ? .failure(Unsupported()) : .success("译:\(text)")
+            return source == "el" ? .failure(AppleTranslationError.unsupportedLanguagePairing) : .success("译:\(text)")
         }
         let outcome = try #require(await translator.run(jobs, shouldContinue: { true }, onProgress: { _ in }))
         #expect(outcome.translations[jobs[1].id] == "译:Sign in")
@@ -456,6 +463,18 @@ struct ScreenshotBlockTranslatorTests {
         #expect(attempted == ["Ναι", "Sign in", "Cancel"])
         #expect(outcome.succeeded == 2)
         #expect(!outcome.stoppedEarly)
+    }
+
+    /// 审核第四轮：只有明确的「语言对不可用」才熔断这门语言；一次普通失败（空响应、个别请求 400）
+    /// 不能让同语言的其他段都不翻。
+    @Test func aRequestSpecificFailureDoesNotSuppressTheLanguage() async throws {
+        let jobs = [job("Sign in", "en"), job("Cancel", "en")]
+        let translator = ScreenshotBlockTranslator(batchesRequests: false) { text, _ in
+            text == "Sign in" ? .failure(HTTPClient.HTTPError.badStatus(code: 400, body: "")) : .success("译:\(text)")
+        }
+        let outcome = try #require(await translator.run(jobs, shouldContinue: { true }, onProgress: { _ in }))
+        #expect(outcome.translations[jobs[1].id] == "译:Cancel")
+        #expect(outcome.succeeded == 1)
     }
 
     @Test func autoDetectedBlocksAreNotShortCircuitedByOneFailure() async throws {
@@ -490,6 +509,15 @@ struct ScreenshotBlockTranslatorTests {
         #expect(ScreenshotBlockTranslator.isRequestWide(HTTPClient.HTTPError.badStatus(code: 503, body: "")))
         #expect(!ScreenshotBlockTranslator.isRequestWide(HTTPClient.HTTPError.badStatus(code: 400, body: "")))
         #expect(!ScreenshotBlockTranslator.isRequestWide(Unsupported()))
+    }
+
+    @Test func onlyUnavailableLanguagePairsSuppressALanguage() {
+        #expect(ScreenshotBlockTranslator.isLanguagePairUnavailable(AppleTranslationError.unsupportedLanguagePairing))
+        #expect(ScreenshotBlockTranslator.isLanguagePairUnavailable(AppleTranslationError.unsupportedLanguagePair(source: "希腊语", target: "中文")))
+        #expect(!ScreenshotBlockTranslator.isLanguagePairUnavailable(AppleTranslationError.translationFailed("x")))
+        #expect(!ScreenshotBlockTranslator.isLanguagePairUnavailable(AppleTranslationError.unableToIdentifyLanguage))
+        #expect(!ScreenshotBlockTranslator.isLanguagePairUnavailable(HTTPClient.HTTPError.badStatus(code: 400, body: "")))
+        #expect(!ScreenshotBlockTranslator.isLanguagePairUnavailable(Unsupported()))
     }
 
     @Test func progressIsReportedAfterEachBatch() async throws {
