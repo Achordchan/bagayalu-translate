@@ -338,7 +338,8 @@ struct ScreenshotTranslationSourceResolverTests {
     @Test func shortGreekLabelOnAnArabicPageIsNotTreatedAsArabic() {
         let arabic = "هذا نص عربي طويل بما يكفي للكشف عن اللغة"
         let result = resolve([arabic, "Ναι"], target: "ar", detected: [arabic: "ar"], overall: "ar")
-        #expect(result == [nil, LanguagePreset.auto.code])
+        // 希腊文只有希腊语在用，书写系统本身就能确定语言。
+        #expect(result == [nil, "el"])
     }
 
     /// 审核第二轮：简繁要看字形本身，不能拿目标语言当源语言的猜测——
@@ -373,35 +374,144 @@ struct ScreenshotTranslationSourceResolverTests {
         #expect(TextScriptPresence(in: "ሰላም").containsUnclassifiedLetters)
     }
 
+    /// 审核第三轮：整页主语言只能当翻译提示，不能单凭它跳过——英文页面上单独的法文 Bonjour 要交给引擎检测。
+    @Test func pageLanguageAloneNeverSkipsAShortLabel() {
+        let english = "Install updates automatically when they are available"
+        let result = resolve([english, "Bonjour"], target: "en", detected: [english: "en"], overall: "en")
+        #expect(result == [nil, LanguagePreset.auto.code])
+    }
+
     @Test func shortChineseLabelOnAnEnglishPageIsSkippedForAChineseTarget() {
         #expect(resolve(["Install updates automatically", "设置"], detected: ["Install updates automatically": "en"], overall: "en") == ["en", nil])
     }
 }
 
-@Suite("截图翻译：在线引擎分批")
-struct ScreenshotTranslationBatchTests {
-    private func job(_ text: String, _ source: String) -> ScreenshotOCRCoordinator.TranslationJob {
-        ScreenshotOCRCoordinator.TranslationJob(
-            block: VisionOCRService.OCRBlock(text: text, lines: []),
-            sourceLanguageCode: source
-        )
+@Suite("截图翻译：按段翻译的调度")
+@MainActor
+struct ScreenshotBlockTranslatorTests {
+    private struct Unsupported: Error {}
+
+    private func job(_ text: String, _ source: String) -> ScreenshotBlockTranslator.Job {
+        ScreenshotBlockTranslator.Job(id: UUID(), text: text, sourceLanguageCode: source)
     }
 
-    @Test func onlyAdjacentBlocksWithTheSameSourceShareABatch() {
-        let batches = ScreenshotOCRCoordinator.translationBatches([
+    @Test func onlyAdjacentJobsWithTheSameSourceShareABatch() {
+        let batches = ScreenshotBlockTranslator.batches([
             job("Sign in", "en"), job("Forgot password?", "en"),
             job("Annuler", "fr"),
             job("Help", "en")
         ])
-        #expect(batches.map { $0.map(\.block.text) } == [["Sign in", "Forgot password?"], ["Annuler"], ["Help"]])
+        #expect(batches.map { $0.map(\.text) } == [["Sign in", "Forgot password?"], ["Annuler"], ["Help"]])
     }
 
-    @Test func batchesRespectTheBlockAndCharacterLimits() {
+    @Test func batchesRespectTheJobAndCharacterLimits() {
         let many = (0..<30).map { job("line \($0)", "en") }
-        #expect(ScreenshotOCRCoordinator.translationBatches(many).map(\.count) == [14, 14, 2])
+        #expect(ScreenshotBlockTranslator.batches(many).map(\.count) == [14, 14, 2])
 
         let long = String(repeating: "a", count: 1500)
-        #expect(ScreenshotOCRCoordinator.translationBatches([job(long, "en"), job(long, "en")]).map(\.count) == [1, 1])
+        #expect(ScreenshotBlockTranslator.batches([job(long, "en"), job(long, "en")]).map(\.count) == [1, 1])
+    }
+
+    @Test func batchedTranslationIsSplitBackIntoBlocks() async throws {
+        let jobs = [job("Sign in", "en"), job("Forgot password?", "en")]
+        var requests: [String] = []
+        let translator = ScreenshotBlockTranslator(batchesRequests: true) { text, _ in
+            requests.append(text)
+            return .success(text.components(separatedBy: "\n").map { "译:\($0)" }.joined(separator: "\n"))
+        }
+        let outcome = try #require(await translator.run(jobs, shouldContinue: { true }, onProgress: { _ in }))
+        #expect(requests == ["Sign in\nForgot password?"])
+        #expect(outcome.translations[jobs[0].id] == "译:Sign in")
+        #expect(outcome.translations[jobs[1].id] == "译:Forgot password?")
+        #expect(outcome.succeeded == 2)
+    }
+
+    @Test func batchThatCannotBeSplitBackFallsBackToOneRequestPerBlock() async throws {
+        let jobs = [job("Sign in", "en"), job("Forgot password?", "en")]
+        var requests: [String] = []
+        let translator = ScreenshotBlockTranslator(batchesRequests: true) { text, _ in
+            requests.append(text)
+            return .success(text.contains("\n") ? "两段被合成了一句" : "译:\(text)")
+        }
+        let outcome = try #require(await translator.run(jobs, shouldContinue: { true }, onProgress: { _ in }))
+        #expect(requests.count == 3)
+        #expect(outcome.translations[jobs[0].id] == "译:Sign in")
+        #expect(outcome.translations[jobs[1].id] == "译:Forgot password?")
+    }
+
+    /// 审核第三轮：自动检测时各段源语言可能不同。第一段的语言对不被支持，
+    /// 不能让后面其他语言的段也跟着不翻；同一门语言的其他段不再重试。
+    @Test func languageSpecificFailureDoesNotStopOtherLanguages() async throws {
+        let jobs = [job("Ναι", "el"), job("Sign in", "en"), job("Όχι", "el"), job("Cancel", "en")]
+        var attempted: [String] = []
+        let translator = ScreenshotBlockTranslator(batchesRequests: false) { text, source in
+            attempted.append(text)
+            return source == "el" ? .failure(Unsupported()) : .success("译:\(text)")
+        }
+        let outcome = try #require(await translator.run(jobs, shouldContinue: { true }, onProgress: { _ in }))
+        #expect(outcome.translations[jobs[1].id] == "译:Sign in")
+        #expect(outcome.translations[jobs[3].id] == "译:Cancel")
+        #expect(outcome.translations[jobs[0].id] == "Ναι")
+        #expect(outcome.translations[jobs[2].id] == "Όχι")
+        #expect(attempted == ["Ναι", "Sign in", "Cancel"])
+        #expect(outcome.succeeded == 2)
+        #expect(!outcome.stoppedEarly)
+    }
+
+    @Test func autoDetectedBlocksAreNotShortCircuitedByOneFailure() async throws {
+        let jobs = [job("?!", "auto"), job("Sign in", "auto")]
+        let translator = ScreenshotBlockTranslator(batchesRequests: false) { text, _ in
+            text == "?!" ? .failure(Unsupported()) : .success("译:\(text)")
+        }
+        let outcome = try #require(await translator.run(jobs, shouldContinue: { true }, onProgress: { _ in }))
+        #expect(outcome.translations[jobs[1].id] == "译:Sign in")
+        #expect(outcome.succeeded == 1)
+    }
+
+    @Test func requestWideFailureStopsImmediately() async throws {
+        let jobs = [job("Install updates automatically", "en"), job("Vous pouvez modifier votre adresse", "fr")]
+        var attempts = 0
+        let translator = ScreenshotBlockTranslator(batchesRequests: true) { _, _ in
+            attempts += 1
+            return .failure(URLError(.notConnectedToInternet))
+        }
+        let outcome = try #require(await translator.run(jobs, shouldContinue: { true }, onProgress: { _ in }))
+        #expect(attempts == 1)
+        #expect(outcome.stoppedEarly)
+        #expect(outcome.succeeded == 0)
+        #expect(outcome.translations[jobs[1].id] == "Vous pouvez modifier votre adresse")
+    }
+
+    @Test func requestWideErrorsAreRecognized() {
+        #expect(ScreenshotBlockTranslator.isRequestWide(URLError(.timedOut)))
+        #expect(ScreenshotBlockTranslator.isRequestWide(CancellationError()))
+        #expect(ScreenshotBlockTranslator.isRequestWide(HTTPClient.HTTPError.badStatus(code: 401, body: "")))
+        #expect(ScreenshotBlockTranslator.isRequestWide(HTTPClient.HTTPError.badStatus(code: 429, body: "")))
+        #expect(ScreenshotBlockTranslator.isRequestWide(HTTPClient.HTTPError.badStatus(code: 503, body: "")))
+        #expect(!ScreenshotBlockTranslator.isRequestWide(HTTPClient.HTTPError.badStatus(code: 400, body: "")))
+        #expect(!ScreenshotBlockTranslator.isRequestWide(Unsupported()))
+    }
+
+    @Test func progressIsReportedAfterEachBatch() async throws {
+        let jobs = [job("Sign in", "en"), job("Annuler", "fr")]
+        var reports: [Int] = []
+        let translator = ScreenshotBlockTranslator(batchesRequests: true) { text, _ in .success("译:\(text)") }
+        _ = try #require(await translator.run(jobs, shouldContinue: { true }, onProgress: { reports.append($0.count) }))
+        #expect(reports == [1, 2])
+    }
+
+    @Test func abandonsTheRunWhenTheSelectionChanges() async {
+        var keepGoing = true
+        let translator = ScreenshotBlockTranslator(batchesRequests: false) { text, _ in
+            keepGoing = false
+            return .success(text)
+        }
+        let outcome = await translator.run(
+            [job("Install updates automatically", "en"), job("Remove this device", "en")],
+            shouldContinue: { keepGoing },
+            onProgress: { _ in }
+        )
+        #expect(outcome == nil)
     }
 }
 

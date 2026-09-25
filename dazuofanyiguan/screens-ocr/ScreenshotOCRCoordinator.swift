@@ -491,10 +491,10 @@ final class ScreenshotOCRCoordinator: ObservableObject {
             targetLanguageCode: targetLanguageCode
         )
         var translations: [UUID: String] = [:]
-        var jobs: [TranslationJob] = []
+        var jobs: [ScreenshotBlockTranslator.Job] = []
         for (block, source) in zip(blocks, sources) {
             if let source {
-                jobs.append(TranslationJob(block: block, sourceLanguageCode: source))
+                jobs.append(.init(id: block.id, text: block.text, sourceLanguageCode: source))
             } else {
                 translations[block.id] = block.text
             }
@@ -508,133 +508,47 @@ final class ScreenshotOCRCoordinator: ObservableObject {
             return
         }
 
-        var succeeded = 0
-        var failures: [Error] = []
-
-        func translateOne(_ job: TranslationJob) async {
-            let result = await translate(
-                text: job.block.text,
-                sourceLanguageCode: job.sourceLanguageCode,
-                targetLanguageCode: targetLanguageCode,
-                settings: settings,
-                log: log,
-                toast: toast,
-                onPhaseChange: nil
-            )
-            switch result {
-            case .success(let text):
-                translations[job.block.id] = text
-                succeeded += 1
-            case .failure(let error):
-                translations[job.block.id] = job.block.text
-                failures.append(error)
+        let translator = ScreenshotBlockTranslator(
+            batchesRequests: settings.engineType != .apple,
+            translate: { [weak self] text, sourceLanguageCode in
+                guard let self else { return .failure(CancellationError()) }
+                return await self.translate(
+                    text: text,
+                    sourceLanguageCode: sourceLanguageCode,
+                    targetLanguageCode: targetLanguageCode,
+                    settings: settings,
+                    log: log,
+                    toast: toast,
+                    onPhaseChange: nil
+                )
             }
-        }
-
-        // 第一段就失败多半是整体问题（断网、密钥无效、语言包没装），直接报错，别让后面几十段挨个超时。
-        func shouldAbort() -> Bool { succeeded == 0 && !failures.isEmpty }
-
-        if settings.engineType == .apple {
-            for job in jobs {
-                guard isCurrent(session, generation) else { return }
-                await translateOne(job)
-                if shouldAbort() { break }
-                guard isCurrent(session, generation) else { return }
-                session.translations = translations
+        )
+        let skipped = translations
+        guard let outcome = await translator.run(
+            jobs,
+            shouldContinue: { [weak self] in self?.isCurrent(session, generation) ?? false },
+            onProgress: { progress in
+                session.translations = skipped.merging(progress) { _, new in new }
             }
-        } else {
-            // 在线引擎：相邻、同源语言的段落合成一批，用换行分隔一次请求翻完，
-            // 省掉几十次往返；译文分不回原来的段数就退回逐段。
-            for batch in Self.translationBatches(jobs) {
-                guard isCurrent(session, generation) else { return }
-                var handled = false
-                if batch.count > 1 {
-                    let result = await translate(
-                        text: batch.map(\.block.text).joined(separator: "\n"),
-                        sourceLanguageCode: batch[0].sourceLanguageCode,
-                        targetLanguageCode: targetLanguageCode,
-                        settings: settings,
-                        log: log,
-                        toast: toast,
-                        onPhaseChange: nil
-                    )
-                    switch result {
-                    case .success(let text):
-                        let parts = text.components(separatedBy: "\n")
-                            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                            .filter { !$0.isEmpty }
-                        if parts.count == batch.count {
-                            for (job, part) in zip(batch, parts) {
-                                translations[job.block.id] = part
-                            }
-                            succeeded += batch.count
-                            handled = true
-                        } else {
-                            log.warn("截图翻译批量分段失败：expected=\(batch.count), got=\(parts.count)，该批改为逐段翻译")
-                        }
-                    case .failure(let error):
-                        log.warn("截图翻译批量请求失败：\(error.localizedDescription)，该批改为逐段翻译")
-                    }
-                }
-                if !handled {
-                    for job in batch {
-                        guard isCurrent(session, generation) else { return }
-                        await translateOne(job)
-                        if shouldAbort() { break }
-                    }
-                }
-                if shouldAbort() { break }
-                guard isCurrent(session, generation) else { return }
-                session.translations = translations
-            }
-        }
-
+        ) else { return }
         guard isCurrent(session, generation) else { return }
-        if shouldAbort(), let error = failures.first {
+
+        if outcome.succeeded == 0, let error = outcome.failures.first {
             session.translations = [:]
             session.stage = .failed(error.localizedDescription)
             toast.show(error.localizedDescription, style: .error)
             return
         }
 
+        translations.merge(outcome.translations) { _, new in new }
         session.translations = translations
         session.translatedText = blocks.map { translations[$0.id] ?? $0.text }.joined(separator: "\n")
         session.stage = .translated
-        if !failures.isEmpty {
-            session.showHUD("有 \(failures.count) 段没翻译成功，已保留原文", style: .warning)
+        let untranslated = jobs.count - outcome.succeeded
+        if untranslated > 0 {
+            let reason = outcome.failures.first.map { "（\($0.localizedDescription)）" } ?? ""
+            session.showHUD("有 \(untranslated) 段没翻译成功，已保留原文\(reason)", style: .warning)
         }
-    }
-
-    struct TranslationJob {
-        let block: VisionOCRService.OCRBlock
-        let sourceLanguageCode: String
-    }
-
-    /// 每批最多 14 段、约 2200 字，沿用原先 OpenAI 分块的上限：一次太长容易超限或不稳定。
-    nonisolated static func translationBatches(_ jobs: [TranslationJob]) -> [[TranslationJob]] {
-        let maxBlocksPerBatch = 14
-        let maxCharactersPerBatch = 2200
-
-        var batches: [[TranslationJob]] = []
-        var current: [TranslationJob] = []
-        var characters = 0
-        for job in jobs {
-            let length = job.block.text.count + 1
-            if let first = current.first,
-               first.sourceLanguageCode != job.sourceLanguageCode
-                || current.count >= maxBlocksPerBatch
-                || characters + length > maxCharactersPerBatch {
-                batches.append(current)
-                current = []
-                characters = 0
-            }
-            current.append(job)
-            characters += length
-        }
-        if !current.isEmpty {
-            batches.append(current)
-        }
-        return batches
     }
 
     private func translate(
