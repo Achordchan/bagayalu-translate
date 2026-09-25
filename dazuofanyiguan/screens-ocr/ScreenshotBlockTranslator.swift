@@ -11,6 +11,9 @@ import OpenAI
 /// - 其余都只算这一次请求的问题（空响应、个别请求被拒）：这一段保留原文，其他段照常翻。
 ///
 /// 没翻成的段一律保留原文。
+///
+/// 第一遍译完，`followUpSource` 说还要补翻的（目标是中文、译文里还留着另一种字形的字），按第一遍的译文再翻一次；
+/// 补翻失败就保留第一遍的译文，也不重复计入成功段数。
 @MainActor
 struct ScreenshotBlockTranslator {
     struct Job {
@@ -31,6 +34,8 @@ struct ScreenshotBlockTranslator {
     /// 在线引擎合批请求；Apple 本地翻译逐段翻。
     let batchesRequests: Bool
     let translate: (_ text: String, _ sourceLanguageCode: String) async -> Result<String, Error>
+    /// 第一遍的译文还要不要按另一种源语言补翻一次；nil 表示不用。
+    var followUpSource: (_ translation: String) -> String? = { _ in nil }
 
     /// `shouldContinue` 返回 false 时（选区已经换了）立即放弃，返回 nil。
     /// `onProgress` 在每段 / 每批翻完后带上目前为止的结果调用。
@@ -41,18 +46,23 @@ struct ScreenshotBlockTranslator {
     ) async -> Outcome? {
         var outcome = Outcome()
         var failedSources: Set<String> = []
+        var translatedIDs: Set<UUID> = []
 
-        func translateOne(_ job: Job) async {
+        // 补翻（`isFollowUp`）失败时不覆盖第一遍的译文，成功也不重复计数。
+        func translateOne(_ job: Job, isFollowUp: Bool) async {
             if failedSources.contains(job.sourceLanguageCode) {
-                outcome.translations[job.id] = job.text
+                if !isFollowUp { outcome.translations[job.id] = job.text }
                 return
             }
             switch await translate(job.text, job.sourceLanguageCode) {
             case .success(let text):
                 outcome.translations[job.id] = text
-                outcome.succeeded += 1
+                if !isFollowUp {
+                    outcome.succeeded += 1
+                    translatedIDs.insert(job.id)
+                }
             case .failure(let error):
-                outcome.translations[job.id] = job.text
+                if !isFollowUp { outcome.translations[job.id] = job.text }
                 outcome.failures.append(error)
                 if Self.isRequestWide(error) {
                     outcome.stoppedEarly = true
@@ -63,53 +73,77 @@ struct ScreenshotBlockTranslator {
             }
         }
 
-        let groups = batchesRequests ? Self.batches(jobs) : jobs.map { [$0] }
-        for group in groups {
-            guard shouldContinue() else { return nil }
-            if outcome.stoppedEarly {
-                for job in group { outcome.translations[job.id] = job.text }
-                continue
-            }
-
-            var handled = false
-            if group.count > 1, !failedSources.contains(group[0].sourceLanguageCode) {
-                // 一批里的段用换行分隔，走现有的换行标记机制；分不回原来的段数就逐段重来。
-                let result = await translate(group.map(\.text).joined(separator: "\n"), group[0].sourceLanguageCode)
-                guard shouldContinue() else { return nil }
-                switch result {
-                case .success(let text):
-                    let parts = text.components(separatedBy: "\n")
-                        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                        .filter { !$0.isEmpty }
-                    if parts.count == group.count {
-                        for (job, part) in zip(group, parts) {
-                            outcome.translations[job.id] = part
-                        }
-                        outcome.succeeded += group.count
-                        handled = true
-                    }
-                case .failure(let error):
-                    // 整体性失败不用再逐段试一遍。
-                    if Self.isRequestWide(error) {
-                        outcome.failures.append(error)
-                        outcome.stoppedEarly = true
+        /// 翻一轮；选区换了返回 false。
+        func translateAll(_ jobs: [Job], isFollowUp: Bool) async -> Bool {
+            let groups = batchesRequests ? Self.batches(jobs) : jobs.map { [$0] }
+            for group in groups {
+                guard shouldContinue() else { return false }
+                if outcome.stoppedEarly {
+                    if !isFollowUp {
                         for job in group { outcome.translations[job.id] = job.text }
-                        handled = true
+                    }
+                    continue
+                }
+
+                var handled = false
+                if group.count > 1, !failedSources.contains(group[0].sourceLanguageCode) {
+                    // 一批里的段用换行分隔，走现有的换行标记机制；分不回原来的段数就逐段重来。
+                    let result = await translate(group.map(\.text).joined(separator: "\n"), group[0].sourceLanguageCode)
+                    guard shouldContinue() else { return false }
+                    switch result {
+                    case .success(let text):
+                        let parts = text.components(separatedBy: "\n")
+                            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                            .filter { !$0.isEmpty }
+                        if parts.count == group.count {
+                            for (job, part) in zip(group, parts) {
+                                outcome.translations[job.id] = part
+                            }
+                            if !isFollowUp {
+                                outcome.succeeded += group.count
+                                translatedIDs.formUnion(group.map(\.id))
+                            }
+                            handled = true
+                        }
+                    case .failure(let error):
+                        // 整体性失败不用再逐段试一遍。
+                        if Self.isRequestWide(error) {
+                            outcome.failures.append(error)
+                            outcome.stoppedEarly = true
+                            if !isFollowUp {
+                                for job in group { outcome.translations[job.id] = job.text }
+                            }
+                            handled = true
+                        }
                     }
                 }
-            }
-            if !handled {
-                for job in group {
-                    guard shouldContinue() else { return nil }
-                    if outcome.stoppedEarly {
-                        outcome.translations[job.id] = job.text
-                    } else {
-                        await translateOne(job)
+                if !handled {
+                    for job in group {
+                        guard shouldContinue() else { return false }
+                        if outcome.stoppedEarly {
+                            if !isFollowUp { outcome.translations[job.id] = job.text }
+                        } else {
+                            await translateOne(job, isFollowUp: isFollowUp)
+                        }
                     }
                 }
+                guard shouldContinue() else { return false }
+                onProgress(outcome.translations)
             }
-            guard shouldContinue() else { return nil }
-            onProgress(outcome.translations)
+            return true
+        }
+
+        guard await translateAll(jobs, isFollowUp: false) else { return nil }
+
+        let followUps = jobs.compactMap { job -> Job? in
+            guard translatedIDs.contains(job.id),
+                  let translation = outcome.translations[job.id],
+                  let source = followUpSource(translation),
+                  source != job.sourceLanguageCode else { return nil }
+            return Job(id: job.id, text: translation, sourceLanguageCode: source)
+        }
+        if !followUps.isEmpty, !outcome.stoppedEarly {
+            guard await translateAll(followUps, isFollowUp: true) else { return nil }
         }
         return outcome
     }

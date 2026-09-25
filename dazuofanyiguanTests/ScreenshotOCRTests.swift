@@ -426,6 +426,15 @@ struct ScreenshotTranslationSourceResolverTests {
         #expect(resolve(["設置"], target: "zh-TW") == [nil])
     }
 
+    /// 审核第八轮：既要简繁转换、又夹着外文的段，先按外文翻（转换交给调度那边补翻，见 ScreenshotBlockTranslatorTests）。
+    @Test func foreignWordsComeBeforeVariantConversion() {
+        let text = "請點擊 Save 按鈕"
+        #expect(resolve([text], target: "zh-CN", detected: [text: "zh-TW"], overall: "zh-TW") == ["en"])
+        #expect(ScreenshotTranslationSourceResolver.variantConversionSource(for: text, targetLanguageCode: "zh-CN") == "zh-TW")
+        #expect(ScreenshotTranslationSourceResolver.variantConversionSource(for: "请点击保存按钮", targetLanguageCode: "zh-CN") == nil)
+        #expect(ScreenshotTranslationSourceResolver.variantConversionSource(for: text, targetLanguageCode: "en") == nil)
+    }
+
     /// 识别器把整段认成另一种中文变体时，也按字形判断要不要转：没有要转的字就跳过。
     @Test func detectorVariantDoesNotOverrideGlyphsForAChineseTarget() {
         let simplified = "本次更新修复了若干已知问题。请重新启动应用以完成安装。"
@@ -667,6 +676,66 @@ struct ScreenshotBlockTranslatorTests {
         #expect(!ScreenshotBlockTranslator.isRequestWide(OpenAICompatibleEngine.EngineError.emptyResponse))
         #expect(!ScreenshotBlockTranslator.isRequestWide(MicrosoftTranslateEngine.EngineError.badRequest(detail: "")))
         #expect(!ScreenshotBlockTranslator.isRequestWide(GoogleTranslateEngine.EngineError.invalidResponse))
+    }
+
+    /// 审核第八轮：一段里既要翻外文、又要简繁转换。只按英文翻时，这个假引擎和 Google、微软一样不动夹着的中文；
+    /// 调度器看到译文里还有繁体字，再按繁体补翻一次（假引擎用 ICU 转换）。
+    @Test func blockNeedingBothTranslationAndConversionGetsBoth() async throws {
+        let text = "請點擊 Save 按鈕"
+        let source = try #require(ScreenshotTranslationSourceResolver.resolve(
+            blockTexts: [text],
+            sourceLanguageCode: LanguagePreset.auto.code,
+            targetLanguageCode: "zh-CN",
+            detectLanguage: { $0 == text ? "zh-TW" : nil }
+        ).first ?? nil)
+        #expect(source == "en")
+
+        let jobs = [job(text, source)]
+        var requests: [String] = []
+        var translator = ScreenshotBlockTranslator(batchesRequests: true) { text, source in
+            requests.append("\(source):\(text)")
+            if source == "zh-TW" {
+                return .success(text.applyingTransform(StringTransform("Hant-Hans"), reverse: false) ?? text)
+            }
+            return .success(text.replacingOccurrences(of: "Save", with: "保存"))
+        }
+        translator.followUpSource = {
+            ScreenshotTranslationSourceResolver.variantConversionSource(for: $0, targetLanguageCode: "zh-CN")
+        }
+        let outcome = try #require(await translator.run(jobs, shouldContinue: { true }, onProgress: { _ in }))
+        #expect(outcome.translations[jobs[0].id] == "请点击 保存 按钮")
+        #expect(outcome.succeeded == 1)
+        #expect(requests == ["en:請點擊 Save 按鈕", "zh-TW:請點擊 保存 按鈕"])
+    }
+
+    @Test func followUpIsSkippedWhenTheFirstPassAlreadyConverted() async throws {
+        let jobs = [job("請點擊 Save 按鈕", "en"), job("設置", "zh-TW")]
+        var requests = 0
+        var translator = ScreenshotBlockTranslator(batchesRequests: false) { text, _ in
+            requests += 1
+            // 第一段：引擎顺手转成了简体；第二段：本来就是按繁体转换的，译文就算还被判成要转也不再补。
+            return .success(text == "設置" ? "瞭望" : "请点击保存按钮")
+        }
+        translator.followUpSource = {
+            ScreenshotTranslationSourceResolver.variantConversionSource(for: $0, targetLanguageCode: "zh-CN")
+        }
+        let outcome = try #require(await translator.run(jobs, shouldContinue: { true }, onProgress: { _ in }))
+        #expect(requests == 2)
+        #expect(outcome.succeeded == 2)
+    }
+
+    @Test func failedFollowUpKeepsTheFirstTranslation() async throws {
+        let jobs = [job("請點擊 Save 按鈕", "en")]
+        var translator = ScreenshotBlockTranslator(batchesRequests: false) { text, source in
+            source == "zh-TW"
+                ? .failure(HTTPClient.HTTPError.badStatus(code: 400, body: ""))
+                : .success(text.replacingOccurrences(of: "Save", with: "保存"))
+        }
+        translator.followUpSource = { _ in "zh-TW" }
+        let outcome = try #require(await translator.run(jobs, shouldContinue: { true }, onProgress: { _ in }))
+        #expect(outcome.translations[jobs[0].id] == "請點擊 保存 按鈕")
+        #expect(outcome.succeeded == 1)
+        #expect(outcome.failures.count == 1)
     }
 
     @Test func progressIsReportedAfterEachBatch() async throws {

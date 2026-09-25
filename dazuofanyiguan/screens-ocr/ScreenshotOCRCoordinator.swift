@@ -521,6 +521,9 @@ final class ScreenshotOCRCoordinator: ObservableObject {
                     toast: toast,
                     onPhaseChange: nil
                 )
+            },
+            followUpSource: { translation in
+                ScreenshotTranslationSourceResolver.variantConversionSource(for: translation, targetLanguageCode: targetLanguageCode)
             }
         )
         let skipped = translations

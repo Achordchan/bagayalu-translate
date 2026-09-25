@@ -21,6 +21,8 @@ import NaturalLanguage
 /// 光看长短分不出按钮名和品牌名，品牌名、型号交给引擎原样保留；同一种书写系统的（英文里的西班牙语）
 /// 只能逐句识别语种，句子够长才认得准。
 /// 目标是中文、这段也是中文时，只看要不要简繁转换：转成目标字形会变（哪怕简繁混用、只有两个字），就要翻。
+/// 外文和简繁转换都要的（「請點擊 Save 按鈕」译成简体）先按外文翻，译文里还留着另一种字形的字，
+/// 调度那边再按 `variantConversionSource` 补翻一次——只按外文翻的话，有的引擎不动夹着的中文。
 enum ScreenshotTranslationSourceResolver {
     static func resolve(
         blockTexts: [String],
@@ -58,14 +60,17 @@ enum ScreenshotTranslationSourceResolver {
             }
 
             let bothChinese = isChinese(inference.code) && isChinese(targetLanguageCode)
-            if bothChinese, let source = variantToConvert(text, to: targetLanguageCode) {
-                return source
-            }
             guard bothChinese || inference.code == targetLanguageCode else { return inference.code }
-            // 已经是目标语言：夹着的外文照样要翻。
+            // 已经是目标语言：夹着的外文照样要翻；没有外文再看要不要简繁转换。
             return sourceOfDifferentScriptText(in: text, targetLanguageCode: targetLanguageCode, detectLanguage: detectLanguage)
                 ?? sourceOfSameScriptSentences(in: text, targetLanguageCode: targetLanguageCode, detectLanguage: detectLanguage)
+                ?? (bothChinese ? variantToConvert(text, to: targetLanguageCode) : nil)
         }
+    }
+
+    /// 目标是中文时，这段文字（通常是译文）还要不要做简繁转换、按哪种字形翻；不用转换或目标不是中文时返回 nil。
+    static func variantConversionSource(for text: String, targetLanguageCode: String) -> String? {
+        isChinese(targetLanguageCode) ? variantToConvert(text, to: targetLanguageCode) : nil
     }
 
     private struct Inference {
