@@ -334,6 +334,45 @@ struct ScreenshotTranslationSourceResolverTests {
         #expect(resolve([arabic, "حفظ"], target: "en", detected: [arabic: "ar"], overall: "ar") == ["ar", "ar"])
     }
 
+    /// 审核第二轮：认不出的书写系统之间不能互相算匹配，阿拉伯文页面上的希腊文不是阿拉伯文。
+    @Test func shortGreekLabelOnAnArabicPageIsNotTreatedAsArabic() {
+        let arabic = "هذا نص عربي طويل بما يكفي للكشف عن اللغة"
+        let result = resolve([arabic, "Ναι"], target: "ar", detected: [arabic: "ar"], overall: "ar")
+        #expect(result == [nil, LanguagePreset.auto.code])
+    }
+
+    /// 审核第二轮：简繁要看字形本身，不能拿目标语言当源语言的猜测——
+    /// 否则单独一个「设置」在目标为繁体时被判成「不用翻」，永远转不成「設置」。
+    @Test func isolatedSimplifiedLabelIsConvertedForATraditionalTarget() {
+        #expect(resolve(["设置"], target: "zh-TW") == ["zh-CN"])
+    }
+
+    @Test func isolatedTraditionalLabelIsConvertedForASimplifiedTarget() {
+        #expect(resolve(["設置"], target: "zh-CN") == ["zh-TW"])
+    }
+
+    @Test func traditionalLabelOnASimplifiedPageIsStillConverted() {
+        let simplified = "本次更新修复了若干已知问题"
+        #expect(resolve([simplified, "設置"], detected: [simplified: "zh-CN"], overall: "zh-CN") == [nil, "zh-TW"])
+    }
+
+    /// 简繁同形的字转不转都一样，按目标语言算，不用翻。
+    @Test func labelWrittenTheSameInBothVariantsIsSkipped() {
+        #expect(resolve(["中文"], target: "zh-TW") == [nil])
+        #expect(resolve(["中文"], target: "zh-CN") == [nil])
+    }
+
+    @Test func scriptPresenceRecognizesTheScriptsUsedForPageMatching() {
+        #expect(TextScriptPresence(in: "Ναι").containsGreek)
+        #expect(TextScriptPresence(in: "حفظ").containsArabic)
+        #expect(TextScriptPresence(in: "שלום").containsHebrew)
+        #expect(TextScriptPresence(in: "สวัสดี").containsThai)
+        // 「々」在 CJK 符号区、分解形式的 é 带组合符号，都不能算成「别的书写系统」。
+        #expect(!TextScriptPresence(in: "時々").containsUnclassifiedLetters)
+        #expect(!TextScriptPresence(in: "caf\u{0065}\u{0301}").containsUnclassifiedLetters)
+        #expect(TextScriptPresence(in: "ሰላም").containsUnclassifiedLetters)
+    }
+
     @Test func shortChineseLabelOnAnEnglishPageIsSkippedForAChineseTarget() {
         #expect(resolve(["Install updates automatically", "设置"], detected: ["Install updates automatically": "en"], overall: "en") == ["en", nil])
     }
