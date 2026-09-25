@@ -124,13 +124,15 @@ enum ScreenshotTranslationRenderer {
         var eraseRects: [CGRect]
     }
 
-    /// 按笔画宽度（墨迹横向连续的平均长度）是同条件下常规体的几倍定字重。
-    /// 2026-09-26 在 macOS 26.5 上实测（英、中、日、韩和按钮上的短标签 × 11～28pt × 四种字重 × 深浅色，共 240 组）：
-    /// 常规 0.97～1.10，中等 1.08～1.22，半粗 1.17～1.32，粗体 1.24～1.56。中等字重画成半粗，常规体一组都没判错。
+    /// 按笔画宽度（覆盖率算的每段宽度取中位数，见 `PixelBuffer.inkBand`）是同条件下常规体的几倍定字重。
+    /// 2026-09-26 在 macOS 26.5 上实测（英、中、日、韩和按钮上的短标签 × 11～28pt × 四种字重 × 深浅色，1 倍、2 倍屏各 200 组）：
+    /// 2 倍屏常规 0.99～1.02，中等 1.13～1.20，半粗 1.23～1.31（短词「Install」28pt 有一组 1.72），粗体 1.34～1.93；
+    /// 1 倍屏常规 0.91～1.13，中等 1.09～1.24，半粗 1.17～1.36，粗体 1.26～1.91。
+    /// 常规体两种倍率下都一组没判错；中等字重介于两者之间，判成常规或半粗都有；半粗和粗体在 1 倍屏上偶尔互相认错（字号差 2% 左右）。
     static func weight(forStrokeRatio ratio: CGFloat?) -> NSFont.Weight {
         guard let ratio else { return .regular }
         if ratio >= 1.33 { return .bold }
-        if ratio >= 1.12 { return .semibold }
+        if ratio >= 1.15 { return .semibold }
         return .regular
     }
 
@@ -154,12 +156,16 @@ enum ScreenshotTranslationRenderer {
             let estimate = max(OCRParagraphGrouper.estimatedEm(width: box.width, text: line.text), 4)
             let background = pixels.ringMedian(around: box, padding: max(2, 0.15 * estimate))
             let ink = pixels.inkColor(in: box, background: background)
-            let band = pixels.inkBand(in: box, background: background, ink: ink, em: estimate)
-            let inkBox: CGRect
-            if let extent = pixels.inkExtent(in: box, top: band.top, bottom: band.bottom, background: background, ink: ink, slack: 0.15 * estimate) {
+            var band = pixels.inkBand(in: box, background: background, ink: ink, em: estimate)
+            var inkBox = box
+            if let extent = pixels.inkExtent(in: box, top: band.top, bottom: band.bottom, background: background, ink: ink, slack: 0.15 * estimate, em: estimate) {
                 inkBox = CGRect(x: extent.minX, y: box.minY, width: extent.maxX - extent.minX, height: box.height)
-            } else {
-                inkBox = box
+                // 行框里夹着紧贴着字的分隔线时，它每一行都有颜色，会把墨迹带一路撑到搜索范围的边上（段落里还会撑进相邻的行），
+                // 笔画宽度也被它的细线拉低。只在墨迹的左右端之间重量一次墨迹带，再按新的带重量一次左右端。
+                band = pixels.inkBand(in: inkBox, background: background, ink: ink, em: estimate)
+                if let refined = pixels.inkExtent(in: inkBox, top: band.top, bottom: band.bottom, background: background, ink: ink, slack: 0, em: estimate) {
+                    inkBox = CGRect(x: refined.minX, y: box.minY, width: refined.maxX - refined.minX, height: box.height)
+                }
             }
             // 按 pt 量：SF 按字号换字形，拿像素当字号量（2 倍屏上 13pt 当成 26pt）会换成大号字形、量偏。
             let em = fittedFontSize(of: line.text, inkWidth: inkBox.width / scale, estimate: estimate / scale) * scale
@@ -576,32 +582,39 @@ struct PixelBuffer {
         let y0 = max(0, Int(rect.minY)), y1 = min(height - 1, Int(rect.maxY))
         guard x1 > x0, y1 > y0 else { return background }
         var farthest = 0
-        for y in stride(from: y0, through: y1, by: 2) {
-            for x in stride(from: x0, through: x1, by: 2) {
+        for y in y0...y1 {
+            for x in x0...x1 {
                 farthest = max(farthest, pixel(x, y).squaredDistance(to: background))
             }
         }
         guard farthest > 0 else { return background }
         let threshold = Int(Double(farthest) * 0.49)  // 距离的 0.7 倍
-        var samples: [RGB] = []
-        for y in stride(from: y0, through: y1, by: 2) {
-            for x in stride(from: x0, through: x1, by: 2) {
+        var samples: [(distance: Int, color: RGB)] = []
+        for y in y0...y1 {
+            for x in x0...x1 {
                 let color = pixel(x, y)
-                if color.squaredDistance(to: background) >= threshold { samples.append(color) }
+                let distance = color.squaredDistance(to: background)
+                if distance >= threshold { samples.append((distance, color)) }
             }
         }
-        return RGB.median(samples)
+        // 只取反差最大的那四分之一：1 倍屏上笔画才一个多像素，完全盖满的像素少，把七成覆盖的也算进来，
+        // 中位色比真的字浅一截（近黑的字量成深灰），译文画浅了，量粗细时覆盖率也按浅色折算、量粗了。
+        samples.sort { $0.distance > $1.distance }
+        return RGB.median(samples.prefix(max(1, samples.count / 4)).map(\.color))
     }
 
     /// 这一行墨迹左右两端的位置（像素，maxX 不含）：在 `rect` 左右各放宽 `slack` 的范围里、
     /// `top..<bottom` 这几行中，找至少有两个墨迹像素的最左、最右一列。没有墨迹返回 nil。
-    func inkExtent(in rect: CGRect, top: CGFloat, bottom: CGFloat, background: RGB, ink: RGB, slack: CGFloat) -> (minX: CGFloat, maxX: CGFloat)? {
+    /// 紧贴着字的分隔线、按钮竖边颜色深的话也过得了墨迹阈值，但它在字的上方和下方都连着（同 `dividerColumn`），
+    /// 字的笔画不会伸到字外面——这样的列不算字。算进来的话它会被当成字抹掉，往外扫也从它外面开始、让译文越过它，
+    /// 字号也按多出来的宽度量偏。
+    func inkExtent(in rect: CGRect, top: CGFloat, bottom: CGFloat, background: RGB, ink: RGB, slack: CGFloat, em: CGFloat) -> (minX: CGFloat, maxX: CGFloat)? {
         let contrast = ink.distance(to: background)
         guard contrast > 20 else { return nil }
         let threshold = Int(pow(max(20, 0.45 * contrast), 2))
-        let x0 = max(0, Int(rect.minX - slack)), x1 = min(width - 1, Int(rect.maxX + slack))
+        let x0 = max(0, Int(rect.minX - slack)), x1 = min(width - 1, Int((rect.maxX + slack).rounded(.up)) - 1)
         let y0 = max(0, Int(top)), y1 = min(height - 1, Int(bottom) - 1)
-        guard x1 > x0, y1 >= y0 else { return nil }
+        guard x1 >= x0, y1 >= y0 else { return nil }
         func hasInk(_ x: Int) -> Bool {
             var hits = 0
             for y in y0...y1 where pixel(x, y).squaredDistance(to: background) >= threshold {
@@ -610,8 +623,19 @@ struct PixelBuffer {
             }
             return false
         }
-        guard let left = (x0...x1).first(where: hasInk),
-              let right = (x0...x1).reversed().first(where: hasInk) else { return nil }
+        let probe = max(3, Int(0.35 * em))
+        let above = y0 - 2 - probe >= 0 ? (y0 - 2 - probe)...(y0 - 2) : nil
+        let below = y1 + 2 + probe < height ? (y1 + 2)...(y1 + 2 + probe) : nil
+        func isDivider(_ x: Int) -> Bool {
+            guard let above, let below else { return false }
+            func continuous(_ rows: ClosedRange<Int>) -> Bool {
+                rows.filter { pixel(x, $0).squaredDistance(to: background) >= threshold }.count * 4 >= rows.count * 3
+            }
+            return continuous(above) && continuous(below)
+        }
+        func isText(_ x: Int) -> Bool { hasInk(x) && !isDivider(x) }
+        guard let left = (x0...x1).first(where: isText),
+              let right = (x0...x1).reversed().first(where: isText) else { return nil }
         return (CGFloat(left), CGFloat(right + 1))
     }
 
@@ -623,35 +647,51 @@ struct PixelBuffer {
         guard contrast > 20 else { return fallback }
         let threshold = Int(pow(max(20, 0.45 * contrast), 2))
 
-        let x0 = max(0, Int(rect.minX)), x1 = min(width - 1, Int(rect.maxX))
+        let x0 = max(0, Int(rect.minX)), x1 = min(width - 1, Int(rect.maxX.rounded(.up)) - 1)
         let center = rect.midY
         let searchTop = max(0, Int(max(rect.minY - 0.35 * em, center - 0.75 * em)))
         let searchBottom = min(height - 1, Int(min(rect.maxY + 0.35 * em, center + 0.75 * em)))
-        guard x1 > x0, searchBottom > searchTop else { return fallback }
+        guard x1 >= x0, searchBottom > searchTop else { return fallback }
 
         // 「整行同色」要看得比文字框宽：左右各放宽一个字宽，几乎整行都是墨迹色的才是和字同色的一整块
         // （白字按钮外面的白底，一整片）；字的笔画不会伸到字外面，「工」「王」的一横占满文字框也照样算字。
         let wideX0 = max(0, Int(rect.minX - em)), wideX1 = min(width - 1, Int(rect.maxX + em))
+        // 笔画宽度按覆盖率算：一段笔画的宽度 = 段里各像素的覆盖率之和，加上两边各一个抗锯齿像素的覆盖率。
+        // 1 倍屏上一笔竖画只有一个多像素，按「过阈值的像素个数」数，落在像素格的不同位置会数成 1 个或 2 个，
+        // 宽度差出三成，常规体和半粗体就分不开；覆盖率加起来不管落在哪都一样。最后取各段的中位数：
+        // 横画、弧线的顶和底在一行里是长长的一段，平均会被它们拉偏，中位数量的是竖画。
+        let inkR = Double(ink.r - background.r), inkG = Double(ink.g - background.g), inkB = Double(ink.b - background.b)
+        let inkNorm = inkR * inkR + inkG * inkG + inkB * inkB
+        func coverage(_ x: Int, _ y: Int) -> Double {
+            guard x >= 0, x < width else { return 0 }
+            let p = pixel(x, y)
+            return min(1, max(0, (Double(p.r - background.r) * inkR + Double(p.g - background.g) * inkG + Double(p.b - background.b) * inkB) / inkNorm))
+        }
         var counts: [Int] = []
-        var runs: [Int] = []
+        var strokeRuns: [[Double]] = []
         var solidRows: [Bool] = []
         for y in searchTop...searchBottom {
-            var count = 0, runCount = 0, inside = false
+            var count = 0, inside = false, current = 0.0
+            var rowRuns: [Double] = []
             for x in x0...x1 {
                 let isInk = pixel(x, y).squaredDistance(to: background) >= threshold
                 if isInk {
                     count += 1
-                    if !inside { runCount += 1 }
+                    if !inside { current = coverage(x - 1, y) }
+                    current += coverage(x, y)
+                } else if inside {
+                    rowRuns.append(current + coverage(x, y))
                 }
                 inside = isInk
             }
+            if inside { rowRuns.append(current + coverage(x1 + 1, y)) }
+            strokeRuns.append(rowRuns)
             var wide = count
             for x in wideX0..<x0 where pixel(x, y).squaredDistance(to: background) >= threshold { wide += 1 }
             if x1 < wideX1 {
                 for x in (x1 + 1)...wideX1 where pixel(x, y).squaredDistance(to: background) >= threshold { wide += 1 }
             }
             counts.append(count)
-            runs.append(runCount)
             solidRows.append(Double(wide) >= 0.85 * Double(wideX1 - wideX0 + 1))
         }
         let minimum = max(1, (x1 - x0) / 250)
@@ -678,12 +718,11 @@ struct PixelBuffer {
             row += 1
         }
 
-        let inkPixels = counts[top...bottom].reduce(0, +)
-        let inkRuns = runs[top...bottom].reduce(0, +)
+        let widths = strokeRuns[top...bottom].flatMap { $0 }.sorted()
         return InkBand(
             top: CGFloat(searchTop + top),
             bottom: CGFloat(searchTop + bottom + 1),
-            strokeWidth: inkRuns > 0 ? CGFloat(inkPixels) / CGFloat(inkRuns) : nil
+            strokeWidth: widths.isEmpty ? nil : CGFloat(widths[widths.count / 2])
         )
     }
 

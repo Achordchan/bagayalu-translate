@@ -594,6 +594,36 @@ struct ScreenshotTranslationRendererTests {
         }
     }
 
+    /// 审核第六轮后自查（#12）：1 倍屏上一笔竖画只有一个多像素。文字颜色原来按「反差七成以上」的像素取中位色，
+    /// 半覆盖的像素占了多数，近黑的字量成深灰（译文画浅了）；笔画宽度原来数「过阈值的像素个数」，落在像素格的
+    /// 不同位置会差出三成，还按量浅了的颜色折算——常规体和半粗体分不开，判错了字号还按错的粗细重算、偏 7%。
+    @Test func fontSizeWeightAndColorAreMeasuredOn1xScreens() async throws {
+        for dark in [false, true] {
+            let background: NSColor = dark ? NSColor(white: 0.12, alpha: 1) : .white
+            let color: NSColor = dark ? .white : SyntheticScreenshot.ink
+            let truth = dark ? PixelBuffer.RGB(r: 255, g: 255, b: 255) : PixelBuffer.RGB(r: 29, g: 29, b: 31)
+            for string in ["Install", "允许在这台电脑上显示通知"] {
+                for size in [11, 14] as [CGFloat] {
+                    for offset in [0, 0.25, 0.5, 0.75] as [CGFloat] {
+                        for weight in [NSFont.Weight.regular, .semibold] {
+                            let shot = scene(width: 400, height: 50, scale: 1) {
+                                background.setFill()
+                                NSRect(x: 0, y: 0, width: 400, height: 50).fill()
+                                text(string, at: CGPoint(x: 20 + offset, y: 14 + offset), size: size, color: color, weight: weight)
+                            }
+                            let block = try #require(await recognize(shot).first)
+                            let style = ScreenshotTranslationRenderer.measureStyle(of: block, in: try #require(PixelBuffer(image: shot.cgImage)), scale: 1)
+                            let label = "\(string.prefix(4)) \(size)pt \(weight == .regular ? "常规" : "半粗") 偏移 \(offset) \(dark ? "深色" : "浅色")"
+                            #expect((style.weight == .regular) == (weight == .regular), "\(label) 粗细判成了 \(style.weight.rawValue)，笔画比 \(style.strokeRatio ?? 0)")
+                            #expect(abs(style.fontSize - size) / size < 0.06, "\(label) 量成了 \(style.fontSize)pt")
+                            #expect(style.textColor.distance(to: truth) <= 25, "\(label) 文字颜色量成了 \(style.textColor)")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// 审核第一轮（#12）：1 倍屏上 0.15 个字宽才一个多像素，扫描不能把自己最后一笔竖画当成障碍。
     @Test func smallTextOnA1xScreenStillGrowsIntoEmptySpace() async throws {
         let shot = scene(SyntheticScreenshot(name: "1x", width: 360, height: 40, scale: 1, texts: [
@@ -884,6 +914,51 @@ struct ScreenshotTranslationRendererTests {
                 }
             }
             #expect(dark == 0, "\(first)：第一行长出来的那一截还剩 \(dark) 个深色像素没抹掉")
+        }
+    }
+
+    /// 审核第六轮后自查（#12）：紧贴着字的分隔线颜色深、过得了墨迹阈值时，量墨迹左右端会把它算成字——
+    /// 被当成字抹掉，往外扫从它外面开始、长译文越过它伸进隔壁格子，字号也按多出来的宽度量偏。
+    @Test func darkDividerNextToTheTextIsNotTreatedAsText() async throws {
+        for (gray, size, scale) in [(CGFloat(0.1), CGFloat(24), CGFloat(2)), (0.4, 24, 2), (0.1, 14, 1)] {
+            let origin = CGPoint(x: 20, y: 14)
+            let inkMaxX = origin.x + CTLineGetBoundsWithOptions(
+                CTLineCreateWithAttributedString(NSAttributedString(string: "Install", attributes: [.font: NSFont.systemFont(ofSize: size)])),
+                .useGlyphPathBounds
+            ).maxX
+            let divider = CGRect(x: ceil(inkMaxX) + (scale == 1 ? 2 : 1), y: 4, width: 1, height: 52)
+            func shot(withDivider: Bool) -> Scene {
+                scene(width: 360, height: 60, scale: scale) {
+                    NSColor.white.setFill()
+                    NSRect(x: 0, y: 0, width: 360, height: 60).fill()
+                    text("Install", at: origin, size: size)
+                    if withDivider {
+                        NSColor(white: gray, alpha: 1).setFill()
+                        divider.fill()
+                    }
+                }
+            }
+            let label = "灰度 \(gray)、\(size)pt、\(scale) 倍"
+            let plain = shot(withDivider: false), divided = shot(withDivider: true)
+            let plainBlock = try #require(await recognize(plain).first { $0.text.hasPrefix("Install") })
+            let block = try #require(await recognize(divided).first { $0.text.hasPrefix("Install") })
+            let plainStyle = ScreenshotTranslationRenderer.measureStyle(of: plainBlock, in: try #require(PixelBuffer(image: plain.cgImage)), scale: scale)
+            let style = ScreenshotTranslationRenderer.measureStyle(of: block, in: try #require(PixelBuffer(image: divided.cgImage)), scale: scale)
+            #expect(style.lines[0].maxX <= divider.minX, "\(label)：分隔线被算进了墨迹，墨迹右端 \(style.lines[0].maxX)，分隔线在 \(divider.minX)")
+            #expect(style.limits.maxX <= divider.minX, "\(label)：译文能越过分隔线，能长到 \(style.limits.maxX)")
+            #expect(abs(style.fontSize - plainStyle.fontSize) <= 0.02 * plainStyle.fontSize, "\(label)：分隔线让字号从 \(plainStyle.fontSize) 变成了 \(style.fontSize)")
+
+            let output = try #require(ScreenshotTranslationRenderer.render(.init(
+                image: divided.cgImage, pointSize: divided.pointSize, blocks: [block], translations: [block.id: "安装"]
+            )))
+            let rendered = try #require(PixelBuffer(image: output)), original = try #require(PixelBuffer(image: divided.cgImage))
+            var changed = 0
+            for y in Int(divider.minY * scale)..<Int(divider.maxY * scale) {
+                for x in Int(divider.minX * scale)..<Int(divider.maxX * scale) where rendered.pixel(x, y) != original.pixel(x, y) {
+                    changed += 1
+                }
+            }
+            #expect(changed == 0, "\(label)：分隔线有 \(changed) 个像素被动了")
         }
     }
 
