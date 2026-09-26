@@ -15,12 +15,6 @@ struct Language: Identifiable, Hashable {
 enum LanguagePreset {
     static let auto = Language(code: "auto", name: "自动检测")
 
-    static let screenshotSource: [Language] = [
-        .init(code: "en", name: "英语"),
-        .init(code: "ru", name: "俄语"),
-        .init(code: "es", name: "西班牙语")
-    ]
-
     static let common: [Language] = [
         .init(code: "auto", name: "自动检测"),
         .init(code: "zh-CN", name: "中文（简体）"),

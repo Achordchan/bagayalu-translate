@@ -99,12 +99,7 @@ final class ScreenshotSelectionWindow: NSWindow {
         if session.selectionRect.width > 1, session.selectionRect.height > 1 {
             session.selectionRect = .zero
             session.stage = .selecting
-            session.ocrText = ""
-            session.translatedText = ""
-            session.ocrLines = []
-            session.translatedLines = []
-            session.capturedImage = nil
-            session.showCompare = false
+            session.resetResults()
             return
         }
 

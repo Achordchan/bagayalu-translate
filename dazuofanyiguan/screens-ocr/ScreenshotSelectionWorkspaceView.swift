@@ -152,21 +152,16 @@ struct ScreenshotSelectionWorkspaceView: View {
         return ZStack(alignment: .topLeading) {
             if isCompare {
                 compareInlineOverlay
-            } else if session.stage == .translated {
-                if !session.translatedLines.isEmpty {
-                    lineOverlays(lines: session.translatedLines, selectionSize: rect.size)
-                } else {
-                    overlayText(text: session.translatedText)
-                }
-            } else if session.stage == .translating {
-                if !session.translatedLines.isEmpty {
-                    lineOverlays(lines: session.translatedLines, selectionSize: rect.size)
+            } else if session.stage == .translated || session.stage == .translating {
+                // 翻译进行中：已经翻好的段落显示译文，还没轮到的先显示原文。
+                if !session.ocrBlocks.isEmpty {
+                    blockOverlays(blocks: session.ocrBlocks, texts: session.translations, selectionSize: rect.size)
                 } else {
                     overlayText(text: session.translatedText)
                 }
             } else if session.stage == .ocrReady {
-                if !session.ocrLines.isEmpty {
-                    lineOverlays(lines: session.ocrLines, selectionSize: rect.size)
+                if !session.ocrBlocks.isEmpty {
+                    blockOverlays(blocks: session.ocrBlocks, texts: [:], selectionSize: rect.size)
                 } else {
                     overlayText(text: session.ocrText)
                 }
@@ -219,7 +214,11 @@ struct ScreenshotSelectionWorkspaceView: View {
         .position(x: rect.midX, y: rect.midY)
     }
 
-    private func lineOverlays(lines: [VisionOCRService.OCRLine], selectionSize: CGSize) -> some View {
+    private func blockOverlays(
+        blocks: [VisionOCRService.OCRBlock],
+        texts: [UUID: String],
+        selectionSize: CGSize
+    ) -> some View {
         ZStack(alignment: .topLeading) {
             // 整体轻背景，保证覆盖可读。
             RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -229,11 +228,14 @@ struct ScreenshotSelectionWorkspaceView: View {
                         .strokeBorder(Color(nsColor: .separatorColor).opacity(0.55), lineWidth: 1)
                 )
 
-            ForEach(lines) { line in
-                let rect = lineRect(line.boundingBox, selectionSize: selectionSize)
-                let fontSize = clampFontSize(rect.height >= 28 ? rect.height * 0.45 : rect.height * 0.82)
+            ForEach(blocks) { block in
+                let rect = lineRect(block.boundingBox, selectionSize: selectionSize)
+                // 字号按原文每行「宽度 ÷ 字数」估算，不按外框高度：多行段落的外框很高，
+                // 旧公式给大框乘 0.45、小框乘 0.82，结果段落和单行忽大忽小；
+                // 而 Vision 的单行框高本身也会忽高忽低。
+                let fontSize = clampFontSize(estimatedFontSize(of: block, selectionSize: selectionSize))
 
-                Text(line.text)
+                Text(texts[block.id] ?? block.text)
                     .font(.system(size: fontSize, weight: .semibold))
                     .foregroundStyle(.primary)
                     .multilineTextAlignment(.leading)
@@ -255,6 +257,14 @@ struct ScreenshotSelectionWorkspaceView: View {
         let w = boundingBox.width * selectionSize.width
         let h = boundingBox.height * selectionSize.height
         return CGRect(x: x, y: y, width: max(8, w), height: max(10, h))
+    }
+
+    private func estimatedFontSize(of block: VisionOCRService.OCRBlock, selectionSize: CGSize) -> CGFloat {
+        let sizes = block.lines.map { line in
+            OCRParagraphGrouper.estimatedEm(width: line.boundingBox.width * selectionSize.width, text: line.text)
+        }.sorted()
+        guard !sizes.isEmpty else { return 0 }
+        return sizes[sizes.count / 2]
     }
 
     private func clampFontSize(_ size: CGFloat) -> CGFloat {
@@ -320,8 +330,8 @@ struct ScreenshotSelectionWorkspaceView: View {
             HStack(spacing: 10) {
                 LanguageSearchPicker(
                     title: "源",
-                    allowAuto: false,
-                    options: LanguagePreset.screenshotSource,
+                    allowAuto: true,
+                    options: VisionOCRService.selectableSourceLanguages,
                     selection: $session.sourceLanguageCode,
                     fixedWidth: 170
                 )

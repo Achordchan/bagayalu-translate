@@ -22,7 +22,7 @@ struct GoogleTranslateEngine: TranslationEngine {
 
     /// 非官方 gtx 接口对长度敏感；只走 POST 表单，禁止把原文放进 URL query。
     private static let maxChunkCharacters = 1800
-    private static let maxTotalCharacters = 8000
+    static let maxTotalCharacters = 8000
     static let endpoint = URL(string: "https://translate.googleapis.com/translate_a/single")!
 
     private let http = HTTPClient()

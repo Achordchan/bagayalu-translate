@@ -595,7 +595,7 @@ final class AppleTranslationCoordinator: ObservableObject {    private struct Tr
     }
 }
 
-private enum AppleTranslationError: LocalizedError {
+enum AppleTranslationError: LocalizedError {
     case unsupportedLanguagePair(source: String, target: String)
     case unsupportedSourceLanguage
     case unsupportedTargetLanguage
@@ -603,6 +603,18 @@ private enum AppleTranslationError: LocalizedError {
     case unableToIdentifyLanguage
     case nothingToTranslate
     case translationFailed(String)
+
+    /// 这个语言组合本身用不了：换一段同样语言的文字也一样会失败。
+    /// 截图翻译据此跳过同语言的其他段，其余错误都只算这一次请求的问题。
+    var isLanguagePairUnavailable: Bool {
+        switch self {
+        case .unsupportedLanguagePair, .unsupportedSourceLanguage,
+             .unsupportedTargetLanguage, .unsupportedLanguagePairing:
+            return true
+        case .unableToIdentifyLanguage, .nothingToTranslate, .translationFailed:
+            return false
+        }
+    }
 
     var errorDescription: String? {
         switch self {
