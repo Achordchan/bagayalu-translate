@@ -153,18 +153,20 @@ struct ScreenshotSelectionWorkspaceView: View {
             if isCompare {
                 compareInlineOverlay
             } else if session.stage == .translated || session.stage == .translating {
-                // 翻译进行中：已经翻好的段落显示译文，还没轮到的先显示原文。
-                if !session.ocrBlocks.isEmpty {
-                    blockOverlays(blocks: session.ocrBlocks, texts: session.translations, selectionSize: rect.size)
-                } else {
-                    overlayText(text: session.translatedText)
+                // 回贴：原截图上抹掉原文、按原位置画上译文，不加卡片。翻译进行中翻好一批画一批，
+                // 还没画出来的时候什么都不盖，看到的就是原图。
+                if let image = session.translatedImage {
+                    Image(nsImage: image)
+                        .resizable()
+                        .interpolation(.high)
+                        .frame(width: rect.width, height: rect.height)
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                } else if session.overlayUnavailable {
+                    overlayText(text: session.ocrBlocks.map { session.translations[$0.id] ?? $0.text }.joined(separator: "\n"))
                 }
             } else if session.stage == .ocrReady {
-                if !session.ocrBlocks.isEmpty {
-                    blockOverlays(blocks: session.ocrBlocks, texts: [:], selectionSize: rect.size)
-                } else {
-                    overlayText(text: session.ocrText)
-                }
+                // 只提取了原文：列出识别到的文字（已经复制到剪贴板），方便核对。
+                overlayText(text: session.ocrText)
             } else if case .failed(let message) = session.stage {
                 VStack(alignment: .leading, spacing: 10) {
                     HStack(spacing: 8) {
@@ -212,63 +214,6 @@ struct ScreenshotSelectionWorkspaceView: View {
         }
         .frame(width: rect.width, height: rect.height)
         .position(x: rect.midX, y: rect.midY)
-    }
-
-    private func blockOverlays(
-        blocks: [VisionOCRService.OCRBlock],
-        texts: [UUID: String],
-        selectionSize: CGSize
-    ) -> some View {
-        ZStack(alignment: .topLeading) {
-            // 整体轻背景，保证覆盖可读。
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Color(nsColor: .windowBackgroundColor).opacity(0.96))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .strokeBorder(Color(nsColor: .separatorColor).opacity(0.55), lineWidth: 1)
-                )
-
-            ForEach(blocks) { block in
-                let rect = lineRect(block.boundingBox, selectionSize: selectionSize)
-                // 字号按原文每行「宽度 ÷ 字数」估算，不按外框高度：多行段落的外框很高，
-                // 旧公式给大框乘 0.45、小框乘 0.82，结果段落和单行忽大忽小；
-                // 而 Vision 的单行框高本身也会忽高忽低。
-                let fontSize = clampFontSize(estimatedFontSize(of: block, selectionSize: selectionSize))
-
-                Text(texts[block.id] ?? block.text)
-                    .font(.system(size: fontSize, weight: .semibold))
-                    .foregroundStyle(.primary)
-                    .multilineTextAlignment(.leading)
-                    .lineLimit(nil)
-                    .minimumScaleFactor(0.6)
-                    .allowsTightening(true)
-                    .frame(width: rect.width, height: rect.height, alignment: .topLeading)
-                    .position(x: rect.midX, y: rect.midY)
-            }
-        }
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-    }
-
-    private func lineRect(_ boundingBox: CGRect, selectionSize: CGSize) -> CGRect {
-        // boundingBox：0~1，左下原点。
-        // SwiftUI inside selectionContent：左上原点。
-        let x = boundingBox.minX * selectionSize.width
-        let y = (1 - boundingBox.maxY) * selectionSize.height
-        let w = boundingBox.width * selectionSize.width
-        let h = boundingBox.height * selectionSize.height
-        return CGRect(x: x, y: y, width: max(8, w), height: max(10, h))
-    }
-
-    private func estimatedFontSize(of block: VisionOCRService.OCRBlock, selectionSize: CGSize) -> CGFloat {
-        let sizes = block.lines.map { line in
-            OCRParagraphGrouper.estimatedEm(width: line.boundingBox.width * selectionSize.width, text: line.text)
-        }.sorted()
-        guard !sizes.isEmpty else { return 0 }
-        return sizes[sizes.count / 2]
-    }
-
-    private func clampFontSize(_ size: CGFloat) -> CGFloat {
-        min(max(size, 11), 22)
     }
 
     private func overlayText(text: String) -> some View {

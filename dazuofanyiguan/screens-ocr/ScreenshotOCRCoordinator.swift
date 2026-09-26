@@ -17,6 +17,12 @@ final class ScreenshotOCRCoordinator: ObservableObject {
 
     private var previousFrontmostAppPID: pid_t?
 
+    /// 回贴图在后台画，同一时间只画一张；画的时候又来的请求合并成画完后的一次。
+    private var overlayRenderTask: Task<Void, Never>?
+    private var overlayNeedsRender = false
+    /// 同一批识别结果多次重画时复用量过的样式；重新识别时换一个。
+    private var overlayStyleCache = ScreenshotTranslationRenderer.StyleCache()
+
     init(appleTranslationCoordinator: AppleTranslationCoordinator) {
         self.appleTranslationCoordinator = appleTranslationCoordinator
     }
@@ -204,6 +210,9 @@ final class ScreenshotOCRCoordinator: ObservableObject {
 
         session.ocrBlocks = blocks
         session.translations = [:]
+        session.translatedImage = nil
+        session.overlayUnavailable = false
+        overlayStyleCache = ScreenshotTranslationRenderer.StyleCache()
         session.translatedText = ""
         session.ocrText = blocks.map(\.text).joined(separator: "\n")
         if blocks.isEmpty {
@@ -472,6 +481,8 @@ final class ScreenshotOCRCoordinator: ObservableObject {
 
         session.stage = .translating
         session.translations = [:]
+        session.translatedImage = nil
+        session.overlayUnavailable = false
 
         switch settings.engineType {
         case .apple:
@@ -530,14 +541,16 @@ final class ScreenshotOCRCoordinator: ObservableObject {
         guard let outcome = await translator.run(
             jobs,
             shouldContinue: { [weak self] in self?.isCurrent(session, generation) ?? false },
-            onProgress: { progress in
+            onProgress: { [weak self] progress in
                 session.translations = skipped.merging(progress) { _, new in new }
+                self?.scheduleOverlayRender()
             }
         ) else { return }
         guard isCurrent(session, generation) else { return }
 
         if outcome.succeeded == 0, let error = outcome.failures.first {
             session.translations = [:]
+            session.translatedImage = nil
             session.stage = .failed(error.localizedDescription)
             toast.show(error.localizedDescription, style: .error)
             return
@@ -545,6 +558,7 @@ final class ScreenshotOCRCoordinator: ObservableObject {
 
         translations.merge(outcome.translations) { _, new in new }
         session.translations = translations
+        scheduleOverlayRender()
         session.translatedText = blocks.map { translations[$0.id] ?? $0.text }.joined(separator: "\n")
         session.stage = .translated
         if let warning = outcome.incompleteWarning(
@@ -552,6 +566,36 @@ final class ScreenshotOCRCoordinator: ObservableObject {
             targetName: LanguagePreset.displayName(for: targetLanguageCode)
         ) {
             session.showHUD(warning, style: .warning)
+        }
+    }
+
+    /// 按当前的识别结果和译文重画回贴图。放在后台画；正在画的时候又来的请求合并成一次，画完再按最新的译文画。
+    /// 画好的图对不上当前的选区（换了选区、换了源语言、重新识别了）就丢掉。
+    private func scheduleOverlayRender() {
+        overlayNeedsRender = true
+        guard overlayRenderTask == nil else { return }
+        overlayRenderTask = Task { @MainActor [weak self] in
+            while let self, self.overlayNeedsRender {
+                self.overlayNeedsRender = false
+                guard let session = self.session,
+                      let image = session.capturedImage,
+                      let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { continue }
+                let generation = session.generation
+                let pointSize = image.size
+                let input = ScreenshotTranslationRenderer.Input(
+                    image: cgImage,
+                    pointSize: pointSize,
+                    blocks: session.ocrBlocks,
+                    translations: session.translations,
+                    cache: self.overlayStyleCache
+                )
+                let rendered = await Task.detached(priority: .userInitiated) {
+                    ScreenshotTranslationRenderer.render(input)
+                }.value
+                guard self.isCurrent(session, generation) else { continue }
+                session.applyOverlayRender(rendered.map { NSImage(cgImage: $0, size: pointSize) })
+            }
+            self?.overlayRenderTask = nil
         }
     }
 

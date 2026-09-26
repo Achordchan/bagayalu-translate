@@ -56,6 +56,10 @@ final class ScreenshotOCRSession: ObservableObject {
     @Published var ocrBlocks: [VisionOCRService.OCRBlock] = []
     /// 各段的译文（按段落 id）。不用翻的段落存原文；翻译进行中会一批批补上。
     @Published var translations: [UUID: String] = [:]
+    /// 回贴好的整张图：原截图上抹掉原文、按原位置画上译文。翻译进行中每翻完一批更新一次，还没画出来时为 nil。
+    @Published var translatedImage: NSImage? = nil
+    /// 回贴图画不出来（极少见），界面退回用卡片列出译文。
+    @Published var overlayUnavailable: Bool = false
 
     @Published var frozenBackgrounds: [FrozenBackground] = []
 
@@ -79,6 +83,8 @@ final class ScreenshotOCRSession: ObservableObject {
         translatedText = ""
         ocrBlocks = []
         translations = [:]
+        translatedImage = nil
+        overlayUnavailable = false
         capturedImage = nil
         didExtractTextToPasteboard = false
         showCompare = false
@@ -94,11 +100,20 @@ final class ScreenshotOCRSession: ObservableObject {
         translatedText = ""
         ocrBlocks = []
         translations = [:]
+        translatedImage = nil
+        overlayUnavailable = false
         didExtractTextToPasteboard = false
         showCompare = false
         if capturedImage != nil {
             stage = .selected
         }
+    }
+
+    /// 一次回贴渲染的结果：画出来了换上新图；画不出来就清掉旧图（旧图只有前几批的译文），
+    /// 让界面退回卡片列出最新的译文。
+    func applyOverlayRender(_ image: NSImage?) {
+        translatedImage = image
+        overlayUnavailable = image == nil
     }
 
     func showHUD(_ message: String, style: HUDToast.Style = .info, duration: TimeInterval = 1.8) {
