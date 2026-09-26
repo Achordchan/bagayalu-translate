@@ -265,7 +265,12 @@ struct InputAssistTests {
         }
 
         let session = CandidateSession(
-            appBundleIdentifier: "com.example.app",
+            app: InputAssistAppIdentity(
+                bundleIdentifier: "com.example.app",
+                localizedName: nil,
+                executableName: nil,
+                processIdentifier: 42
+            ),
             capture: capture("hello", location: 0),
             detectedSourceLanguageCode: "en"
         )
@@ -1759,7 +1764,12 @@ struct InputAssistTests {
             selectedRangeAtCapture: selection
         )
         let session = CandidateSession(
-            appBundleIdentifier: "com.example.app",
+            app: InputAssistAppIdentity(
+                bundleIdentifier: "com.example.app",
+                localizedName: nil,
+                executableName: nil,
+                processIdentifier: 42
+            ),
             capture: capture,
             detectedSourceLanguageCode: "zh-CN"
         )
@@ -1772,10 +1782,49 @@ struct InputAssistTests {
         // 回归：前台 App 的检查必须紧贴着 press，中间隔着剪贴板深拷贝就来不及了——
         // 剪贴板里躺着一张大图时，把每种类型都 materialize 一遍是要花时间的。
         //
-        // 这里只验判定函数本身：不存在的 bundle id 必定为 false，
+        // 这里只验判定函数本身：不存在的进程号必定为 false，
         // 因此它可以安全地放在 press 前面当最后一道闸。
-        #expect(!InputAssistTextReplaceEngine.isFrontmostApplication("com.example.definitely-not-frontmost"))
+        #expect(!InputAssistTextReplaceEngine.isFrontmostApplication(.max))
         #expect(!InputAssistTextReplaceEngine.isFrontmostApplication(nil))
+    }
+
+    @Test func frontmostCheckTreatsAMissingProcessAsChanged() {
+        // 回归：以前按 bundle ID 比，`前台的 bundle ID == 取词时的 bundle ID`。没有 bundle ID 的应用
+        // （直接运行的可执行文件、一些 Java / Wine 应用）两边都是 nil，于是「换成了另一个同样没有 bundle ID 的应用」
+        // 「此刻没有前台应用」都算没变。上面那条用例也因此偶发地挂：它读的是整台机器的前台应用，
+        // 那一刻前台应用拿不到 bundle ID 时 `isFrontmostApplication(nil)` 就是 true。
+        //
+        // 现在按进程号比，比较本身是纯函数，不读全局状态：任何一边拿不到都当作变了。
+        #expect(InputAssistReplacementSafetyGuard.isSameProcess(expected: 42, current: 42))
+        #expect(!InputAssistReplacementSafetyGuard.isSameProcess(expected: 42, current: 43))
+        #expect(!InputAssistReplacementSafetyGuard.isSameProcess(expected: 42, current: nil))
+        #expect(!InputAssistReplacementSafetyGuard.isSameProcess(expected: nil, current: 42))
+        #expect(!InputAssistReplacementSafetyGuard.isSameProcess(expected: nil, current: nil))
+    }
+
+    @Test func sessionRemembersTheProcessThatPassedTheFilter() {
+        // 替换前比的进程号来自通过名单检查的那份身份，和 bundle ID、名字取自同一个 NSRunningApplication。
+        // 这一步断了（会话里是 nil），每次替换都会判成「应用变了」，选区翻译就再也替换不了。
+        let identity = InputAssistAppIdentity(application: .current)
+        #expect(identity.processIdentifier == ProcessInfo.processInfo.processIdentifier)
+        #expect(identity.bundleIdentifier == NSRunningApplication.current.bundleIdentifier)
+
+        let capture = InputAssistCapture(
+            element: AXUIElementCreateSystemWide(),
+            sourceText: "hello",
+            sourceRange: nil,
+            elementValue: nil,
+            context: "hello",
+            capability: .axDirect,
+            role: nil,
+            allowsEditorPaste: false,
+            anchorRect: .zero,
+            hasPreciseCaretBounds: false,
+            selectedRangeAtCapture: nil
+        )
+        let session = CandidateSession(app: identity, capture: capture, detectedSourceLanguageCode: "en")
+        #expect(session.appProcessIdentifier == ProcessInfo.processInfo.processIdentifier)
+        #expect(CandidateSession(app: nil, capture: capture, detectedSourceLanguageCode: "en").appProcessIdentifier == nil)
     }
 
     @MainActor
@@ -1883,12 +1932,12 @@ struct InputAssistTests {
         // 三样任意一样对不上都要给出对应的 abort 原因，而不是笼统地报一个。
         let element = AXUIElementCreateSystemWide()
 
-        // 前台 App 对不上 → applicationChanged（最先短路）。
+        // 前台 App 对不上 → applicationChanged（最先短路）。macOS 的进程号到不了 Int32.max。
         #expect(InputAssistTextReplaceEngine.invalidTargetReason(
             element: element,
             expectedSelectedRange: nil,
             expectedSelectedText: "好的",
-            expectedBundleIdentifier: "com.example.definitely-not-frontmost"
+            expectedProcessIdentifier: .max
         ) == .applicationChanged)
     }
 
