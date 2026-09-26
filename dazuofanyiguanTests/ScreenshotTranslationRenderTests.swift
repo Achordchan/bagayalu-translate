@@ -391,6 +391,116 @@ struct ScreenshotOverlayStateTests {
         #expect(session.translatedImage === image)
         #expect(!session.overlayUnavailable)
     }
+
+    @MainActor private struct Export {
+        let session = ScreenshotOCRSession(sourceLanguageCode: LanguagePreset.auto.code, targetLanguageCode: "zh-CN")
+        let original = NSImage(size: NSSize(width: 10, height: 10))
+        let translated = NSImage(size: NSSize(width: 10, height: 10))
+
+        /// 截好图、翻完、回贴图也画好了。
+        func translatedSession() -> ScreenshotOCRSession {
+            session.capturedImage = original
+            session.stage = .translated
+            session.applyOverlayRender(translated)
+            return session
+        }
+    }
+
+    /// 翻完了，「钉到屏幕」「完成」拿的是贴了译文的图。以前一直拿原截图：选区里看着是译文，钉上去、贴出来却是原文。
+    @Test func exportTakesTheTranslatedImageOnceTranslated() {
+        let export = Export()
+        let session = export.translatedSession()
+        #expect(session.canExport)
+        #expect(session.imageForExport()?.image === export.translated)
+        #expect(session.imageForExport()?.kind == .translated)
+
+        // 对照模式只是换个方式看文字，拿的还是译文图。
+        session.showCompare = true
+        #expect(session.imageForExport()?.image === export.translated)
+    }
+
+    /// 没翻、提取原文之后、翻译失败：选区里是原截图，拿的也是原截图。
+    @Test func exportTakesTheOriginalWhenNothingWasTranslated() {
+        let export = Export()
+        let session = export.session
+        session.capturedImage = export.original
+        for stage: ScreenshotOCRSession.Stage in [.selected, .ocrReady, .failed("翻译失败")] {
+            session.stage = stage
+            #expect(session.canExport, "\(stage)")
+            #expect(session.imageForExport()?.image === export.original, "\(stage)")
+            #expect(session.imageForExport()?.kind == .original, "\(stage)")
+        }
+    }
+
+    /// 翻译全部失败：失败处理先清掉回贴图，排着队的那次重画后跑，按清空了的译文画出一张原图的拷贝又写回来。
+    /// 选区里显示的是出错卡片，拿的应当是原截图，不能当成译文图、提示「译文截图已复制」。
+    @Test func renderLandingAfterAFailedTranslationIsNotTreatedAsTheTranslation() {
+        let export = Export()
+        let session = export.session
+        session.capturedImage = export.original
+        session.stage = .failed("翻译失败")
+        session.applyOverlayRender(NSImage(size: NSSize(width: 10, height: 10)))
+        #expect(session.imageForExport()?.image === export.original)
+        #expect(session.imageForExport()?.kind == .original)
+
+        // 画失败的那种落在这里也一样，不提示「译文图没画出来」。
+        session.applyOverlayRender(nil)
+        #expect(session.imageForExport()?.kind == .original)
+    }
+
+    /// 翻完之后换了源语言：译文作废，选区里回到原截图，拿的也回到原截图。
+    @Test func changingTheSourceLanguageAfterTranslatingGoesBackToTheOriginal() {
+        let export = Export()
+        let session = export.translatedSession()
+        session.sourceLanguageCode = "en"
+        #expect(session.imageForExport()?.image === export.original)
+        #expect(session.imageForExport()?.kind == .original)
+    }
+
+    /// 识别、翻译进行中，或者回贴图还在画：不能拿。钉上去的图不会再更新，这时候拿走的是翻了一半、或者上一批的图。
+    @Test func exportIsUnavailableUntilTranslationAndRenderingFinish() {
+        let export = Export()
+        let session = export.session
+        session.capturedImage = export.original
+
+        session.stage = .ocrRunning
+        #expect(!session.canExport)
+        #expect(session.imageForExport() == nil)
+
+        // 翻了一批、画好了一批，还有没翻完的。
+        session.stage = .translating
+        session.applyOverlayRender(export.translated)
+        #expect(!session.canExport)
+        #expect(session.imageForExport() == nil)
+
+        // 最后一批翻完了，但还在按它重画：手上这张是上一批的。
+        session.stage = .translated
+        session.overlayRenderPending = true
+        #expect(!session.canExport)
+        #expect(session.imageForExport() == nil)
+
+        session.overlayRenderPending = false
+        #expect(session.imageForExport()?.kind == .translated)
+    }
+
+    /// 翻完了但回贴图没画出来（界面退回文字卡片）：给原截图，并标出来，让调用方跟用户说一声。
+    @Test func exportFallsBackToTheOriginalWhenTheOverlayCouldNotBeDrawn() {
+        let export = Export()
+        let session = export.translatedSession()
+        session.applyOverlayRender(nil)
+        #expect(session.imageForExport()?.image === export.original)
+        #expect(session.imageForExport()?.kind == .originalBecauseOverlayFailed)
+    }
+
+    /// 段落本来就都是目标语言，没有要画的：选区里是原截图，照常给原截图，不提示「没画出来」。
+    @Test func exportTakesTheOriginalWhenNothingNeededTranslating() {
+        let export = Export()
+        let session = export.session
+        session.capturedImage = export.original
+        session.stage = .translated
+        #expect(session.imageForExport()?.image === export.original)
+        #expect(session.imageForExport()?.kind == .original)
+    }
 }
 
 @MainActor

@@ -60,6 +60,8 @@ final class ScreenshotOCRSession: ObservableObject {
     @Published var translatedImage: NSImage? = nil
     /// 回贴图画不出来（极少见），界面退回用卡片列出译文。
     @Published var overlayUnavailable: Bool = false
+    /// 回贴图还在后台画（刚补上一批译文、或者刚翻完）。画完之前 translatedImage 是上一批的，或者还是 nil。
+    @Published var overlayRenderPending: Bool = false
 
     @Published var frozenBackgrounds: [FrozenBackground] = []
 
@@ -114,6 +116,38 @@ final class ScreenshotOCRSession: ObservableObject {
     func applyOverlayRender(_ image: NSImage?) {
         translatedImage = image
         overlayUnavailable = image == nil
+    }
+
+    /// 「钉到屏幕」「完成」拿走的那张图。
+    struct ExportImage {
+        enum Kind: Equatable {
+            /// 没翻译（或者翻译失败、换了源语言、没有要翻的字）：选区里是原截图。
+            case original
+            /// 翻完了：贴了译文的图。
+            case translated
+            /// 翻完了，但回贴图没画出来（界面退回文字卡片），只能给原截图，要跟用户说一声。
+            case originalBecauseOverlayFailed
+        }
+
+        let image: NSImage
+        let kind: Kind
+    }
+
+    /// 识别、翻译进行中，或者回贴图还在画的时候，不能「钉到屏幕」「完成」：
+    /// 钉上去的图不会再更新，这时候拿走的是翻了一半、或者上一批的图。
+    var canExport: Bool {
+        stage != .ocrRunning && stage != .translating && !overlayRenderPending
+    }
+
+    /// 选区里显示的是哪张就给哪张：翻完了给贴了译文的图，否则给原截图。
+    /// 现在不能拿（见 `canExport`）、或者还没截到图时为 nil。
+    func imageForExport() -> ExportImage? {
+        guard canExport, let capturedImage else { return nil }
+        guard stage == .translated else { return ExportImage(image: capturedImage, kind: .original) }
+        if let translatedImage {
+            return ExportImage(image: translatedImage, kind: .translated)
+        }
+        return ExportImage(image: capturedImage, kind: overlayUnavailable ? .originalBecauseOverlayFailed : .original)
     }
 
     func showHUD(_ message: String, style: HUDToast.Style = .info, duration: TimeInterval = 1.8) {

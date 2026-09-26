@@ -299,6 +299,9 @@ struct ScreenshotSelectionWorkspaceView: View {
                         .foregroundStyle(Color.accentColor)
                 }
                 .buttonStyle(.plain)
+                // plain 样式加了前景色，禁用时不会自己变淡。
+                .disabled(!session.canExport)
+                .opacity(session.canExport ? 1 : 0.4)
                 .help("钉到屏幕")
 
                 Button {
@@ -364,6 +367,7 @@ struct ScreenshotSelectionWorkspaceView: View {
                     Label("完成", systemImage: "checkmark.circle.fill")
                         .font(.system(size: 13, weight: .semibold))
                 }
+                .disabled(!session.canExport)
 
 
                 Spacer(minLength: 0)
