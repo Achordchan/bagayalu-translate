@@ -807,6 +807,9 @@ struct PixelBuffer {
         func isAnotherLine(from row: Int, step: Int) -> Bool {
             (0..<lineRun).allSatisfy { rowHasInk(searchTop + row + $0 * step) }
         }
+        // 空白超过 0.2 个字宽就停——还在识别出的这一行的框里就接着找：「二」「三」的几横之间隔得远，但都是这一个字的。
+        // 框伸进了相邻的行也不怕，那一行连成一大片的字身照样被上面「另一行字」的检查挡住。
+        let boxTop = Int(rect.minY) - searchTop, boxBottom = Int(rect.maxY.rounded(.up)) - 1 - searchTop
         var top = start, bottom = start, gap = 0
         var row = start - 1
         while row >= 0, !solidRows[row] {
@@ -816,7 +819,7 @@ struct PixelBuffer {
                 gap = 0
             } else {
                 gap += 1
-                if gap > maxGap { break }
+                if gap > maxGap, row < boxTop { break }
             }
             row -= 1
         }
@@ -829,7 +832,7 @@ struct PixelBuffer {
                 gap = 0
             } else {
                 gap += 1
-                if gap > maxGap { break }
+                if gap > maxGap, row > boxBottom { break }
             }
             row += 1
         }
