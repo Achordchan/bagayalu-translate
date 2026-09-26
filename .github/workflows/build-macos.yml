@@ -39,10 +39,13 @@ jobs:
       BUILD_PRODUCTS_PATH: build-products
       RELEASE_VERSION: ${{ inputs.version }}
       BUNDLE_IDENTIFIER: achord.dazuofanyiguan
-      # 自签名代码签名证书（scripts/create_signing_certificate.sh 生成，私钥只在 Secrets 里）。
-      # 用户的辅助功能、屏幕录制授权绑在这张证书的 SHA-1 上：换证书 = 所有用户重新授权一次。
-      SIGNING_IDENTITY_NAME: Bagayalu Translate Self-Signed
-      SIGNING_IDENTITY_SHA1: 65333a6e8f985b5fa58e827d430c2cc811fe6a73
+      # 发布包用作者免费 Apple ID 自带的 Apple Development 证书签名（私钥只在 Secrets 里）。
+      # 以前的自签名证书能保住辅助功能授权，但钥匙串对非 Apple 签发的证书一律按 cdhash 认 App，
+      # 每次更新读 API Key 都要弹框输登录密码；Apple Development 证书下钥匙串按团队 ID 认，跨版本不变。
+      # 用户的授权绑在下面这条身份要求上：它只认「Apple 签发 + 证书名」，证书一年一续、名字不变，续签不影响用户。
+      # 换团队或换证书名 = 所有用户重新授权一次，所以写死在这里，对不上就构建失败。
+      EXPECTED_TEAM_ID: S336CKXSUQ
+      EXPECTED_DESIGNATED_REQUIREMENT: 'identifier "achord.dazuofanyiguan" and anchor apple generic and certificate leaf[subject.CN] = "Apple Development: Chenchiyu chen (74524Q654V)" and certificate 1[field.1.2.840.113635.100.6.2.1] /* exists */'
 
     steps:
       - name: Checkout
@@ -140,16 +143,16 @@ jobs:
               build
           done
 
-      - name: Sign release app bundles with the self-signed certificate
+      - name: Sign release app bundles with the Apple Development certificate
         env:
-          SIGNING_CERT_P12_BASE64: ${{ secrets.MACOS_SIGNING_CERT_P12_BASE64 }}
-          SIGNING_CERT_PASSWORD: ${{ secrets.MACOS_SIGNING_CERT_PASSWORD }}
+          SIGNING_CERT_P12_BASE64: ${{ secrets.MACOS_DEV_CERT_P12_BASE64 }}
+          SIGNING_CERT_PASSWORD: ${{ secrets.MACOS_DEV_CERT_PASSWORD }}
         run: |
           set -euo pipefail
 
           if [ -z "${SIGNING_CERT_P12_BASE64:-}" ] || [ -z "${SIGNING_CERT_PASSWORD:-}" ]; then
-            echo "缺少签名证书 Secret：MACOS_SIGNING_CERT_P12_BASE64 / MACOS_SIGNING_CERT_PASSWORD。" >&2
-            echo "不能退回 ad-hoc 签名：那会让所有用户已给的辅助功能、屏幕录制授权失效。" >&2
+            echo "缺少签名证书 Secret：MACOS_DEV_CERT_P12_BASE64 / MACOS_DEV_CERT_PASSWORD（配置方法见 README「发布与更新签名」）。" >&2
+            echo "不能退回 ad-hoc 或自签名：那会让所有用户已给的辅助功能、屏幕录制授权失效。" >&2
             echo "从 fork 发起的 PR 拿不到仓库 Secret，会停在这里，属预期。" >&2
             exit 1
           fi
@@ -178,17 +181,56 @@ jobs:
           security set-keychain-settings "$KEYCHAIN"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           security import "$P12" -k "$KEYCHAIN" -P "$SIGNING_CERT_PASSWORD" -T /usr/bin/codesign >/dev/null
+          # 导出的 p12 只带叶子证书；中间证书自己带上，不赌 runner 镜像里有没有。
+          # 导入前核对 SHA-256（Apple PKI 页面公布的 WWDR G3 指纹），文件缺了或被换了都在这里说清楚。
+          WWDR_CERT="scripts/certs/AppleWWDRCAG3.cer"
+          WWDR_SHA256="dcf21878c77f4198e4b4614f03d696d89c66c66008d4244e1b99161aac91601f"
+          if [ ! -f "$WWDR_CERT" ]; then
+            echo "找不到中间证书 $WWDR_CERT。" >&2
+            exit 1
+          fi
+          ACTUAL_WWDR_SHA256="$(shasum -a 256 "$WWDR_CERT" | awk '{ print $1 }')"
+          if [ "$ACTUAL_WWDR_SHA256" != "$WWDR_SHA256" ]; then
+            echo "中间证书 $WWDR_CERT 的 SHA-256 是 ${ACTUAL_WWDR_SHA256}，要的是 ${WWDR_SHA256}。" >&2
+            exit 1
+          fi
+          security import "$WWDR_CERT" -k "$KEYCHAIN" >/dev/null
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
           # codesign 只在钥匙串搜索列表里找签名身份，--keychain 指定文件也找不到。
           security list-keychains -d user -s "$KEYCHAIN" ${ORIGINAL_KEYCHAINS[@]+"${ORIGINAL_KEYCHAINS[@]}"}
 
+          # 按 SHA-1 取临时钥匙串里的那张：runner 的其他钥匙串里就算有同名证书，也不会被选中。
+          # 证书一年一续，SHA-1 每次都变，所以不写死；身份对不对由下一步的身份要求校验把关。
+          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" | awk '/"Apple Development:/ { print $2; exit }')"
+          if [ -z "$IDENTITY" ]; then
+            echo "导入的证书里没有有效的 Apple Development 签名身份（过期了？导出时没带私钥？）。" >&2
+            security find-identity -p codesigning "$KEYCHAIN" >&2 || true
+            exit 1
+          fi
+
+          # 到期提醒：证书一年一续，过期后就签不出包了。
+          CERT_PEM="$(security find-certificate -a -Z -p "$KEYCHAIN" | awk -v id="$IDENTITY" '
+            /^SHA-1 hash:/ { keep = ($3 == id) }
+            keep && /BEGIN CERTIFICATE/ { on = 1 }
+            keep && on { print }
+            keep && on && /END CERTIFICATE/ { exit }')"
+          if [ -z "$CERT_PEM" ]; then
+            echo "::warning::读不出签名证书的到期日"
+          else
+            NOT_AFTER="$(openssl x509 -noout -enddate <<< "$CERT_PEM" | sed 's/^notAfter=//')"
+            echo "签名身份 ${IDENTITY}，证书到期：${NOT_AFTER}"
+            if ! openssl x509 -noout -checkend 2592000 <<< "$CERT_PEM" >/dev/null; then
+              echo "::warning::签名证书 30 天内到期（${NOT_AFTER}）：在 Xcode → 设置 → 账户里续一张，重新导出 p12 更新 MACOS_DEV_CERT_P12_BASE64 / MACOS_DEV_CERT_PASSWORD"
+            fi
+          fi
+
           for ARCH in arm64 x86_64; do
             APP_PATH="$BUILD_PRODUCTS_PATH/$ARCH/$APP_NAME.app"
-            # 按 SHA-1 指定身份：就算钥匙串里混进同名证书，也只会用这一张。
+            # --deep 连 Sparkle 的框架、Autoupdate、Updater.app、XPC 一起重签，整包同一个团队。
             codesign \
               --force \
               --deep \
-              --sign "$SIGNING_IDENTITY_SHA1" \
+              --sign "$IDENTITY" \
               --timestamp=none \
               "$APP_PATH"
           done
@@ -217,21 +259,26 @@ jobs:
               echo "$ARCH 仍是 ad-hoc 签名。发布包必须用固定证书签名，否则用户每次更新都要重新授权。" >&2
               exit 1
             fi
+            # 这次只换签名身份，不顺手开 hardened runtime：它会改变运行时行为，要开另起一个 PR 单独验证。
             if grep -q 'flags=.*runtime' <<< "$SIGNATURE_INFO"; then
-              echo "$ARCH 不应启用 hardened runtime：自签名证书没有 Team ID，库验证会拒绝加载 Sparkle 动态库。" >&2
+              echo "$ARCH 不应启用 hardened runtime。" >&2
               exit 1
             fi
-            grep -q "Authority=$SIGNING_IDENTITY_NAME" <<< "$SIGNATURE_INFO"
+            grep -q 'Authority=Apple Development: ' <<< "$SIGNATURE_INFO"
             grep -q 'Info.plist entries=' <<< "$SIGNATURE_INFO"
             grep -q 'Sealed Resources version=2' <<< "$SIGNATURE_INFO"
-            grep -q 'TeamIdentifier=not set' <<< "$SIGNATURE_INFO"
+            # 钥匙串按团队 ID 认 App：团队一变，所有用户更新完又要输一次登录钥匙串密码。
+            ACTUAL_TEAM="$(sed -n 's/^TeamIdentifier=//p' <<< "$SIGNATURE_INFO")"
+            if [ "$ACTUAL_TEAM" != "$EXPECTED_TEAM_ID" ]; then
+              echo "$ARCH TeamIdentifier 是「${ACTUAL_TEAM:-读不出}」，要的是 $EXPECTED_TEAM_ID。" >&2
+              exit 1
+            fi
 
             # 用户的授权绑在这条身份要求上。它一变，所有人都要重新授权——宁可构建失败，也不能悄悄发出去。
-            EXPECTED_REQUIREMENT="identifier \"$BUNDLE_IDENTIFIER\" and certificate leaf = H\"$SIGNING_IDENTITY_SHA1\""
             ACTUAL_REQUIREMENT="$(codesign -d -r- "$APP_PATH" 2>&1 | sed -n 's/^.*designated => //p')"
-            if [ "$ACTUAL_REQUIREMENT" != "$EXPECTED_REQUIREMENT" ]; then
+            if [ "$ACTUAL_REQUIREMENT" != "$EXPECTED_DESIGNATED_REQUIREMENT" ]; then
               echo "$ARCH 签名身份要求与固定值不一致。" >&2
-              echo "  预期：$EXPECTED_REQUIREMENT" >&2
+              echo "  预期：$EXPECTED_DESIGNATED_REQUIREMENT" >&2
               echo "  实际：$ACTUAL_REQUIREMENT" >&2
               exit 1
             fi
@@ -260,6 +307,20 @@ jobs:
               "$APP_PATH/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc" \
               "$APP_PATH/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc"; do
               codesign --verify --strict --verbose=4 "$COMPONENT"
+            done
+
+            # 嵌套代码要和主程序同一个团队：--deep 漏签一个，更新时那一环就会被系统拒绝。
+            for COMPONENT in \
+              "$APP_PATH/Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle" \
+              "$APP_PATH/Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app" \
+              "$APP_PATH/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate" \
+              "$APP_PATH/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc" \
+              "$APP_PATH/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc"; do
+              COMPONENT_TEAM="$(codesign -dv "$COMPONENT" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+              if [ "$COMPONENT_TEAM" != "$EXPECTED_TEAM_ID" ]; then
+                echo "$ARCH $COMPONENT 的 TeamIdentifier 是「${COMPONENT_TEAM:-读不出}」，要的是 $EXPECTED_TEAM_ID。" >&2
+                exit 1
+              fi
             done
           done
 
@@ -364,7 +425,7 @@ jobs:
           Path(output_path).write_text(
               f"## 大佐翻译官 v{version}\n\n{body}\n\n"
               "- 分别提供 Apple Silicon（arm64）和 Intel（x86_64）安装包。\n"
-              "- 主程序使用固定的自签名证书签名（非 Apple Developer ID），未经过 Apple 公证；更新包继续通过 Sparkle EdDSA 签名验证。\n",
+              "- 主程序使用作者的 Apple Development 证书签名（非 Developer ID），未经过 Apple 公证；更新包继续通过 Sparkle EdDSA 签名验证。\n",
               encoding="utf-8",
           )
           PY

@@ -43,7 +43,7 @@
   - 每天自动检查 GitHub Release
   - 也可在“关于应用”或应用菜单中手动检查
   - 下载完成后直接替换当前版本，并自动重启应用
-  - 更新 ZIP 使用 Sparkle EdDSA 签名校验；主程序使用固定的自签名证书签名（非 Developer ID），未经过 Apple 公证
+  - 更新 ZIP 使用 Sparkle EdDSA 签名校验；主程序使用作者免费 Apple ID 自带的 Apple Development 证书签名（非 Developer ID），未经过 Apple 公证
   - 该能力从 1.2.0 开始提供，旧版本需要手动安装一次 1.2.0
 
 ---
@@ -84,9 +84,26 @@
 
 ### 发布与更新签名
 
-当前 GitHub Release 不使用 Developer ID 分发签名，也不进行 Apple 公证。arm64 和 x86_64 发布包都用一张固定的自签名代码签名证书做完整 bundle 签名（不含 sandbox 权限），使 Sparkle 可以检查完整包结构。工作流会通过 `SPARKLE_PRIVATE_KEY` 对更新 ZIP 生成 EdDSA 签名；客户端使用内置 `SUPublicEDKey` 验证下载内容。
+当前 GitHub Release 不使用 Developer ID 分发签名，也不进行 Apple 公证。arm64 和 x86_64 发布包都用作者免费 Apple ID 自带的 Apple Development 证书做完整 bundle 签名（`--deep`，连 Sparkle 的嵌套组件一起，不含 sandbox 权限），使 Sparkle 可以检查完整包结构。工作流会通过 `SPARKLE_PRIVATE_KEY` 对更新 ZIP 生成 EdDSA 签名；客户端使用内置 `SUPublicEDKey` 验证下载内容。
 
-证书固定不变，是为了让 macOS 的辅助功能、屏幕录制授权跨版本保留：授权绑定的身份要求是 `identifier "achord.dazuofanyiguan" and certificate leaf = H"<证书 SHA-1>"`，而 ad-hoc 签名绑定的是每次都会变的 cdhash。证书由 `scripts/create_signing_certificate.sh` 生成，私钥只存放在 `MACOS_SIGNING_CERT_P12_BASE64` / `MACOS_SIGNING_CERT_PASSWORD` 两个 Secret 和维护者的离线备份里；工作流把证书 SHA-1 写死在签名校验中，证书一旦变化会直接构建失败。**不要更换这张证书**，换证书意味着所有用户都要重新授权一次。
+签名身份必须跨版本不变，否则每次更新都有东西要用户重来：
+
+- **辅助功能、屏幕录制授权**绑在身份要求上：`identifier "achord.dazuofanyiguan" and anchor apple generic and certificate leaf[subject.CN] = "Apple Development: …" and …`。ad-hoc 签名绑的是每次构建都会变的 cdhash。
+- **钥匙串里的 API Key**：钥匙串按分区认 App，只有 Apple 签发的证书链才按团队 ID（`teamid:S336CKXSUQ`）认；ad-hoc 和自签名证书一律退回 cdhash，于是每次更新读 API Key 都要弹框输登录密码。1.3.1 ~ 1.4.0 用的自签名证书保住了授权，但挡不住这个框，所以换成了 Apple Development 证书。
+
+工作流把团队 ID 和完整的身份要求写死在校验里，对不上就构建失败，不会悄悄发出去。
+
+**配置方法**：在仓库 Settings → Secrets and variables → Actions 里加两个：
+
+1. 钥匙串访问 →「登录」→「我的证书」，右键「Apple Development: …」→ 导出为 `.p12` 并设一个导出密码
+2. 存进 Secrets，然后删掉本地的 `.p12`：
+
+```bash
+base64 -i ~/Desktop/dev.p12 | gh secret set MACOS_DEV_CERT_P12_BASE64
+gh secret set MACOS_DEV_CERT_PASSWORD   # 交互式输入导出密码，不进 shell 历史
+```
+
+**没配就不出包**：退回 ad-hoc 或自签名，等于让所有用户再授权一次。证书一年一续（Xcode → 设置 → 账户里续），续完重新导出、更新这两个 Secret 即可；证书名和团队不变，身份要求也就不变，已装的 App 不受影响。CI 会在到期前 30 天提醒。
 
 主程序不再启用 App Sandbox 的 InstallerLauncher XPC，避免无 Developer ID 时辅助进程连接不稳定。首次从旧沙盒版本迁移时会复制已有设置，但 macOS 辅助功能、屏幕录制等权限仍可能需要重新确认。
 
