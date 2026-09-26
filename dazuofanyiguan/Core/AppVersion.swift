@@ -6,5 +6,5 @@ import Foundation
 /// 版本号在进程生命周期内不会变，这里缓存一次。
 enum AppVersion {
     static let current: String = Bundle.main
-        .object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.4.0"
+        .object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.4.1"
 }
