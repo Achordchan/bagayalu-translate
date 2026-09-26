@@ -6,11 +6,20 @@ struct InputAssistAppIdentity: Equatable {
     let bundleIdentifier: String?
     let localizedName: String?
     let executableName: String?
+    /// 进程号。不参与名单匹配，只用来在替换前确认前台还是通过检查的这个进程
+    /// （见 `InputAssistReplacementSafetyGuard.isSameProcess`）。
+    let processIdentifier: pid_t?
 
-    init(bundleIdentifier: String?, localizedName: String?, executableName: String?) {
+    init(
+        bundleIdentifier: String?,
+        localizedName: String?,
+        executableName: String?,
+        processIdentifier: pid_t? = nil
+    ) {
         self.bundleIdentifier = bundleIdentifier
         self.localizedName = localizedName
         self.executableName = executableName
+        self.processIdentifier = processIdentifier
     }
 
     init(application: NSRunningApplication) {
@@ -19,7 +28,9 @@ struct InputAssistAppIdentity: Equatable {
             localizedName: application.localizedName,
             executableName: application.bundleURL?
                 .deletingPathExtension()
-                .lastPathComponent
+                .lastPathComponent,
+            // 没有进程的应用这里是 -1。
+            processIdentifier: application.processIdentifier > 0 ? application.processIdentifier : nil
         )
     }
 

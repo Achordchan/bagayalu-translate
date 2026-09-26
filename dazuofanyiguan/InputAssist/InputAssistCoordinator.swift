@@ -349,7 +349,7 @@ final class InputAssistCoordinator: ObservableObject {
         selectionMonitor.registerSelection(capture)
 
         let session = CandidateSession(
-            appBundleIdentifier: identity?.bundleIdentifier,
+            app: identity,
             capture: capture,
             detectedSourceLanguageCode: detectedSourceLanguage
         )

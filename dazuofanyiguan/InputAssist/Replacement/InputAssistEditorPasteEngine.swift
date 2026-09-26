@@ -157,8 +157,7 @@ enum InputAssistEditorPasteEngine {
     }
 
     private static func targetIsUnchanged(_ session: CandidateSession) -> Bool {
-        guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier
-            == session.appBundleIdentifier else {
+        guard InputAssistTextReplaceEngine.isFrontmostApplication(session.appProcessIdentifier) else {
             return false
         }
         guard let focused = InputAssistAXTextCapture.focusedElement(),

@@ -30,6 +30,16 @@ enum InputAssistReplacementSafetyGuard {
         case clipboardBusy
     }
 
+    /// 前台还是取词时那个进程吗。
+    ///
+    /// 按进程号比，不按 bundle ID：没有 bundle ID 的应用（直接运行的可执行文件、一些 Java / Wine 应用）两边都是 nil，
+    /// 按 bundle ID 比会把「换成了另一个同样没有 bundle ID 的应用」、甚至「此刻没有前台应用」当成没变。
+    /// 任何一边拿不到进程号都当作变了。
+    static func isSameProcess(expected: pid_t?, current: pid_t?) -> Bool {
+        guard let expected, let current else { return false }
+        return expected == current
+    }
+
     /// 核心不变式：
     ///
     /// > 候选生成时读到的原文，和现在这一刻目标位置上的文字，必须**逐字相同**。

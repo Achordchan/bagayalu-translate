@@ -118,7 +118,7 @@ enum InputAssistTextReplaceEngine {
                 element: settledElement,
                 expectedSelectedRange: range,
                 expectedSelectedText: session.sourceText,
-                expectedBundleIdentifier: session.appBundleIdentifier
+                expectedProcessIdentifier: session.appProcessIdentifier
             ) {
                 return .aborted(reason: reason)
             }
@@ -163,9 +163,7 @@ enum InputAssistTextReplaceEngine {
                 currentSelectedText: selectedText,
                 hasFocusedElement: element != nil,
                 isFocusedElementUnchanged: element.map { CFEqual($0, session.element) } ?? false,
-                isFrontmostApplicationUnchanged:
-                    NSWorkspace.shared.frontmostApplication?.bundleIdentifier
-                        == session.appBundleIdentifier,
+                isFrontmostApplicationUnchanged: isFrontmostApplication(session.appProcessIdentifier),
                 isSecureEventInputEnabled: InputAssistSecureInputGuard.isSecureEventInputEnabled
             )
         )
@@ -235,17 +233,20 @@ enum InputAssistTextReplaceEngine {
         return WriteVerification.resolve(first: first, second: read())
     }
 
-    static func isFrontmostApplication(_ bundleIdentifier: String?) -> Bool {
-        NSWorkspace.shared.frontmostApplication?.bundleIdentifier == bundleIdentifier
+    static func isFrontmostApplication(_ processIdentifier: pid_t?) -> Bool {
+        InputAssistReplacementSafetyGuard.isSameProcess(
+            expected: processIdentifier,
+            current: NSWorkspace.shared.frontmostApplication?.processIdentifier
+        )
     }
 
     static func invalidTargetReason(
         element: AXUIElement,
         expectedSelectedRange: InputAssistTextRange?,
         expectedSelectedText: String?,
-        expectedBundleIdentifier: String?
+        expectedProcessIdentifier: pid_t?
     ) -> InputAssistReplacementSafetyGuard.AbortReason? {
-        guard isFrontmostApplication(expectedBundleIdentifier) else {
+        guard isFrontmostApplication(expectedProcessIdentifier) else {
             return .applicationChanged
         }
         guard let focusedNow = InputAssistAXTextCapture.focusedElement(),
