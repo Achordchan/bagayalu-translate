@@ -13,7 +13,7 @@ import Testing
 @Suite("截图翻译：回贴排版")
 struct ScreenshotTranslationLayoutTests {
     /// 假的量字：每个字 0.6 个字号宽，行高 1.2 个字号；给了宽度就按宽度折行。
-    private let measure: ScreenshotTranslationLayout.Measure = { text, fontSize, _, width, lineHeight, _ in
+    private let measure: ScreenshotTranslationLayout.Measure = { text, fontSize, _, width, lineHeight, _, _ in
         let natural = CGFloat(text.count) * 0.6 * fontSize
         let line = lineHeight ?? 1.2 * fontSize
         // 墨迹占行框中间的 70%。
@@ -202,8 +202,8 @@ struct ScreenshotTranslationLayoutTests {
         #expect(layout.laysOutEverything)
     }
 
-    /// 把排好的一段画到白底位图上（2 倍），返回有墨迹的像素行的上下范围（pt）。
-    private func inkRows(of placement: ScreenshotTranslationLayout.Placement, canvas: CGSize) -> ClosedRange<CGFloat>? {
+    /// 把排好的一段画到白底位图上（2 倍），返回有墨迹的像素行的上下范围（pt）；`firstLineOnly` 时只要从上往下第一段连着的墨迹。
+    private func inkRows(of placement: ScreenshotTranslationLayout.Placement, canvas: CGSize, firstLineOnly: Bool = false) -> ClosedRange<CGFloat>? {
         let context = CGContext(
             data: nil, width: Int(canvas.width * 2), height: Int(canvas.height * 2), bitsPerComponent: 8, bytesPerRow: 0,
             space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
@@ -226,7 +226,14 @@ struct ScreenshotTranslationLayoutTests {
         for y in 0..<pixels.height where (0..<pixels.width).contains(where: { pixels.pixel($0, y).r < 128 }) {
             rows.append(y)
         }
-        guard let first = rows.first, let last = rows.last else { return nil }
+        guard let first = rows.first, var last = rows.last else { return nil }
+        if firstLineOnly {
+            last = first
+            for row in rows.dropFirst() {
+                guard row == last + 1 else { break }
+                last = row
+            }
+        }
         return CGFloat(first) / 2...CGFloat(last + 1) / 2
     }
 
@@ -240,11 +247,40 @@ struct ScreenshotTranslationLayoutTests {
             [block(burmese, lines: lines, limits: .init(minX: 20, maxX: 320, maxY: 280, minY: 10))],
             canvas: canvas
         ).first)
-        let natural = ScreenshotTranslationLayout.systemMeasure(placement.text, placement.fontSize, placement.weight, nil, nil, []).size.height
+        let natural = ScreenshotTranslationLayout.systemMeasure(placement.text, placement.fontSize, placement.weight, nil, nil, nil, []).size.height
         #expect(natural > 1.9 * placement.fontSize, "这组数据要是后备字体高的文字，才测得出来")
         #expect((placement.lineHeight ?? 0) >= natural - 0.5, "行高 \(placement.lineHeight ?? 0) 比译文本身的 \(natural) 矮")
         let ink = try #require(inkRows(of: placement, canvas: canvas))
         #expect(ink.lowerBound >= placement.frame.minY - 1 && ink.upperBound <= placement.frame.maxY + 1, "字画到了排版范围外面：\(ink) 对 \(placement.frame)")
+    }
+
+    /// 审核第九轮（#12）：译文前面是拉丁字母、后面是后备字体的高文字（缅甸文），折行后第一行只剩「Settings」，
+    /// 行框和基线都跟整段排一行时不一样。折行那一步原来按整段排一行的墨迹定位，第一行在竖直方向上偏离了原文那一行。
+    @Test func wrappedMixedScriptTranslationAlignsItsFirstLine() throws {
+        let line = CGRect(x: 20, y: 40, width: 60, height: 14)
+        let canvas = CGSize(width: 400, height: 300)
+        let source = block("Settings မြန်မာစာ", lines: [line], limits: .init(minX: 20, maxX: 90, maxY: 160, minY: 30))
+        let placement = try #require(ScreenshotTranslationLayout.plan([source], canvas: canvas).first)
+        let firstLine = try #require(inkRows(of: placement, canvas: canvas, firstLineOnly: true))
+        let all = try #require(inkRows(of: placement, canvas: canvas))
+        #expect(all.upperBound > firstLine.upperBound + 8, "这组数据要折成两行、缅甸文排在第二行才测得出来：\(placement)")
+        let center = (firstLine.lowerBound + firstLine.upperBound) / 2
+        #expect(abs(center - line.midY) <= 1, "第一行墨迹的中心在 \(center)，原文那一行在 \(line.midY)")
+    }
+
+    /// 同上，段落：行高是按整段里最高的字（缅甸文、泰文）定的，第一行要是只排到了拉丁字母，字沉在固定高的行框底部。
+    /// 原来按整段排一行的墨迹定位，缅甸文这组第一行画低了 10pt 多。
+    @Test func paragraphWithTallScriptLaterAlignsItsFirstLine() throws {
+        let canvas = CGSize(width: 400, height: 300)
+        let lines = [CGRect(x: 20, y: 40, width: 200, height: 14), CGRect(x: 20, y: 62, width: 150, height: 14)]
+        for text in ["Settings General Privacy Security မြန်မာစာ မြန်မာစာ မြန်မာစာ", "Settings General Privacy Security ภาษาไทย ภาษาไทย"] {
+            let placement = try #require(ScreenshotTranslationLayout.plan(
+                [block(text, lines: lines, limits: .init(minX: 20, maxX: 220, maxY: 200, minY: 38))], canvas: canvas
+            ).first)
+            let firstLine = try #require(inkRows(of: placement, canvas: canvas, firstLineOnly: true))
+            let center = (firstLine.lowerBound + firstLine.upperBound) / 2
+            #expect(abs(center - lines[0].midY) <= 1, "\(text.suffix(6))：第一行墨迹的中心在 \(center)，原文第一行在 \(lines[0].midY)")
+        }
     }
 
     /// 审核第四轮（#12）：单行也要查竖着放不放得下。上下都紧（按钮里）就缩小；只有下面有地方就往下挪、不缩。
@@ -312,15 +348,15 @@ struct ScreenshotTranslationLayoutTests {
         let roomy = block("安装应用程序", lines: [CGRect(x: 20, y: 20, width: 20, height: 17)], size: 24, limits: .init(minX: 20, maxX: 40, maxY: 42, minY: 18))
         let truncated = try #require(ScreenshotTranslationLayout.plan([roomy], canvas: CGSize(width: 400, height: 300)).first)
         #expect(truncated.maximumLines == 1)
-        let shown = ScreenshotTranslationLayout.systemMeasure("安…", truncated.fontSize, truncated.weight, nil, nil, []).size.width
+        let shown = ScreenshotTranslationLayout.systemMeasure("安…", truncated.fontSize, truncated.weight, nil, nil, nil, []).size.width
         #expect(shown <= truncated.frame.width.rounded(.up), "\(truncated.fontSize)pt 的「安…」宽 \(shown)，框只有 \(truncated.frame.width)")
     }
 
     /// 同上，段落：绕着障碍排不全时不能当成放得下；缩到最小还排不全，就不绕了——宁可压到障碍，也不能让译文少一截。
     @Test func paragraphThatCannotBeLaidOutAroundObstaclesStopsAvoidingThem() throws {
         // 一有要绕开的地方就排不全（TextKit 半路停下，量出来只有一行）。
-        let stubborn: ScreenshotTranslationLayout.Measure = { text, fontSize, weight, width, lineHeight, exclusions in
-            var result = measure(text, fontSize, weight, width, lineHeight, [])
+        let stubborn: ScreenshotTranslationLayout.Measure = { text, fontSize, weight, width, lineHeight, baselineOffset, exclusions in
+            var result = measure(text, fontSize, weight, width, lineHeight, baselineOffset, [])
             if !exclusions.isEmpty {
                 result.size.height = lineHeight ?? 1.2 * fontSize
                 result.complete = false

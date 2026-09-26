@@ -96,7 +96,8 @@ enum ScreenshotTranslationLayout {
         var complete = true
     }
 
-    /// 量一段文字：`width` 为 nil 时不折行；`exclusions` 是要绕开的地方，相对文字左上角。
+    /// 量一段文字：`width` 为 nil 时不折行；`lineHeight`、`baselineOffset` 同 `attributedString`（固定行高、
+    /// 字在行里往上挪多少，要和画的时候一样，量出来的第一行墨迹才对得上）；`exclusions` 是要绕开的地方，相对文字左上角。
     /// 量出来的宽度是字本身的宽度：给的宽度连一个字都放不下时，字会伸出去，宽度就比 `width` 大。
     typealias Measure = (
         _ text: String,
@@ -104,6 +105,7 @@ enum ScreenshotTranslationLayout {
         _ weight: NSFont.Weight,
         _ width: CGFloat?,
         _ lineHeight: CGFloat?,
+        _ baselineOffset: CGFloat?,
         _ exclusions: [CGRect]
     ) -> Measurement
 
@@ -299,7 +301,7 @@ enum ScreenshotTranslationLayout {
             // 行高、墨迹都按译文本身量：换了后备字体的文字（缅甸文、高棉文、藏文）一行比「Ag字」高得多，
             // 墨迹在行框里也不居中。`width` 为 nil 时按译文自然宽度排一行。
             func singleLine(_ fontSize: CGFloat, width: CGFloat?) -> Candidate {
-                let natural = measure(block.text, fontSize, block.weight, nil, nil, [])
+                let natural = measure(block.text, fontSize, block.weight, nil, nil, nil, [])
                 let width = width ?? natural.size.width + 1
                 let x: CGFloat
                 switch block.alignment {
@@ -314,7 +316,7 @@ enum ScreenshotTranslationLayout {
                 )
             }
             func fitsOnOneLine(_ fontSize: CGFloat) -> Bool {
-                measure(block.text, fontSize, block.weight, nil, nil, []).size.width <= maxWidth
+                measure(block.text, fontSize, block.weight, nil, nil, nil, []).size.width <= maxWidth
             }
 
             // 1. 一行放下（横竖都放得下），最多缩到 82%。
@@ -323,19 +325,27 @@ enum ScreenshotTranslationLayout {
                     return placement(frame, fontSize, lineHeight: nil, alignment: block.alignment)
                 }
             }
-            // 2. 折行往下占空白（绕开下面零星的东西），最多缩到 70%。第一行的墨迹越过上边界就整块往下挪。
+            // 2. 折行往下占空白（绕开下面零星的东西），最多缩到 70%。第一行按折行后真正排在第一行的字对齐原文那一行：
+            //    译文前面是拉丁字母、后面是后备字体的高文字时，折行后第一行只剩矮的拉丁字母，行框和基线都跟整段排一行不一样。
+            //    先按整段一行估个位置，量完折行再按第一行的墨迹对齐；位置变了，要绕开的东西跟着挪、再量一次。
+            //    第一行的墨迹越过上边界就整块往下挪。
             for fontSize in sizes(from: size, downTo: wrapFloor) {
                 let first = singleLine(fontSize, width: maxWidth)
-                let frame0 = first.ink.lowerBound < limits.minY
-                    ? first.frame.offsetBy(dx: 0, dy: limits.minY - first.ink.lowerBound)
-                    : first.frame
-                let local = block.obstacles.map { $0.offsetBy(dx: -frame0.minX, dy: -frame0.minY) }
-                let wrapped = measure(block.text, fontSize, block.weight, maxWidth, nil, local)
+                var top = max(first.frame.minY, first.frame.minY + limits.minY - first.ink.lowerBound)
+                var local = block.obstacles.map { $0.offsetBy(dx: -first.frame.minX, dy: -top) }
+                var wrapped = measure(block.text, fontSize, block.weight, maxWidth, nil, nil, local)
+                for _ in 0..<2 {
+                    let aligned = max(line.midY - (wrapped.inkTop + wrapped.inkBottom) / 2, limits.minY - wrapped.inkTop)
+                    guard abs(aligned - top) >= 0.25 else { break }
+                    top = aligned
+                    local = block.obstacles.map { $0.offsetBy(dx: -first.frame.minX, dy: -top) }
+                    wrapped = measure(block.text, fontSize, block.weight, maxWidth, nil, nil, local)
+                }
                 let height = wrapped.size.height
                 // 要排全、横着不伸出去（连一个字都放不下时 TextKit 照样每行排一个字，伸到旁边的分隔线、图标上）、竖着放得下。
                 // 量出来的宽度是向上取整的，跟可用宽度比也先取整。
-                if wrapped.complete, wrapped.size.width <= maxWidth.rounded(.up), frame0.minY + height <= limits.maxY {
-                    let frame = CGRect(x: frame0.minX, y: frame0.minY, width: maxWidth, height: height)
+                if wrapped.complete, wrapped.size.width <= maxWidth.rounded(.up), top + height <= limits.maxY {
+                    let frame = CGRect(x: first.frame.minX, y: top, width: maxWidth, height: height)
                     return placement(frame, fontSize, lineHeight: nil, alignment: block.alignment, exclusions: local)
                 }
             }
@@ -350,7 +360,7 @@ enum ScreenshotTranslationLayout {
             //    8pt 还放不下的，画的时候按排好的框裁掉（见渲染器），不画到别人那里去。
             func truncatedFits(_ fontSize: CGFloat) -> Bool {
                 guard let first = block.text.first else { return true }
-                return measure(String(first) + "…", fontSize, block.weight, nil, nil, []).size.width <= maxWidth.rounded(.up)
+                return measure(String(first) + "…", fontSize, block.weight, nil, nil, nil, []).size.width <= maxWidth.rounded(.up)
             }
             for fontSize in sizes(from: wrapFloor, downTo: min(size, 8)) {
                 let oneLine = fitsOnOneLine(fontSize)
@@ -368,28 +378,40 @@ enum ScreenshotTranslationLayout {
         let pitch = block.pitch ?? size * 1.4
         /// 一种字号下的排法：行高跟原文的行距，但不小于译文本身（TextKit 实测）的自然行高——缅甸文、高棉文这类
         /// 后备字体高的文字，按原文行距排会压到上下行。字挪到行中间的量也按译文本身算。
-        /// 第一行的字身越过上边界时整段往下挪。`avoiding` 为 false 时不绕开障碍（绕着排不全时的最后一招）。
+        /// 第一行按实际排出来的字对准原文第一行，字身越过上边界时整段往下挪。`avoiding` 为 false 时不绕开障碍（绕着排不全时的最后一招）。
         func layout(
             _ fontSize: CGFloat,
             avoiding: Bool = true
         ) -> (frame: CGRect, lineHeight: CGFloat, offset: CGFloat, exclusions: [CGRect], complete: Bool, width: CGFloat) {
-            let single = measure(block.text, fontSize, block.weight, nil, nil, [])
+            let single = measure(block.text, fontSize, block.weight, nil, nil, nil, [])
             let natural = single.size.height
             let lineHeight = max(natural, min(max(pitch * fontSize / size, 1.12 * fontSize), 1.9 * fontSize))
             let offset = max(0, (lineHeight - natural) / 2)
-            // 第一行的墨迹中心对准原文第一行的墨迹中心；墨迹越过上边界就整段往下挪。
-            var top = block.lines[0].midY - offset - (single.inkTop + single.inkBottom) / 2
-            let firstInkTop = top + offset + single.inkTop
-            if firstInkTop < limits.minY {
-                top += limits.minY - firstInkTop
-            }
             // TextKit 按整个行框（连上下的行距）判断碰没碰到绕开的地方，字身只占中间一截。先把绕开的地方
             // 上下各收进行距多出来的那一半，等于拿字身去比：擦着行距的障碍不会把一整行劈成两截，
             // 整个落在两行之间空当里的就不用绕。
-            let local = avoiding ? block.obstacles
-                .map { $0.insetBy(dx: 0, dy: offset).offsetBy(dx: -bounds.minX, dy: -top) }
-                .filter { !$0.isNull && $0.height > 0 } : []
-            let measured = measure(block.text, fontSize, block.weight, width, lineHeight, local)
+            func obstacles(at top: CGFloat) -> [CGRect] {
+                guard avoiding else { return [] }
+                return block.obstacles
+                    .map { $0.insetBy(dx: 0, dy: offset).offsetBy(dx: -bounds.minX, dy: -top) }
+                    .filter { !$0.isNull && $0.height > 0 }
+            }
+            // 第一行的墨迹中心对准原文第一行的墨迹中心；墨迹越过上边界就整段往下挪。先按整段排一行估个位置，
+            // 量完再按第一行实际排出来的字对齐：行高是按整段里最高的字定的，第一行要是没排到后备字体的高文字，
+            // 字沉在行框底部（多出来的空间堆在上面），跟整段排一行时差得远。位置变了，要绕开的东西跟着挪、再量一次。
+            var top = max(
+                block.lines[0].midY - offset - (single.inkTop + single.inkBottom) / 2,
+                limits.minY - offset - single.inkTop
+            )
+            var local = obstacles(at: top)
+            var measured = measure(block.text, fontSize, block.weight, width, lineHeight, offset, local)
+            for _ in 0..<2 {
+                let aligned = max(block.lines[0].midY - (measured.inkTop + measured.inkBottom) / 2, limits.minY - measured.inkTop)
+                guard abs(aligned - top) >= 0.25 else { break }
+                top = aligned
+                local = obstacles(at: top)
+                measured = measure(block.text, fontSize, block.weight, width, lineHeight, offset, local)
+            }
             return (
                 CGRect(x: bounds.minX, y: top, width: width, height: measured.size.height),
                 lineHeight, offset, local, measured.complete, measured.size.width
@@ -455,8 +477,10 @@ enum ScreenshotTranslationLayout {
 
     /// 不折行也用 TextKit 量：画的时候用的就是它。行高要算上后备字体——缅甸文、高棉文一行比系统字体高出近一倍，
     /// `NSAttributedString.size()` 却只按主字体算，拿它定行框，译文会溢出、竖直位置也偏。
-    static let systemMeasure: Measure = { text, fontSize, weight, width, lineHeight, exclusions in
-        let string = attributedString(text, fontSize: fontSize, weight: weight, color: .black, alignment: .left, lineHeight: lineHeight)
+    static let systemMeasure: Measure = { text, fontSize, weight, width, lineHeight, baselineOffset, exclusions in
+        let string = attributedString(
+            text, fontSize: fontSize, weight: weight, color: .black, alignment: .left, lineHeight: lineHeight, baselineOffset: baselineOffset
+        )
         let layout = TextLayout(string, size: CGSize(width: width ?? 100_000, height: 100_000), exclusions: exclusions)
         let used = layout.usedRect
         let ink = layout.firstLineInk ?? (0.15 * used.height, 0.85 * used.height)
@@ -497,13 +521,18 @@ enum ScreenshotTranslationLayout {
             manager.characterRange(forGlyphRange: manager.glyphRange(for: container), actualGlyphRange: nil).length == storage.length
         }
 
-        /// 第一行墨迹的上下（相对左上角）：字形轮廓用 Core Text 量（整段当一行量，取所有字里最高最低的，
-        /// 只会偏保守），基线位置取 TextKit 实际排出来的。没有字时为 nil。
+        /// 第一行墨迹的上下（相对左上角）：只量排在第一行的字（折行后后面的字可能高得多），字形轮廓用 Core Text 量
+        /// （取这一行所有字里最高最低的，只会偏保守），基线位置取 TextKit 实际排出来的。没有字时为 nil。
         var firstLineInk: (top: CGFloat, bottom: CGFloat)? {
             guard storage.length > 0, manager.numberOfGlyphs > 0 else { return nil }
-            let fragment = manager.lineFragmentRect(forGlyphAt: 0, effectiveRange: nil)
+            var glyphs = NSRange()
+            let fragment = manager.lineFragmentRect(forGlyphAt: 0, effectiveRange: &glyphs)
             let baseline = fragment.minY + manager.location(forGlyphAt: 0).y
-            let bounds = CTLineGetBoundsWithOptions(CTLineCreateWithAttributedString(storage), .useGlyphPathBounds)
+            let characters = manager.characterRange(forGlyphRange: glyphs, actualGlyphRange: nil)
+            // 基线位置里已经算上了 `baselineOffset`（字往上挪了多少），量字形轮廓时去掉它，不然算两遍。
+            let line = NSMutableAttributedString(attributedString: storage.attributedSubstring(from: characters))
+            line.removeAttribute(.baselineOffset, range: NSRange(location: 0, length: line.length))
+            let bounds = CTLineGetBoundsWithOptions(CTLineCreateWithAttributedString(line), .useGlyphPathBounds)
             guard !bounds.isNull, bounds.height > 0 else { return nil }
             return (baseline - bounds.maxY, baseline - bounds.minY)
         }
