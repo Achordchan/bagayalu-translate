@@ -110,6 +110,8 @@ struct dazuofanyiguanApp: App {
                 .environmentObject(log)
                 .preferredColorScheme(settings.appearance.colorScheme)
         }
+        .defaultSize(width: 760, height: 500)
+        .windowResizability(.contentMinSize)
 
         Window("选区翻译测试", id: "inputAssistTest") {
             InputAssistTestView(
