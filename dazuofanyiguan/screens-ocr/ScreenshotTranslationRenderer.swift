@@ -903,22 +903,31 @@ struct PixelBuffer {
     /// - 突变：这一列和两列之前比，有几个像素明显变了色——文字、图标、分隔线、色块的边，`hitEdge` 为 true；
     /// - 走远了：和起点的背景差得太多——渐变走远了、慢慢换了底色，`hitEdge` 为 false。
     /// 阈值按背景本身的噪点放大，照片、颗粒背景上的噪点不算东西；突变要有三个像素，免得噪点误判；
-    /// 走远了只要两个像素，一两个像素宽的分隔线也拦得住。扫出 `limit` 个像素或者扫到图片外
-    /// （`width` 或 -1）都没碰到，返回停下的地方，`hitEdge` 为 false。
+    /// 走远了只要两个像素，一两个像素宽的分隔线也拦得住。
+    /// - 细线：1 倍屏上一个像素粗、顺着扫的方向走的线（标题后面的横线、连接线），每一列只有一个像素变色，
+    ///   上面两条都凑不够数；同一行上一连三列都变了色就是它，停在它开头那一列，`hitEdge` 为 true。
+    /// 扫出 `limit` 个像素或者扫到图片外（`width` 或 -1）都没碰到，返回停下的地方，`hitEdge` 为 false。
     func scanColumns(from start: Int, step: Int, limit: Int, rows: ClosedRange<Int>, background: RGB, noise: Double) -> (stop: Int, hitEdge: Bool) {
         let edge = Int(pow(max(12, 4.5 * noise), 2))
         let drift = Int(pow(max(40, 5 * noise), 2))
+        var runs = [Int](repeating: 0, count: rows.count)
         var x = min(max(start, -1), width)
         let end = start + step * max(1, limit)
         while x >= 0, x < width, x != end {
             var edges = 0, drifts = 0
-            for y in rows {
+            for (index, y) in rows.enumerated() {
                 let color = pixel(x, y)
                 if color.squaredDistance(to: pixel(x - 2 * step, y)) > edge { edges += 1 }
-                if color.squaredDistance(to: background) > drift { drifts += 1 }
+                if color.squaredDistance(to: background) > drift {
+                    drifts += 1
+                    runs[index] += 1
+                } else {
+                    runs[index] = 0
+                }
             }
             if edges >= 3 { return (x, true) }
             if drifts >= 2 { return (x, false) }
+            if runs.contains(where: { $0 >= 3 }) { return (x - 2 * step, true) }
             x += step
         }
         return (x, false)
@@ -986,21 +995,28 @@ struct PixelBuffer {
         return start + max(1, limit)
     }
 
-    /// 同 `scanColumns`，一行一行地扫。
+    /// 同 `scanColumns`，一行一行地扫（细线是竖着的：同一列上一连三行都变了色）。
     func scanRows(from start: Int, step: Int, limit: Int, columns: ClosedRange<Int>, background: RGB, noise: Double) -> (stop: Int, hitEdge: Bool) {
         let edge = Int(pow(max(12, 4.5 * noise), 2))
         let drift = Int(pow(max(40, 5 * noise), 2))
+        var runs = [Int](repeating: 0, count: columns.count)
         var y = min(max(start, -1), height)
         let end = start + step * max(1, limit)
         while y >= 0, y < height, y != end {
             var edges = 0, drifts = 0
-            for x in columns {
+            for (index, x) in columns.enumerated() {
                 let color = pixel(x, y)
                 if color.squaredDistance(to: pixel(x, y - 2 * step)) > edge { edges += 1 }
-                if color.squaredDistance(to: background) > drift { drifts += 1 }
+                if color.squaredDistance(to: background) > drift {
+                    drifts += 1
+                    runs[index] += 1
+                } else {
+                    runs[index] = 0
+                }
             }
             if edges >= 3 { return (y, true) }
             if drifts >= 2 { return (y, false) }
+            if runs.contains(where: { $0 >= 3 }) { return (y - 2 * step, true) }
             y += step
         }
         return (y, false)

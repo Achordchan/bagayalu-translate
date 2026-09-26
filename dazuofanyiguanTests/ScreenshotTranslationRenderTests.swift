@@ -1194,6 +1194,65 @@ struct ScreenshotTranslationRendererTests {
         }
     }
 
+    /// 审核第十三轮（#12）：1 倍屏上一个像素粗的线，往下、往旁边扫的时候每一行（列）只有一个像素变色，
+    /// 「突变」「走远了」都凑不够数，线再长也看不见——长译文折行往下长时压到下面的竖连接线上，往右长时压到标题后面的横线上。
+    @Test func thinLinesNearTheTextAreNotPaintedOver() throws {
+        func normalized(_ rect: CGRect, in size: CGSize) -> CGRect {
+            CGRect(x: rect.minX / size.width, y: 1 - rect.maxY / size.height, width: rect.width / size.width, height: rect.height / size.height)
+        }
+        let font = NSFont.systemFont(ofSize: 14)
+        func inkBounds(_ string: String, at origin: CGPoint) -> CGRect {
+            let bounds = CTLineGetBoundsWithOptions(CTLineCreateWithAttributedString(NSAttributedString(string: string, attributes: [.font: font])), .useGlyphPathBounds)
+            return CGRect(x: origin.x + bounds.minX, y: origin.y + font.ascender - bounds.maxY, width: bounds.width, height: bounds.height)
+        }
+
+        // 下面有竖连接线：右边一条分隔线挡着、长不开，长译文只能往下折行。
+        do {
+            let size = CGSize(width: 200, height: 110)
+            let origin = CGPoint(x: 10, y: 10)
+            let ink = inkBounds("Install", at: origin)
+            let connector = CGRect(x: 30, y: ceil(ink.maxY) + 5, width: 1, height: 70)
+            let divider = CGRect(x: 90, y: 0, width: 1, height: 110)
+            let shot = scene(width: size.width, height: size.height, scale: 1) {
+                NSColor.white.setFill()
+                NSRect(origin: .zero, size: size).fill()
+                text("Install", at: origin, size: 14)
+                NSColor(white: 0.25, alpha: 1).setFill()
+                connector.fill()
+                divider.fill()
+            }
+            let block = VisionOCRService.OCRBlock(text: "Install", lines: [.init(text: "Install", boundingBox: normalized(ink.insetBy(dx: -1, dy: -2), in: size))])
+            let output = try #require(ScreenshotTranslationRenderer.render(.init(
+                image: shot.cgImage, pointSize: size, blocks: [block], translations: [block.id: "安装并重新启动所有的应用程序"]
+            )))
+            let original = try #require(PixelBuffer(image: shot.cgImage)), rendered = try #require(PixelBuffer(image: output))
+            let changed = (Int(connector.minY)..<Int(connector.maxY)).filter { rendered.pixel(30, $0) != original.pixel(30, $0) }.count
+            #expect(changed == 0, "下面的竖连接线有 \(changed) 个像素被动了")
+        }
+
+        // 右边有横线：标题后面那种，译文比原文长。
+        do {
+            let size = CGSize(width: 200, height: 60)
+            let origin = CGPoint(x: 10, y: 20)
+            let ink = inkBounds("Section", at: origin)
+            let rule = CGRect(x: ceil(ink.maxX) + 4, y: floor(ink.midY), width: 200 - ceil(ink.maxX) - 8, height: 1)
+            let shot = scene(width: size.width, height: size.height, scale: 1) {
+                NSColor.white.setFill()
+                NSRect(origin: .zero, size: size).fill()
+                text("Section", at: origin, size: 14)
+                NSColor(white: 0.25, alpha: 1).setFill()
+                rule.fill()
+            }
+            let block = VisionOCRService.OCRBlock(text: "Section", lines: [.init(text: "Section", boundingBox: normalized(ink.insetBy(dx: -1, dy: -2), in: size))])
+            let output = try #require(ScreenshotTranslationRenderer.render(.init(
+                image: shot.cgImage, pointSize: size, blocks: [block], translations: [block.id: "章节标题与说明文字"]
+            )))
+            let original = try #require(PixelBuffer(image: shot.cgImage)), rendered = try #require(PixelBuffer(image: output))
+            let changed = (Int(rule.minX)..<Int(rule.maxX)).filter { rendered.pixel($0, Int(rule.minY)) != original.pixel($0, Int(rule.minY)) }.count
+            #expect(changed == 0, "右边的横线有 \(changed) 个像素被动了")
+        }
+    }
+
     /// 审核第六轮后自查（#12）：紧贴着字的分隔线颜色深、过得了墨迹阈值时，量墨迹左右端会把它算成字——
     /// 被当成字抹掉，往外扫从它外面开始、长译文越过它伸进隔壁格子，字号也按多出来的宽度量偏。
     @Test func darkDividerNextToTheTextIsNotTreatedAsText() async throws {
