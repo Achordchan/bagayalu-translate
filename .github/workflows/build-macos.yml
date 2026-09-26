@@ -182,7 +182,19 @@ jobs:
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           security import "$P12" -k "$KEYCHAIN" -P "$SIGNING_CERT_PASSWORD" -T /usr/bin/codesign >/dev/null
           # 导出的 p12 只带叶子证书；中间证书自己带上，不赌 runner 镜像里有没有。
-          security import scripts/certs/AppleWWDRCAG3.cer -k "$KEYCHAIN" >/dev/null
+          # 导入前核对 SHA-256（Apple PKI 页面公布的 WWDR G3 指纹），文件缺了或被换了都在这里说清楚。
+          WWDR_CERT="scripts/certs/AppleWWDRCAG3.cer"
+          WWDR_SHA256="dcf21878c77f4198e4b4614f03d696d89c66c66008d4244e1b99161aac91601f"
+          if [ ! -f "$WWDR_CERT" ]; then
+            echo "找不到中间证书 $WWDR_CERT。" >&2
+            exit 1
+          fi
+          ACTUAL_WWDR_SHA256="$(shasum -a 256 "$WWDR_CERT" | awk '{ print $1 }')"
+          if [ "$ACTUAL_WWDR_SHA256" != "$WWDR_SHA256" ]; then
+            echo "中间证书 $WWDR_CERT 的 SHA-256 是 ${ACTUAL_WWDR_SHA256}，要的是 ${WWDR_SHA256}。" >&2
+            exit 1
+          fi
+          security import "$WWDR_CERT" -k "$KEYCHAIN" >/dev/null
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
           # codesign 只在钥匙串搜索列表里找签名身份，--keychain 指定文件也找不到。
           security list-keychains -d user -s "$KEYCHAIN" ${ORIGINAL_KEYCHAINS[@]+"${ORIGINAL_KEYCHAINS[@]}"}
