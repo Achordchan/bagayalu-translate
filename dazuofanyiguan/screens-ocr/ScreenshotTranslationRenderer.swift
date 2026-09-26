@@ -737,7 +737,11 @@ struct PixelBuffer {
 
         // 「整行同色」要看得比文字框宽：左右各放宽一个字宽，几乎整行都是墨迹色的才是和字同色的一整块
         // （白字按钮外面的白底，一整片）；字的笔画不会伸到字外面，「工」「王」的一横占满文字框也照样算字。
+        // 字框外面取不到半个字宽（选区紧紧框着字，放宽的部分被截图边缘截掉了）就不判：剩下的差不多全是字，一横就能占满；
+        // 取得到半个字宽，一横（最多一个字宽）最多占三分之二，到不了。
         let wideX0 = max(0, Int(rect.minX - em)), wideX1 = min(width - 1, Int(rect.maxX + em))
+        let outside = (x0 - wideX0) + (wideX1 - x1)
+        let judgesSolid = Double(outside) >= max(3, 0.5 * Double(em))
         // 笔画宽度按覆盖率算：一段笔画的宽度 = 段里各像素的覆盖率之和，加上两边各一个抗锯齿像素的覆盖率。
         // 1 倍屏上一笔竖画只有一个多像素，按「过阈值的像素个数」数，落在像素格的不同位置会数成 1 个或 2 个，
         // 宽度差出三成，常规体和半粗体就分不开；覆盖率加起来不管落在哪都一样。最后取各段的中位数：
@@ -774,7 +778,7 @@ struct PixelBuffer {
                 for x in (x1 + 1)...wideX1 where pixel(x, y).squaredDistance(to: background) >= threshold { wide += 1 }
             }
             counts.append(count)
-            solidRows.append(Double(wide) >= 0.85 * Double(wideX1 - wideX0 + 1))
+            solidRows.append(judgesSolid && Double(wide) >= 0.85 * Double(wideX1 - wideX0 + 1))
         }
         let minimum = max(1, (x1 - x0) / 250)
         // 碰到和字同色的一整块就停，不然矮按钮上的白字，墨迹带会一直伸到按钮外面，字宽、字号跟着量错。

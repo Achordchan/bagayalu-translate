@@ -865,6 +865,59 @@ struct ScreenshotTranslationRendererTests {
         #expect(!collides(placements[0], placements[1]))
     }
 
+    /// 审核第十轮（#12）：选区紧紧框着单个字时，「整行同色」往字框外放宽的那一个字宽被截图边缘截掉了，
+    /// 「工」「王」的一横占满剩下的范围，又被当成了按钮外面的底色：墨迹带停在横画前面，大半个字抹不掉。
+    @Test func tightlyCroppedSingleCharacterIsErasedCompletely() throws {
+        // 左右留半个 pt，和字正好贴着截图边缘（字框外面一列都取不到）。
+        for (character, margin) in [("工", CGFloat(0.5)), ("王", 0.5), ("工", 0), ("王", 0)] {
+            let bounds = CTLineGetBoundsWithOptions(
+                CTLineCreateWithAttributedString(NSAttributedString(string: character, attributes: [.font: NSFont.systemFont(ofSize: 24)])),
+                .useGlyphPathBounds
+            )
+            let size = CGSize(width: ceil(bounds.width) + 2 * margin, height: 40)
+            let origin = CGPoint(x: margin - bounds.minX, y: 6)
+            let shot = scene(width: size.width, height: size.height) {
+                NSColor.white.setFill()
+                NSRect(origin: .zero, size: size).fill()
+                text(character, at: origin, size: 24)
+            }
+            let original = try #require(PixelBuffer(image: shot.cgImage))
+            var rows: [Int] = [], columns: [Int] = []
+            for y in 0..<original.height {
+                for x in 0..<original.width where original.pixel(x, y).r < 160 {
+                    rows.append(y)
+                    columns.append(x)
+                }
+            }
+            let glyph = CGRect(
+                x: CGFloat(columns.min()!) / 2, y: CGFloat(rows.min()!) / 2,
+                width: CGFloat(columns.max()! - columns.min()! + 1) / 2, height: CGFloat(rows.max()! - rows.min()! + 1) / 2
+            )
+            let box = glyph.insetBy(dx: -margin, dy: -1).intersection(CGRect(origin: .zero, size: size))
+            let block = VisionOCRService.OCRBlock(text: character, lines: [.init(
+                text: character,
+                boundingBox: CGRect(x: box.minX / size.width, y: 1 - box.maxY / size.height, width: box.width / size.width, height: box.height / size.height)
+            )])
+            let style = ScreenshotTranslationRenderer.measureStyle(of: block, in: original, scale: 2)
+            #expect(style.lines[0].minY <= glyph.minY + 0.5 && style.lines[0].maxY >= glyph.maxY - 0.5, "\(character)（留白 \(margin)）的墨迹带 \(style.lines[0]) 没盖住整个字 \(glyph)")
+            #expect(style.lines[0].minX <= glyph.minX + 0.5 && style.lines[0].maxX >= glyph.maxX - 0.5, "\(character) 的墨迹左右 \(style.lines[0]) 没盖住整个字 \(glyph)")
+
+            let output = try #require(ScreenshotTranslationRenderer.render(.init(image: shot.cgImage, pointSize: size, blocks: [block], translations: [block.id: "."])))
+            let rendered = try #require(PixelBuffer(image: output))
+            let dot = try #require(ScreenshotTranslationLayout.plan([ScreenshotTranslationLayout.Block(
+                id: block.id, text: ".", lines: style.lines, fontSize: style.fontSize, weight: style.weight,
+                alignment: style.alignment, limits: style.limits, obstacles: style.obstacles, eraseRects: style.eraseRects
+            )], canvas: size).first).frame
+            var leftover = 0
+            for y in Int(glyph.minY * 2)..<Int(glyph.maxY * 2) {
+                for x in Int(glyph.minX * 2)..<Int(glyph.maxX * 2) where rendered.pixel(x, y).r < 160 && !dot.contains(CGPoint(x: CGFloat(x) / 2, y: CGFloat(y) / 2)) {
+                    leftover += 1
+                }
+            }
+            #expect(leftover == 0, "\(character)（留白 \(margin)）：原来字的地方还剩 \(leftover) 个深色像素")
+        }
+    }
+
     /// 审核第五轮（#12）：单个汉字「工」「王」的一横能占满文字框，不能当成按钮外面的底色——墨迹带要盖住整个字，
     /// 抹字才抹得干净。
     @Test func singleCharacterWithAWideStrokeIsErasedCompletely() async throws {
