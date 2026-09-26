@@ -904,9 +904,11 @@ struct PixelBuffer {
     /// - 走远了：和起点的背景差得太多——渐变走远了、慢慢换了底色，`hitEdge` 为 false。
     /// 阈值按背景本身的噪点放大，照片、颗粒背景上的噪点不算东西；突变要有三个像素，免得噪点误判；
     /// 走远了只要两个像素，一两个像素宽的分隔线也拦得住。
-    /// - 细线：顺着扫的方向走的线（标题后面的横线、连接线）。两个像素粗的（2 倍屏上 1pt），突变凑不够三个，
+    /// - 细线：顺着扫的方向走的线（标题后面的横线、连接线）。两个像素粗的深色线（2 倍屏上 1pt），突变凑不够三个，
     ///   但变了色的两个像素也都是突然变的——是东西的边，不是渐变慢慢走远，`hitEdge` 为 true；
-    ///   一个像素粗的（1 倍屏），每一列只有一个像素变色，同一行上一连三列都变了色就是它，停在它开头那一列，`hitEdge` 为 true。
+    ///   更细、更淡的（1 倍屏上一个像素，浅灰 #EEEEEE 离白底只差 29、到不了「走远了」的 40），每一列只有一两个像素、
+    ///   还够不上变色，就看同一行上是不是一连三列都是一道窄窄的脊：离底色超过突变的门槛，和上下隔两行的像素也不一样
+    ///   （渐变上下是平的，不算）。是就停在它开头那一列，`hitEdge` 为 true。
     /// 扫出 `limit` 个像素或者扫到图片外（`width` 或 -1）都没碰到，返回停下的地方，`hitEdge` 为 false。
     func scanColumns(from start: Int, step: Int, limit: Int, rows: ClosedRange<Int>, background: RGB, noise: Double) -> (stop: Int, hitEdge: Bool) {
         let edge = Int(pow(max(12, 4.5 * noise), 2))
@@ -919,15 +921,15 @@ struct PixelBuffer {
             for (index, y) in rows.enumerated() {
                 let color = pixel(x, y)
                 let changed = color.squaredDistance(to: pixel(x - 2 * step, y)) > edge
-                let differs = color.squaredDistance(to: background) > drift
+                let away = color.squaredDistance(to: background)
                 if changed { edges += 1 }
-                if differs {
+                if away > drift {
                     drifts += 1
-                    runs[index] += 1
                     if changed { sharp += 1 }
-                } else {
-                    runs[index] = 0
                 }
+                let ridge = away > edge
+                    && (color.squaredDistance(to: pixel(x, y - 2)) > edge || color.squaredDistance(to: pixel(x, y + 2)) > edge)
+                runs[index] = ridge ? runs[index] + 1 : 0
             }
             if edges >= 3 || sharp >= 2 { return (x, true) }
             if drifts >= 2 { return (x, false) }
@@ -999,7 +1001,8 @@ struct PixelBuffer {
         return start + max(1, limit)
     }
 
-    /// 同 `scanColumns`，一行一行地扫（细线是竖着的：两个像素宽的变色像素都是突然变的，一个像素宽的同一列上一连三行都变了色）。
+    /// 同 `scanColumns`，一行一行地扫（细线是竖着的：两个像素宽的深色线变色像素都是突然变的；更细、更淡的看同一列上
+    /// 是不是一连三行都是一道窄窄的脊，和左右隔两列的像素不一样）。
     func scanRows(from start: Int, step: Int, limit: Int, columns: ClosedRange<Int>, background: RGB, noise: Double) -> (stop: Int, hitEdge: Bool) {
         let edge = Int(pow(max(12, 4.5 * noise), 2))
         let drift = Int(pow(max(40, 5 * noise), 2))
@@ -1011,15 +1014,15 @@ struct PixelBuffer {
             for (index, x) in columns.enumerated() {
                 let color = pixel(x, y)
                 let changed = color.squaredDistance(to: pixel(x, y - 2 * step)) > edge
-                let differs = color.squaredDistance(to: background) > drift
+                let away = color.squaredDistance(to: background)
                 if changed { edges += 1 }
-                if differs {
+                if away > drift {
                     drifts += 1
-                    runs[index] += 1
                     if changed { sharp += 1 }
-                } else {
-                    runs[index] = 0
                 }
+                let ridge = away > edge
+                    && (color.squaredDistance(to: pixel(x - 2, y)) > edge || color.squaredDistance(to: pixel(x + 2, y)) > edge)
+                runs[index] = ridge ? runs[index] + 1 : 0
             }
             if edges >= 3 || sharp >= 2 { return (y, true) }
             if drifts >= 2 { return (y, false) }

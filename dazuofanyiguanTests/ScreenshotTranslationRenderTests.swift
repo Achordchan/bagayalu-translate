@@ -1196,6 +1196,7 @@ struct ScreenshotTranslationRendererTests {
 
     /// 审核第十三轮（#12）：1 倍屏上一个像素粗的线，往下、往旁边扫的时候每一行（列）只有一个像素变色，
     /// 「突变」「走远了」都凑不够数，线再长也看不见——长译文折行往下长时压到下面的竖连接线上，往右长时压到标题后面的横线上。
+    /// 审核第十五轮：浅灰的线（#EEEEEE，离白底只差 29，到不了「走远了」的 40）也得认得出来。
     @Test func thinLinesNearTheTextAreNotPaintedOver() throws {
         func normalized(_ rect: CGRect, in size: CGSize) -> CGRect {
             CGRect(x: rect.minX / size.width, y: 1 - rect.maxY / size.height, width: rect.width / size.width, height: rect.height / size.height)
@@ -1206,6 +1207,7 @@ struct ScreenshotTranslationRendererTests {
             return CGRect(x: origin.x + bounds.minX, y: origin.y + font.ascender - bounds.maxY, width: bounds.width, height: bounds.height)
         }
 
+        for (lineColor, label) in [(NSColor(white: 0.25, alpha: 1), "深色"), (NSColor(srgbRed: 0xEE / 255, green: 0xEE / 255, blue: 0xEE / 255, alpha: 1), "浅灰")] {
         // 下面有竖连接线：右边一条分隔线挡着、长不开，长译文只能往下折行。
         do {
             let size = CGSize(width: 200, height: 110)
@@ -1218,8 +1220,9 @@ struct ScreenshotTranslationRendererTests {
                 NSRect(origin: .zero, size: size).fill()
                 text("Install", at: origin, size: 14)
                 NSColor(white: 0.25, alpha: 1).setFill()
-                connector.fill()
                 divider.fill()
+                lineColor.setFill()
+                connector.fill()
             }
             let block = VisionOCRService.OCRBlock(text: "Install", lines: [.init(text: "Install", boundingBox: normalized(ink.insetBy(dx: -1, dy: -2), in: size))])
             let output = try #require(ScreenshotTranslationRenderer.render(.init(
@@ -1227,7 +1230,7 @@ struct ScreenshotTranslationRendererTests {
             )))
             let original = try #require(PixelBuffer(image: shot.cgImage)), rendered = try #require(PixelBuffer(image: output))
             let changed = (Int(connector.minY)..<Int(connector.maxY)).filter { rendered.pixel(30, $0) != original.pixel(30, $0) }.count
-            #expect(changed == 0, "下面的竖连接线有 \(changed) 个像素被动了")
+            #expect(changed == 0, "\(label)：下面的竖连接线有 \(changed) 个像素被动了")
         }
 
         // 右边有横线：标题后面那种，译文比原文长。
@@ -1240,7 +1243,7 @@ struct ScreenshotTranslationRendererTests {
                 NSColor.white.setFill()
                 NSRect(origin: .zero, size: size).fill()
                 text("Section", at: origin, size: 14)
-                NSColor(white: 0.25, alpha: 1).setFill()
+                lineColor.setFill()
                 rule.fill()
             }
             let block = VisionOCRService.OCRBlock(text: "Section", lines: [.init(text: "Section", boundingBox: normalized(ink.insetBy(dx: -1, dy: -2), in: size))])
@@ -1249,12 +1252,14 @@ struct ScreenshotTranslationRendererTests {
             )))
             let original = try #require(PixelBuffer(image: shot.cgImage)), rendered = try #require(PixelBuffer(image: output))
             let changed = (Int(rule.minX)..<Int(rule.maxX)).filter { rendered.pixel($0, Int(rule.minY)) != original.pixel($0, Int(rule.minY)) }.count
-            #expect(changed == 0, "右边的横线有 \(changed) 个像素被动了")
+            #expect(changed == 0, "\(label)：右边的横线有 \(changed) 个像素被动了")
+        }
         }
     }
 
     /// 审核第十四轮（#12）：段落短行旁边一条两像素高的深色横线：往右扫到它的第一列时突变、变色各两个像素，
     /// 按「走远了」停下（当成渐变），段落查旁边的东西时又只认「碰到了边」，线就漏了；它在段落外框里，往下扫也管不到，长译文压上去。
+    /// 审核第十五轮：浅灰（#EEEEEE）的也一样。
     @Test func twoPixelRuleBesideAShortParagraphLineIsAvoided() throws {
         let size = CGSize(width: 300, height: 110)
         let font = NSFont.systemFont(ofSize: 14)
@@ -1270,12 +1275,13 @@ struct ScreenshotTranslationRendererTests {
         let firstInk = inkBounds(first, at: firstOrigin), secondInk = inkBounds(second, at: secondOrigin)
         // 1pt（两像素）高，从短行后面 8pt 起，到长行的末尾，都在段落外框里。
         let rule = CGRect(x: ceil(secondInk.maxX) + 8, y: floor(secondInk.midY), width: floor(firstInk.maxX) - ceil(secondInk.maxX) - 8, height: 1)
+        for (lineColor, label) in [(NSColor(white: 0.2, alpha: 1), "深色"), (NSColor(srgbRed: 0xEE / 255, green: 0xEE / 255, blue: 0xEE / 255, alpha: 1), "浅灰")] {
         let shot = scene(width: size.width, height: size.height) {
             NSColor.white.setFill()
             NSRect(origin: .zero, size: size).fill()
             text(first, at: firstOrigin, size: 14)
             text(second, at: secondOrigin, size: 14)
-            NSColor(white: 0.2, alpha: 1).setFill()
+            lineColor.setFill()
             rule.fill()
         }
         let block = VisionOCRService.OCRBlock(text: first + " " + second, lines: [
@@ -1286,8 +1292,9 @@ struct ScreenshotTranslationRendererTests {
             image: shot.cgImage, pointSize: size, blocks: [block],
             translations: [block.id: "允许通知显示在这台电脑的屏幕上，并且在锁定时也显示通知的预览内容"]
         )))
-        #expect(try maxDifference(shot.cgImage, output, in: rule) == 0, "短行旁边的横线被压到了")
-        #expect(try maxDifference(shot.cgImage, output, in: firstInk) > 0, "原文没换掉")
+        #expect(try maxDifference(shot.cgImage, output, in: rule) == 0, "\(label)：短行旁边的横线被压到了")
+        #expect(try maxDifference(shot.cgImage, output, in: firstInk) > 0, "\(label)：原文没换掉")
+        }
     }
 
     /// 审核第六轮后自查（#12）：紧贴着字的分隔线颜色深、过得了墨迹阈值时，量墨迹左右端会把它算成字——
