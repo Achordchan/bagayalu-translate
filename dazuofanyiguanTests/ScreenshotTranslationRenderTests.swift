@@ -274,6 +274,44 @@ struct ScreenshotTranslationLayoutTests {
         #expect(placement.fontSize < 14)
         #expect(placement.fontSize >= 14 * 0.62 - 0.01)
     }
+
+    /// 审核第七轮（#12）：给的宽度比一个字还窄、下面又有要绕开的东西时，TextKit 排完第一行就停（绕开的地方在最上面时
+    /// 一个字都不排），量出来的高度只有一行（或者 0）。折行那一步原来当成放得下：原文抹掉了，译文却少了后半截、连省略号都没有。
+    @Test func narrowSpaceWithAnObstacleBelowStillShowsTheTranslation() throws {
+        // 原文是个窄窄的「I」，左右都没地方长；下面紧挨着一个图标，折行时要绕开它。
+        var source = block("安装", lines: [CGRect(x: 20, y: 20, width: 6, height: 14)], limits: .init(minX: 20, maxX: 26, maxY: 80))
+        source.obstacles = [CGRect(x: 18, y: 36, width: 10, height: 12)]
+        let placement = try #require(ScreenshotTranslationLayout.plan([source], canvas: CGSize(width: 400, height: 300)).first)
+        let string = ScreenshotTranslationLayout.attributedString(
+            placement.text, fontSize: placement.fontSize, weight: placement.weight, color: .black,
+            alignment: placement.alignment, lineHeight: placement.lineHeight, baselineOffset: placement.baselineOffset
+        )
+        // 和渲染器画的时候一样排一遍。
+        let drawn = ScreenshotTranslationLayout.TextLayout(
+            string, size: placement.frame.size, exclusions: placement.exclusions, maximumLines: placement.maximumLines
+        )
+        #expect(drawn.laysOutEverything, "画出来只排进了一部分：\(placement)")
+        #expect(drawn.usedRect.height > 0)
+    }
+
+    /// 同上，段落：绕着障碍排不全时不能当成放得下；缩到最小还排不全，就不绕了——宁可压到障碍，也不能让译文少一截。
+    @Test func paragraphThatCannotBeLaidOutAroundObstaclesStopsAvoidingThem() throws {
+        // 一有要绕开的地方就排不全（TextKit 半路停下，量出来只有一行）。
+        let stubborn: ScreenshotTranslationLayout.Measure = { text, fontSize, weight, width, lineHeight, exclusions in
+            var result = measure(text, fontSize, weight, width, lineHeight, [])
+            if !exclusions.isEmpty {
+                result.size.height = lineHeight ?? 1.2 * fontSize
+                result.complete = false
+            }
+            return result
+        }
+        let lines = [CGRect(x: 20, y: 20, width: 200, height: 14), CGRect(x: 20, y: 40, width: 120, height: 14)]
+        var paragraph = block(String(repeating: "译", count: 30), lines: lines, limits: .init(minX: 20, maxX: 220, maxY: 90))
+        paragraph.obstacles = [CGRect(x: 150, y: 38, width: 40, height: 18)]
+        let placement = try #require(ScreenshotTranslationLayout.plan([paragraph], canvas: CGSize(width: 400, height: 300), measure: stubborn).first)
+        #expect(placement.exclusions.isEmpty, "绕着障碍排不全，还在绕：\(placement)")
+        #expect(placement.maximumLines > 0)
+    }
 }
 
 @MainActor

@@ -91,6 +91,9 @@ enum ScreenshotTranslationLayout {
         var size: CGSize
         var inkTop: CGFloat
         var inkBottom: CGFloat
+        /// 字是不是都排进去了。给的宽度比一个字还窄、又有要绕开的地方时，TextKit 会排几个字就停、甚至一个字都不排，
+        /// 量出来的高度只有排进去的那几行（或者是 0），不能当成放得下。
+        var complete = true
     }
 
     /// 量一段文字：`width` 为 nil 时不折行；`exclusions` 是要绕开的地方，相对文字左上角。
@@ -326,8 +329,9 @@ enum ScreenshotTranslationLayout {
                     ? first.frame.offsetBy(dx: 0, dy: limits.minY - first.ink.lowerBound)
                     : first.frame
                 let local = block.obstacles.map { $0.offsetBy(dx: -frame0.minX, dy: -frame0.minY) }
-                let height = measure(block.text, fontSize, block.weight, maxWidth, nil, local).size.height
-                if frame0.minY + height <= limits.maxY {
+                let wrapped = measure(block.text, fontSize, block.weight, maxWidth, nil, local)
+                let height = wrapped.size.height
+                if wrapped.complete, frame0.minY + height <= limits.maxY {
                     let frame = CGRect(x: frame0.minX, y: frame0.minY, width: maxWidth, height: height)
                     return placement(frame, fontSize, lineHeight: nil, alignment: block.alignment, exclusions: local)
                 }
@@ -355,8 +359,8 @@ enum ScreenshotTranslationLayout {
         let pitch = block.pitch ?? size * 1.4
         /// 一种字号下的排法：行高跟原文的行距，但不小于译文本身（TextKit 实测）的自然行高——缅甸文、高棉文这类
         /// 后备字体高的文字，按原文行距排会压到上下行。字挪到行中间的量也按译文本身算。
-        /// 第一行的字身越过上边界时整段往下挪。
-        func layout(_ fontSize: CGFloat) -> (frame: CGRect, lineHeight: CGFloat, offset: CGFloat, exclusions: [CGRect]) {
+        /// 第一行的字身越过上边界时整段往下挪。`avoiding` 为 false 时不绕开障碍（绕着排不全时的最后一招）。
+        func layout(_ fontSize: CGFloat, avoiding: Bool = true) -> (frame: CGRect, lineHeight: CGFloat, offset: CGFloat, exclusions: [CGRect], complete: Bool) {
             let single = measure(block.text, fontSize, block.weight, nil, nil, [])
             let natural = single.size.height
             let lineHeight = max(natural, min(max(pitch * fontSize / size, 1.12 * fontSize), 1.9 * fontSize))
@@ -370,15 +374,15 @@ enum ScreenshotTranslationLayout {
             // TextKit 按整个行框（连上下的行距）判断碰没碰到绕开的地方，字身只占中间一截。先把绕开的地方
             // 上下各收进行距多出来的那一半，等于拿字身去比：擦着行距的障碍不会把一整行劈成两截，
             // 整个落在两行之间空当里的就不用绕。
-            let local = block.obstacles
+            let local = avoiding ? block.obstacles
                 .map { $0.insetBy(dx: 0, dy: offset).offsetBy(dx: -bounds.minX, dy: -top) }
-                .filter { !$0.isNull && $0.height > 0 }
-            let height = measure(block.text, fontSize, block.weight, width, lineHeight, local).size.height
-            return (CGRect(x: bounds.minX, y: top, width: width, height: height), lineHeight, offset, local)
+                .filter { !$0.isNull && $0.height > 0 } : []
+            let measured = measure(block.text, fontSize, block.weight, width, lineHeight, local)
+            return (CGRect(x: bounds.minX, y: top, width: width, height: measured.size.height), lineHeight, offset, local, measured.complete)
         }
         for fontSize in sizes(from: size, downTo: paragraphFloor) {
             let candidate = layout(fontSize)
-            if candidate.frame.maxY <= limits.maxY {
+            if candidate.complete, candidate.frame.maxY <= limits.maxY {
                 return placement(
                     candidate.frame,
                     fontSize,
@@ -389,7 +393,12 @@ enum ScreenshotTranslationLayout {
                 )
             }
         }
-        let last = layout(paragraphFloor)
+        // 缩到最小还放不下就截断；绕着障碍连字都排不全（TextKit 半路停下，后面的字连省略号都没有），
+        // 就不绕了，宁可压到障碍，也不能让译文少一截。
+        var last = layout(paragraphFloor)
+        if !last.complete {
+            last = layout(paragraphFloor, avoiding: false)
+        }
         let height = max(last.lineHeight, limits.maxY - last.frame.minY)
         return placement(
             CGRect(x: last.frame.minX, y: last.frame.minY, width: width, height: height),
@@ -436,7 +445,12 @@ enum ScreenshotTranslationLayout {
         let layout = TextLayout(string, size: CGSize(width: width ?? 100_000, height: 100_000), exclusions: exclusions)
         let used = layout.usedRect
         let ink = layout.firstLineInk ?? (0.15 * used.height, 0.85 * used.height)
-        return Measurement(size: CGSize(width: ceil(used.maxX), height: ceil(used.maxY)), inkTop: ink.top, inkBottom: ink.bottom)
+        return Measurement(
+            size: CGSize(width: ceil(used.maxX), height: ceil(used.maxY)),
+            inkTop: ink.top,
+            inkBottom: ink.bottom,
+            complete: layout.laysOutEverything
+        )
     }
 
     /// TextKit 排出来的一段文字。量和画用同一套排法，量出来的才和画出来的一致；绕开区域、末行截断也靠它。
@@ -463,7 +477,7 @@ enum ScreenshotTranslationLayout {
 
         var usedRect: CGRect { manager.usedRect(for: container) }
 
-        /// 字是不是都排进去了（容器太矮时 TextKit 会整行不排）。
+        /// 字是不是都排进去了（容器太矮时 TextKit 会整行不排；比一个字还窄、又有要绕开的地方时，排几个字就停）。
         var laysOutEverything: Bool {
             manager.characterRange(forGlyphRange: manager.glyphRange(for: container), actualGlyphRange: nil).length == storage.length
         }
