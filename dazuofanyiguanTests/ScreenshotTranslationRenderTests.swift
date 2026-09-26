@@ -1145,9 +1145,10 @@ struct ScreenshotTranslationRendererTests {
         #expect(try maxDifference(shot.cgImage, output, in: CGRect(x: inkMinX, y: origin.y + 5, width: inkMaxX - inkMinX, height: 16)) > 0, "原文没换掉")
     }
 
-    /// 审核第八轮（#12）：行距紧的上下两行分在两段里（句末标点、下一行大写开头都会断开），只翻上面那段时，
-    /// 它的墨迹带原来会隔着空白扩进下一行，抹字连下一段的字一起抹掉。
-    @Test func erasingOneBlockKeepsTheUntranslatedBlockBelowIntact() throws {
+    /// 审核第八轮（#12）：行距紧的上下两行分在两段里（句末标点、下一行大写开头都会断开），只翻其中一段时，
+    /// 它的墨迹带原来会隔着空白扩进另一行，抹字连另一段的字一起抹掉。
+    /// 审核第十二轮：字碰在一起时墨迹带扩进了另一段，原来只护住了抹字，排版还按扩进去的墨迹带排，译文的中心偏过去、画到另一段上。
+    @Test func erasingOneBlockKeepsTheUntranslatedNeighborIntact() throws {
         let font = NSFont.systemFont(ofSize: 14)
         let size = CGSize(width: 300, height: 60)
         func width(_ string: String) -> CGFloat { NSAttributedString(string: string, attributes: [.font: font]).size().width }
@@ -1155,10 +1156,13 @@ struct ScreenshotTranslationRendererTests {
             CGRect(x: rect.minX / size.width, y: 1 - rect.maxY / size.height, width: rect.width / size.width, height: rect.height / size.height)
         }
         let first = "gypqgypqgypqgypqgypq", second = "Hjklmnop Hjklmnop"
-        // 15pt：两行的字之间隔着一两个像素的空白，下面那段一个像素都不能动。
-        // 13pt：两行的字碰在一起，交界处分不清是谁的，按中线各让一半；下面那段的字身（x 高度以下）不能被抹。
-        //       这时上面那行的墨迹带扩进了下一行、中心偏下，画上去的字也会跟着偏一点，所以只画一个点，只查抹字。
-        for (pitch, wholeLine) in [(CGFloat(15), true), (13, false)] {
+        // 15pt：两行的字之间隔着一两个像素的空白，没翻的那段一个像素都不能动。
+        // 13pt：两行的字碰在一起，交界处分不清是谁的，按中线各让一半；没翻的那段的字身不能被抹，也不能被画上字。
+        //       译成缅甸文时字高得多，按中心排也会伸出去，要靠收紧的上下边界挪开。
+        let cases: [(pitch: CGFloat, translateUpper: Bool, translation: String)] = [
+            (15, true, "短句"), (13, true, "短句"), (13, true, "မြန်မာစာ"), (13, false, "မြန်မာစာ")
+        ]
+        for (pitch, translateUpper, translation) in cases {
             let shot = scene(width: size.width, height: size.height) {
                 NSColor.white.setFill()
                 NSRect(origin: .zero, size: size).fill()
@@ -1169,14 +1173,24 @@ struct ScreenshotTranslationRendererTests {
             let lowerLine = VisionOCRService.OCRLine(text: second, boundingBox: normalized(CGRect(x: 10, y: 9.5 + pitch, width: width(second), height: 13.7)))
             let lower = VisionOCRService.OCRBlock(text: second, lines: [lowerLine])
             let output = try #require(ScreenshotTranslationRenderer.render(.init(
-                image: shot.cgImage, pointSize: size, blocks: [upper, lower], translations: [upper.id: wholeLine ? "短句" : "."]
+                image: shot.cgImage, pointSize: size, blocks: [upper, lower], translations: [translateUpper ? upper.id : lower.id: translation]
             )))
-            let ink = ScreenshotTranslationRenderer.lineInk(of: lowerLine, in: try #require(PixelBuffer(image: shot.cgImage))).rect
-            let baseline = 8 + pitch + font.ascender
-            let top = wholeLine ? ink.minY / 2 : baseline - font.xHeight
-            let region = CGRect(x: 10, y: top, width: width(second) + 2, height: size.height - top)
-            #expect(try maxDifference(shot.cgImage, output, in: region) == 0, "行距 \(pitch)：没翻的下一段被抹了（从 y=\(top) 往下）")
-            #expect(try maxDifference(shot.cgImage, output, in: CGRect(x: 60, y: 12, width: 100, height: 8)) > 0, "行距 \(pitch)：上面那段没换掉")
+            let label = "行距 \(pitch)、翻\(translateUpper ? "上面" : "下面")那段、译成\(translation)"
+            let upperBaseline = 8 + font.ascender, lowerBaseline = 8 + pitch + font.ascender
+            let kept: CGRect, changed: CGRect
+            if translateUpper {
+                // 下面那段：隔着空白时整段，字碰在一起时 x 高度往下（字身）。
+                let ink = ScreenshotTranslationRenderer.lineInk(of: lowerLine, in: try #require(PixelBuffer(image: shot.cgImage))).rect
+                let top = pitch == 15 ? ink.minY / 2 : lowerBaseline - font.xHeight
+                kept = CGRect(x: 10, y: top, width: width(second) + 2, height: size.height - top)
+                changed = CGRect(x: 60, y: upperBaseline - font.xHeight, width: 100, height: font.xHeight)
+            } else {
+                // 上面那段：基线往上（字身），下伸的部分在交界处。
+                kept = CGRect(x: 10, y: 0, width: width(first) + 2, height: upperBaseline)
+                changed = CGRect(x: 20, y: lowerBaseline - font.xHeight, width: 100, height: font.xHeight)
+            }
+            #expect(try maxDifference(shot.cgImage, output, in: kept) == 0, "\(label)：没翻的那段被动了（\(kept)）")
+            #expect(try maxDifference(shot.cgImage, output, in: changed) > 0, "\(label)：要翻的那段没换掉")
         }
     }
 

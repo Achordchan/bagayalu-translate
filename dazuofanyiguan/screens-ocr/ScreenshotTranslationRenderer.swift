@@ -70,19 +70,22 @@ enum ScreenshotTranslationRenderer {
             return rects
         }
 
+        // 抹字、墨迹带、能占到的范围都按不重画的段落收紧。每次渲染重算、不进缓存：哪些段落不重画，每翻完一批都在变。
+        let retained = styles.map { retain($0, around: protected, margin: 1 / scale) }
+
         let fontSizes = ScreenshotTranslationLayout.harmonizedFontSizes(styles.map(\.fontSize))
         let layoutBlocks = redrawn.indices.map { index in
             ScreenshotTranslationLayout.Block(
                 id: redrawn[index].id,
                 // 段落是一整块重排的，引擎自己加的换行、多余的空格都不要。
                 text: normalizedText(input.translations[redrawn[index].id] ?? redrawn[index].text),
-                lines: styles[index].lines,
+                lines: retained[index].lines,
                 fontSize: fontSizes[index],
-                weight: styles[index].weight,
-                alignment: styles[index].alignment,
-                limits: styles[index].limits,
-                obstacles: styles[index].obstacles,
-                eraseRects: protect(styles[index].eraseRects, lines: styles[index].lines, from: protected, margin: 1 / scale)
+                weight: retained[index].weight,
+                alignment: retained[index].alignment,
+                limits: retained[index].limits,
+                obstacles: retained[index].obstacles,
+                eraseRects: retained[index].eraseRects
             )
         }
         let placements = ScreenshotTranslationLayout.plan(layoutBlocks, canvas: input.pointSize)
@@ -132,33 +135,65 @@ enum ScreenshotTranslationRenderer {
         }
     }
 
-    /// 把抹字范围从不重画的段落的字上削掉（它们的墨迹四周多留 `margin` 给抗锯齿的边）。`lines` 是要抹的各行自己的墨迹，
-    /// 和 `rects` 一一对应。上下叠着的削上下、并排的削左右，都不削进自己这一行的墨迹；
-    /// 两行的字碰在一起（墨迹带叠着）时，交界处的像素分不清是谁的，按两行墨迹的中线分，各让一半。
-    static func protect(_ rects: [CGRect], lines: [CGRect], from protected: [CGRect], margin: CGFloat) -> [CGRect] {
-        guard !protected.isEmpty else { return rects }
+    /// 不重画的段落的字（`protected`，pt；四周多留 `margin` 给抗锯齿的边），要重画的这一段处处都要让开：
+    /// - 抹字范围不越过它们；
+    /// - 墨迹带不越过它们：字碰在一起时墨迹带扩进了别人的字，按它排，译文的中心会跟着偏、画到别人身上；
+    /// - 排译文时也不越过：在上面、下面的收紧上下边界（只管横着够得着的：译文左右长不到的地方，上下有什么都碍不着）。
+    ///   同一行左右挨着的，扫描扫到它的字就停了，左右本来就长不过去；排版时上下边界也不会收进这一行自己的墨迹带。
+    static func retain(_ style: MeasuredStyle, around protected: [CGRect], margin: CGFloat) -> MeasuredStyle {
+        guard !protected.isEmpty, !style.lines.isEmpty else { return style }
         let guarded = protected.map { $0.insetBy(dx: -margin, dy: -margin) }
-        return zip(rects, lines).compactMap { original, line in
-            var rect = original
-            for other in guarded where rect.intersects(other) {
-                // 横着不重叠的是并排（同一行上挨着的另一段），削左右；横着重叠的是上下叠着的。
-                // 不能按竖着重叠多少来分：字碰在一起时两行的墨迹带互相扩进对方，竖着能叠一大半。
-                if other.minX >= line.maxX {
-                    rect.size.width = max(0, min(rect.maxX, other.minX) - rect.minX)
-                } else if other.maxX <= line.minX {
-                    let minX = max(rect.minX, other.maxX)
-                    rect = CGRect(x: minX, y: rect.minY, width: max(0, rect.maxX - minX), height: rect.height)
-                } else if other.midY > line.midY {
-                    let bottom = other.minY >= line.maxY ? other.minY : (line.midY + other.midY) / 2
-                    rect.size.height = max(0, min(rect.maxY, bottom) - rect.minY)
-                } else {
-                    let top = other.maxY <= line.minY ? other.maxY : (line.midY + other.midY) / 2
-                    let minY = max(rect.minY, top)
-                    rect = CGRect(x: rect.minX, y: minY, width: rect.width, height: max(0, rect.maxY - minY))
-                }
-            }
+        var style = style
+        style.eraseRects = zip(style.eraseRects, style.lines).compactMap { rect, line in
+            let rect = trimmed(rect, line: line, against: guarded)
             return rect.width > 0 && rect.height > 0 ? rect : nil
         }
+        style.lines = style.lines.map { line in
+            let rect = trimmed(line, line: line, against: guarded)
+            return rect.width > 0 && rect.height > 0 ? rect : line
+        }
+        let first = style.lines[0], last = style.lines[style.lines.count - 1]
+        for other in guarded where other.maxX > style.limits.minX && other.minX < style.limits.maxX {
+            if other.midY > last.midY {
+                let bottom = boundary(below: last, other)
+                style.limits.maxY = min(style.limits.maxY, bottom)
+                style.limits.bodyMaxY = min(style.limits.bodyMaxY ?? style.limits.maxY, bottom)
+            } else if other.midY < first.midY {
+                style.limits.minY = max(style.limits.minY, boundary(above: first, other))
+            }
+        }
+        return style
+    }
+
+    /// 把 `rect`（`line` 这一行的抹字范围或墨迹带）从 `guarded` 上削掉，不削进这一行自己的墨迹：横着不重叠的是并排
+    /// （同一行上挨着的另一段），削左右；横着重叠的是上下叠着的，削到分界。不能按竖着重叠多少来分：
+    /// 字碰在一起时两行的墨迹带互相扩进对方，竖着能叠一大半。
+    static func trimmed(_ rect: CGRect, line: CGRect, against guarded: [CGRect]) -> CGRect {
+        var rect = rect
+        for other in guarded where rect.intersects(other) {
+            if other.minX >= line.maxX {
+                rect.size.width = max(0, min(rect.maxX, other.minX) - rect.minX)
+            } else if other.maxX <= line.minX {
+                let minX = max(rect.minX, other.maxX)
+                rect = CGRect(x: minX, y: rect.minY, width: max(0, rect.maxX - minX), height: rect.height)
+            } else if other.midY > line.midY {
+                rect.size.height = max(0, min(rect.maxY, boundary(below: line, other)) - rect.minY)
+            } else {
+                let minY = max(rect.minY, boundary(above: line, other))
+                rect = CGRect(x: rect.minX, y: minY, width: rect.width, height: max(0, rect.maxY - minY))
+            }
+        }
+        return rect
+    }
+
+    /// 这一行和它下面（上面）一段不重画的字之间的分界：中间隔着空白就是对方墨迹的边；字碰在一起（墨迹带叠着）时，
+    /// 交界处的像素分不清是谁的，按两行墨迹的中线分，各让一半。
+    private static func boundary(below line: CGRect, _ other: CGRect) -> CGFloat {
+        other.minY >= line.maxY ? other.minY : (line.midY + other.midY) / 2
+    }
+
+    private static func boundary(above line: CGRect, _ other: CGRect) -> CGFloat {
+        other.maxY <= line.minY ? other.maxY : (line.midY + other.midY) / 2
     }
 
     /// 比较译文和原文时忽略空白的差别。
