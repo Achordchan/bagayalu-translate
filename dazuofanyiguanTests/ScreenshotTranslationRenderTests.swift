@@ -1253,6 +1253,43 @@ struct ScreenshotTranslationRendererTests {
         }
     }
 
+    /// 审核第十四轮（#12）：段落短行旁边一条两像素高的深色横线：往右扫到它的第一列时突变、变色各两个像素，
+    /// 按「走远了」停下（当成渐变），段落查旁边的东西时又只认「碰到了边」，线就漏了；它在段落外框里，往下扫也管不到，长译文压上去。
+    @Test func twoPixelRuleBesideAShortParagraphLineIsAvoided() throws {
+        let size = CGSize(width: 300, height: 110)
+        let font = NSFont.systemFont(ofSize: 14)
+        func inkBounds(_ string: String, at origin: CGPoint) -> CGRect {
+            let bounds = CTLineGetBoundsWithOptions(CTLineCreateWithAttributedString(NSAttributedString(string: string, attributes: [.font: font])), .useGlyphPathBounds)
+            return CGRect(x: origin.x + bounds.minX, y: origin.y + font.ascender - bounds.maxY, width: bounds.width, height: bounds.height)
+        }
+        func normalized(_ rect: CGRect) -> CGRect {
+            CGRect(x: rect.minX / size.width, y: 1 - rect.maxY / size.height, width: rect.width / size.width, height: rect.height / size.height)
+        }
+        let first = "Allow notifications to appear", second = "on this Mac"
+        let firstOrigin = CGPoint(x: 10, y: 10), secondOrigin = CGPoint(x: 10, y: 30)
+        let firstInk = inkBounds(first, at: firstOrigin), secondInk = inkBounds(second, at: secondOrigin)
+        // 1pt（两像素）高，从短行后面 8pt 起，到长行的末尾，都在段落外框里。
+        let rule = CGRect(x: ceil(secondInk.maxX) + 8, y: floor(secondInk.midY), width: floor(firstInk.maxX) - ceil(secondInk.maxX) - 8, height: 1)
+        let shot = scene(width: size.width, height: size.height) {
+            NSColor.white.setFill()
+            NSRect(origin: .zero, size: size).fill()
+            text(first, at: firstOrigin, size: 14)
+            text(second, at: secondOrigin, size: 14)
+            NSColor(white: 0.2, alpha: 1).setFill()
+            rule.fill()
+        }
+        let block = VisionOCRService.OCRBlock(text: first + " " + second, lines: [
+            .init(text: first, boundingBox: normalized(firstInk.insetBy(dx: -1, dy: -2))),
+            .init(text: second, boundingBox: normalized(secondInk.insetBy(dx: -1, dy: -2)))
+        ])
+        let output = try #require(ScreenshotTranslationRenderer.render(.init(
+            image: shot.cgImage, pointSize: size, blocks: [block],
+            translations: [block.id: "允许通知显示在这台电脑的屏幕上，并且在锁定时也显示通知的预览内容"]
+        )))
+        #expect(try maxDifference(shot.cgImage, output, in: rule) == 0, "短行旁边的横线被压到了")
+        #expect(try maxDifference(shot.cgImage, output, in: firstInk) > 0, "原文没换掉")
+    }
+
     /// 审核第六轮后自查（#12）：紧贴着字的分隔线颜色深、过得了墨迹阈值时，量墨迹左右端会把它算成字——
     /// 被当成字抹掉，往外扫从它外面开始、长译文越过它伸进隔壁格子，字号也按多出来的宽度量偏。
     @Test func darkDividerNextToTheTextIsNotTreatedAsText() async throws {
