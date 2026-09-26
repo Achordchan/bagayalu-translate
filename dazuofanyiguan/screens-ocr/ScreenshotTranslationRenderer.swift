@@ -25,6 +25,8 @@ enum ScreenshotTranslationRenderer {
     /// 按段落 id 存（每次识别的 id 都是新的）。不加锁：同一时间只能有一个渲染在用它。
     final class StyleCache {
         fileprivate var styles: [UUID: MeasuredStyle] = [:]
+        /// 不重画的段落各行墨迹占的地方（pt），抹字时要护住。
+        fileprivate var inks: [UUID: [CGRect]] = [:]
 
         init() {}
     }
@@ -47,6 +49,27 @@ enum ScreenshotTranslationRenderer {
             input.cache?.styles[block.id] = style
             return style
         }
+        // 不重画的段落（没有译文、译文和原文一样）的字要护住：行距紧时，要翻的那段往外扩的墨迹带、抹字的外扩，
+        // 可能伸到它们的字上（分段时句末标点、下一行大写开头都会断成两段）。只量挨着要抹的地方的那些。
+        let redrawnIDs = Set(redrawn.map(\.id))
+        let eraseAreas = styles.flatMap(\.eraseRects).map { $0.insetBy(dx: -2, dy: -2) }
+        let protected = input.blocks.filter { !redrawnIDs.contains($0.id) && !$0.lines.isEmpty }.flatMap { block -> [CGRect] in
+            let bounds = CGRect(
+                x: block.boundingBox.minX * input.pointSize.width,
+                y: (1 - block.boundingBox.maxY) * input.pointSize.height,
+                width: block.boundingBox.width * input.pointSize.width,
+                height: block.boundingBox.height * input.pointSize.height
+            )
+            guard eraseAreas.contains(where: { $0.intersects(bounds) }) else { return [] }
+            if let cached = input.cache?.inks[block.id] { return cached }
+            let rects = block.lines.map { line -> CGRect in
+                let rect = lineInk(of: line, in: pixels).rect
+                return CGRect(x: rect.minX / scale, y: rect.minY / scale, width: rect.width / scale, height: rect.height / scale)
+            }
+            input.cache?.inks[block.id] = rects
+            return rects
+        }
+
         let fontSizes = ScreenshotTranslationLayout.harmonizedFontSizes(styles.map(\.fontSize))
         let layoutBlocks = redrawn.indices.map { index in
             ScreenshotTranslationLayout.Block(
@@ -59,7 +82,7 @@ enum ScreenshotTranslationRenderer {
                 alignment: styles[index].alignment,
                 limits: styles[index].limits,
                 obstacles: styles[index].obstacles,
-                eraseRects: styles[index].eraseRects
+                eraseRects: protect(styles[index].eraseRects, lines: styles[index].lines, from: protected, margin: 1 / scale)
             )
         }
         let placements = ScreenshotTranslationLayout.plan(layoutBlocks, canvas: input.pointSize)
@@ -89,13 +112,52 @@ enum ScreenshotTranslationRenderer {
                     lineHeight: placement.lineHeight,
                     baselineOffset: placement.baselineOffset
                 )
+                // 横着只画在排好的框里（左右各多留一个像素给字形出头）：连一个字都放不下的极端情况，TextKit 会让字伸出容器，
+                // 不能画到旁边的分隔线、图标、别的段落上。竖着不裁：后备字体的字可能比行框高。
+                NSGraphicsContext.saveGraphicsState()
+                NSBezierPath(rect: CGRect(
+                    x: placement.frame.minX - 1 / scale,
+                    y: -input.pointSize.height,
+                    width: placement.frame.width + 2 / scale,
+                    height: 3 * input.pointSize.height
+                )).addClip()
                 ScreenshotTranslationLayout.TextLayout(
                     string,
                     size: placement.frame.size,
                     exclusions: placement.exclusions,
                     maximumLines: placement.maximumLines
                 ).draw(at: placement.frame.origin)
+                NSGraphicsContext.restoreGraphicsState()
             }
+        }
+    }
+
+    /// 把抹字范围从不重画的段落的字上削掉（它们的墨迹四周多留 `margin` 给抗锯齿的边）。`lines` 是要抹的各行自己的墨迹，
+    /// 和 `rects` 一一对应。上下叠着的削上下、并排的削左右，都不削进自己这一行的墨迹；
+    /// 两行的字碰在一起（墨迹带叠着）时，交界处的像素分不清是谁的，按两行墨迹的中线分，各让一半。
+    static func protect(_ rects: [CGRect], lines: [CGRect], from protected: [CGRect], margin: CGFloat) -> [CGRect] {
+        guard !protected.isEmpty else { return rects }
+        let guarded = protected.map { $0.insetBy(dx: -margin, dy: -margin) }
+        return zip(rects, lines).compactMap { original, line in
+            var rect = original
+            for other in guarded where rect.intersects(other) {
+                // 横着不重叠的是并排（同一行上挨着的另一段），削左右；横着重叠的是上下叠着的。
+                // 不能按竖着重叠多少来分：字碰在一起时两行的墨迹带互相扩进对方，竖着能叠一大半。
+                if other.minX >= line.maxX {
+                    rect.size.width = max(0, min(rect.maxX, other.minX) - rect.minX)
+                } else if other.maxX <= line.minX {
+                    let minX = max(rect.minX, other.maxX)
+                    rect = CGRect(x: minX, y: rect.minY, width: max(0, rect.maxX - minX), height: rect.height)
+                } else if other.midY > line.midY {
+                    let bottom = other.minY >= line.maxY ? other.minY : (line.midY + other.midY) / 2
+                    rect.size.height = max(0, min(rect.maxY, bottom) - rect.minY)
+                } else {
+                    let top = other.maxY <= line.minY ? other.maxY : (line.midY + other.midY) / 2
+                    let minY = max(rect.minY, top)
+                    rect = CGRect(x: rect.minX, y: minY, width: rect.width, height: max(0, rect.maxY - minY))
+                }
+            }
+            return rect.width > 0 && rect.height > 0 ? rect : nil
         }
     }
 
@@ -136,6 +198,48 @@ enum ScreenshotTranslationRenderer {
         return .regular
     }
 
+    /// 一行字的墨迹（像素）：Vision 的行框、按字宽粗估的字号、背景色、文字色、墨迹带，和墨迹的左右端（`inkBox`，上下还是行框的）。
+    struct LineInk {
+        var box: CGRect
+        var estimate: CGFloat
+        var background: PixelBuffer.RGB
+        var ink: PixelBuffer.RGB
+        var band: PixelBuffer.InkBand
+        var inkBox: CGRect
+
+        /// 墨迹占的地方：左右是墨迹的左右端，上下是墨迹带。
+        var rect: CGRect {
+            CGRect(x: inkBox.minX, y: band.top, width: inkBox.width, height: max(1, band.bottom - band.top))
+        }
+    }
+
+    static func lineInk(of line: VisionOCRService.OCRLine, in pixels: PixelBuffer) -> LineInk {
+        let box = CGRect(
+            x: line.boundingBox.minX * CGFloat(pixels.width),
+            y: (1 - line.boundingBox.maxY) * CGFloat(pixels.height),
+            width: line.boundingBox.width * CGFloat(pixels.width),
+            height: line.boundingBox.height * CGFloat(pixels.height)
+        )
+        // 字号按字宽量（Vision 的行框高度会忽高忽低，见 OCRParagraphGrouper）：先按平均字宽粗估，
+        // 再量出这行墨迹实际的左右端，用系统字体排同样的字、按墨迹宽度反推——行框两头的留白忽多忽少
+        // （按钮上的两个字能多出一成多），大字号的 SF 字形又更紧凑，只按行框和平均字宽估都会偏。
+        let estimate = max(OCRParagraphGrouper.estimatedEm(width: box.width, text: line.text), 4)
+        let background = pixels.ringMedian(around: box, padding: max(2, 0.15 * estimate))
+        let ink = pixels.inkColor(in: box, background: background)
+        var band = pixels.inkBand(in: box, background: background, ink: ink, em: estimate)
+        var inkBox = box
+        if let extent = pixels.inkExtent(in: box, top: band.top, bottom: band.bottom, background: background, ink: ink, slack: 0.15 * estimate, em: estimate) {
+            inkBox = CGRect(x: extent.minX, y: box.minY, width: extent.maxX - extent.minX, height: box.height)
+            // 行框里夹着紧贴着字的分隔线时，它每一行都有颜色，会把墨迹带一路撑到搜索范围的边上（段落里还会撑进相邻的行），
+            // 笔画宽度也被它的细线拉低。只在墨迹的左右端之间重量一次墨迹带，再按新的带重量一次左右端。
+            band = pixels.inkBand(in: inkBox, background: background, ink: ink, em: estimate)
+            if let refined = pixels.inkExtent(in: inkBox, top: band.top, bottom: band.bottom, background: background, ink: ink, slack: 0, em: estimate) {
+                inkBox = CGRect(x: refined.minX, y: box.minY, width: refined.maxX - refined.minX, height: box.height)
+            }
+        }
+        return LineInk(box: box, estimate: estimate, background: background, ink: ink, band: band, inkBox: inkBox)
+    }
+
     static func measureStyle(of block: VisionOCRService.OCRBlock, in pixels: PixelBuffer, scale: CGFloat) -> MeasuredStyle {
         var boxes: [CGRect] = []
         var bands: [PixelBuffer.InkBand] = []
@@ -144,36 +248,14 @@ enum ScreenshotTranslationRenderer {
         var backgrounds: [PixelBuffer.RGB] = []
 
         for line in block.lines {
-            let box = CGRect(
-                x: line.boundingBox.minX * CGFloat(pixels.width),
-                y: (1 - line.boundingBox.maxY) * CGFloat(pixels.height),
-                width: line.boundingBox.width * CGFloat(pixels.width),
-                height: line.boundingBox.height * CGFloat(pixels.height)
-            )
-            // 字号按字宽量（Vision 的行框高度会忽高忽低，见 OCRParagraphGrouper）：先按平均字宽粗估，
-            // 再量出这行墨迹实际的左右端，用系统字体排同样的字、按墨迹宽度反推——行框两头的留白忽多忽少
-            // （按钮上的两个字能多出一成多），大字号的 SF 字形又更紧凑，只按行框和平均字宽估都会偏。
-            let estimate = max(OCRParagraphGrouper.estimatedEm(width: box.width, text: line.text), 4)
-            let background = pixels.ringMedian(around: box, padding: max(2, 0.15 * estimate))
-            let ink = pixels.inkColor(in: box, background: background)
-            var band = pixels.inkBand(in: box, background: background, ink: ink, em: estimate)
-            var inkBox = box
-            if let extent = pixels.inkExtent(in: box, top: band.top, bottom: band.bottom, background: background, ink: ink, slack: 0.15 * estimate, em: estimate) {
-                inkBox = CGRect(x: extent.minX, y: box.minY, width: extent.maxX - extent.minX, height: box.height)
-                // 行框里夹着紧贴着字的分隔线时，它每一行都有颜色，会把墨迹带一路撑到搜索范围的边上（段落里还会撑进相邻的行），
-                // 笔画宽度也被它的细线拉低。只在墨迹的左右端之间重量一次墨迹带，再按新的带重量一次左右端。
-                band = pixels.inkBand(in: inkBox, background: background, ink: ink, em: estimate)
-                if let refined = pixels.inkExtent(in: inkBox, top: band.top, bottom: band.bottom, background: background, ink: ink, slack: 0, em: estimate) {
-                    inkBox = CGRect(x: refined.minX, y: box.minY, width: refined.maxX - refined.minX, height: box.height)
-                }
-            }
+            let measured = lineInk(of: line, in: pixels)
             // 按 pt 量：SF 按字号换字形，拿像素当字号量（2 倍屏上 13pt 当成 26pt）会换成大号字形、量偏。
-            let em = fittedFontSize(of: line.text, inkWidth: inkBox.width / scale, estimate: estimate / scale) * scale
-            boxes.append(inkBox)
-            bands.append(band)
+            let em = fittedFontSize(of: line.text, inkWidth: measured.inkBox.width / scale, estimate: measured.estimate / scale) * scale
+            boxes.append(measured.inkBox)
+            bands.append(measured.band)
             ems.append(em)
-            inks.append(ink)
-            backgrounds.append(background)
+            inks.append(measured.ink)
+            backgrounds.append(measured.background)
         }
 
         let ink = PixelBuffer.RGB.median(inks)
@@ -704,17 +786,47 @@ struct PixelBuffer {
             return fallback
         }
 
+        // 中间隔着几行空白也接着往外扩（i 的点、声调、泰文缅甸文的元音符号、下划线），但隔着空白又碰到墨迹时先看一眼：
+        // 从那里往外连着高过 0.45 个字宽的，是行距紧的上一行或下一行字（可能根本不在这一段里），停在空白这边——
+        // 扩进去的话墨迹带就盖住了别人的字，抹字会连它一起抹掉。往外看可以超出搜索范围。
         let maxGap = max(2, Int(0.2 * em))
+        let lineRun = max(3, Int(0.45 * em))
+        func rowHasInk(_ y: Int) -> Bool {
+            guard y >= 0, y < height else { return false }
+            var count = 0
+            for x in x0...x1 where pixel(x, y).squaredDistance(to: background) >= threshold {
+                count += 1
+                if count >= minimum { return true }
+            }
+            return false
+        }
+        func isAnotherLine(from row: Int, step: Int) -> Bool {
+            (0..<lineRun).allSatisfy { rowHasInk(searchTop + row + $0 * step) }
+        }
         var top = start, bottom = start, gap = 0
         var row = start - 1
         while row >= 0, !solidRows[row] {
-            if isInk(row) { top = row; gap = 0 } else { gap += 1; if gap > maxGap { break } }
+            if isInk(row) {
+                if gap > 0, isAnotherLine(from: row, step: -1) { break }
+                top = row
+                gap = 0
+            } else {
+                gap += 1
+                if gap > maxGap { break }
+            }
             row -= 1
         }
         gap = 0
         row = start + 1
         while row < counts.count, !solidRows[row] {
-            if isInk(row) { bottom = row; gap = 0 } else { gap += 1; if gap > maxGap { break } }
+            if isInk(row) {
+                if gap > 0, isAnotherLine(from: row, step: 1) { break }
+                bottom = row
+                gap = 0
+            } else {
+                gap += 1
+                if gap > maxGap { break }
+            }
             row += 1
         }
 

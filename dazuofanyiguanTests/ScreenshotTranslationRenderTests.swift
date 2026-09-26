@@ -294,6 +294,28 @@ struct ScreenshotTranslationLayoutTests {
         #expect(drawn.usedRect.height > 0)
     }
 
+    /// 审核第八轮（#12）：一个字都放不下时 TextKit 照样每行排一个字、字伸出容器（`usedRect` 却还是容器那么宽），
+    /// 折行那一步只查排全和高度，就收下了伸出去的排法。要么横着放得下，要么截断成一行（画的时候按框裁）。
+    @Test func narrowLabelIsNotWrappedWithGlyphsWiderThanTheSpace() throws {
+        let source = block("安装", lines: [CGRect(x: 20, y: 20, width: 3, height: 17)], size: 24, limits: .init(minX: 20, maxX: 23, maxY: 200))
+        let placement = try #require(ScreenshotTranslationLayout.plan([source], canvas: CGSize(width: 400, height: 300)).first)
+        let string = ScreenshotTranslationLayout.attributedString(
+            placement.text, fontSize: placement.fontSize, weight: placement.weight, color: .black,
+            alignment: placement.alignment, lineHeight: placement.lineHeight, baselineOffset: placement.baselineOffset
+        )
+        let drawn = ScreenshotTranslationLayout.TextLayout(
+            string, size: placement.frame.size, exclusions: placement.exclusions, maximumLines: placement.maximumLines
+        )
+        #expect(placement.maximumLines == 1 || drawn.widestLine <= placement.frame.width + 0.5, "字伸出了排好的框：\(placement)，最宽一行 \(drawn.widestLine)")
+
+        // 截断成一行时，第一个字加省略号要放得进框里：放不下就接着缩，不能大字号截断、画的时候被裁掉半个字。
+        let roomy = block("安装应用程序", lines: [CGRect(x: 20, y: 20, width: 20, height: 17)], size: 24, limits: .init(minX: 20, maxX: 40, maxY: 42, minY: 18))
+        let truncated = try #require(ScreenshotTranslationLayout.plan([roomy], canvas: CGSize(width: 400, height: 300)).first)
+        #expect(truncated.maximumLines == 1)
+        let shown = ScreenshotTranslationLayout.systemMeasure("安…", truncated.fontSize, truncated.weight, nil, nil, []).size.width
+        #expect(shown <= truncated.frame.width.rounded(.up), "\(truncated.fontSize)pt 的「安…」宽 \(shown)，框只有 \(truncated.frame.width)")
+    }
+
     /// 同上，段落：绕着障碍排不全时不能当成放得下；缩到最小还排不全，就不绕了——宁可压到障碍，也不能让译文少一截。
     @Test func paragraphThatCannotBeLaidOutAroundObstaclesStopsAvoidingThem() throws {
         // 一有要绕开的地方就排不全（TextKit 半路停下，量出来只有一行）。
@@ -912,8 +934,9 @@ struct ScreenshotTranslationRendererTests {
         #expect(try maxDifference(shot.cgImage, output, in: CGRect(x: origin.x, y: origin.y, width: divider.minX - origin.x - 1, height: 30)) > 0, "原文没换掉")
     }
 
-    /// 审核第六轮后自查（#12）：行距紧、第二行的行框往上伸进第一行（Vision 的行框会忽高忽低）时，两行的墨迹带
-    /// 叠在一起（各自扩进了对方）。按两行中线分开抹会削进第一行自己的字，它比第二行长出来的那一截，字的下沿漏抹。
+    /// 审核第六轮后自查（#12）：行距紧到上下两行的字碰在一起、第二行的行框又往上伸进第一行（Vision 的行框会忽高忽低）时，
+    /// 两行的墨迹带叠在一起。按两行中线分开抹会削进第一行自己的字，它比第二行长出来的那一截，字的下沿漏抹。
+    /// （中间隔着空白的，第八轮起墨迹带停在空白这边，不再叠在一起。）
     @Test func tightParagraphLinesAreErasedCompletely() throws {
         let font = NSFont.systemFont(ofSize: 14)
         let size = CGSize(width: 300, height: 60)
@@ -922,7 +945,7 @@ struct ScreenshotTranslationRendererTests {
             CGRect(x: rect.minX / size.width, y: 1 - rect.maxY / size.height, width: rect.width / size.width, height: rect.height / size.height)
         }
         let white = PixelBuffer.RGB(r: 255, g: 255, b: 255)
-        for (first, second, pitch) in [("gypqgypqgypqgypqgypqgypq", "ÂÊÎÔ", CGFloat(14)), ("排版引擎在紧凑的段落里测量墨迹带", "中文短行", 15)] {
+        for (first, second, pitch) in [("gypqgypqgypqgypqgypqgypq", "ÂÊÎÔ", CGFloat(13)), ("排版引擎在紧凑的段落里测量墨迹带", "中文短行", 13)] {
             let shot = scene(width: size.width, height: size.height) {
                 NSColor.white.setFill()
                 NSRect(origin: .zero, size: size).fill()
@@ -952,6 +975,71 @@ struct ScreenshotTranslationRendererTests {
                 }
             }
             #expect(dark == 0, "\(first)：第一行长出来的那一截还剩 \(dark) 个深色像素没抹掉")
+        }
+    }
+
+    /// 审核第八轮（#12）：窄窄的「I」夹在两条分隔线中间、左右都长不出去，译成中文时一个字都放不下：TextKit 照样每行排
+    /// 一个字、字伸出容器，折行那一步原来只查排全和高度就收下了，画的时候又不裁，字压到旁边的分隔线上。
+    @Test func translationNeverDrawsOverNeighborsWhenNotEvenOneGlyphFits() throws {
+        let size = CGSize(width: 200, height: 140)
+        let origin = CGPoint(x: 40, y: 14)
+        let glyph = CTLineGetBoundsWithOptions(
+            CTLineCreateWithAttributedString(NSAttributedString(string: "I", attributes: [.font: NSFont.systemFont(ofSize: 24)])), .useGlyphPathBounds
+        )
+        let inkMinX = origin.x + glyph.minX, inkMaxX = origin.x + glyph.maxX
+        let left = CGRect(x: floor(inkMinX) - 3, y: 4, width: 1, height: 132)
+        let right = CGRect(x: ceil(inkMaxX) + 2, y: 4, width: 1, height: 132)
+        let shot = scene(width: size.width, height: size.height) {
+            NSColor.white.setFill()
+            NSRect(origin: .zero, size: size).fill()
+            text("I", at: origin, size: 24)
+            NSColor(white: 0.3, alpha: 1).setFill()
+            left.fill()
+            right.fill()
+        }
+        let box = CGRect(x: inkMinX - 0.5, y: origin.y + 4, width: inkMaxX - inkMinX + 1, height: 20)
+        let block = VisionOCRService.OCRBlock(text: "I", lines: [.init(
+            text: "I",
+            boundingBox: CGRect(x: box.minX / size.width, y: 1 - box.maxY / size.height, width: box.width / size.width, height: box.height / size.height)
+        )])
+        let output = try #require(ScreenshotTranslationRenderer.render(.init(image: shot.cgImage, pointSize: size, blocks: [block], translations: [block.id: "安装"])))
+        #expect(try maxDifference(shot.cgImage, output, in: left) == 0, "左边的分隔线被动了")
+        #expect(try maxDifference(shot.cgImage, output, in: right) == 0, "右边的分隔线被动了")
+        #expect(try maxDifference(shot.cgImage, output, in: CGRect(x: inkMinX, y: origin.y + 5, width: inkMaxX - inkMinX, height: 16)) > 0, "原文没换掉")
+    }
+
+    /// 审核第八轮（#12）：行距紧的上下两行分在两段里（句末标点、下一行大写开头都会断开），只翻上面那段时，
+    /// 它的墨迹带原来会隔着空白扩进下一行，抹字连下一段的字一起抹掉。
+    @Test func erasingOneBlockKeepsTheUntranslatedBlockBelowIntact() throws {
+        let font = NSFont.systemFont(ofSize: 14)
+        let size = CGSize(width: 300, height: 60)
+        func width(_ string: String) -> CGFloat { NSAttributedString(string: string, attributes: [.font: font]).size().width }
+        func normalized(_ rect: CGRect) -> CGRect {
+            CGRect(x: rect.minX / size.width, y: 1 - rect.maxY / size.height, width: rect.width / size.width, height: rect.height / size.height)
+        }
+        let first = "gypqgypqgypqgypqgypq", second = "Hjklmnop Hjklmnop"
+        // 15pt：两行的字之间隔着一两个像素的空白，下面那段一个像素都不能动。
+        // 13pt：两行的字碰在一起，交界处分不清是谁的，按中线各让一半；下面那段的字身（x 高度以下）不能被抹。
+        //       这时上面那行的墨迹带扩进了下一行、中心偏下，画上去的字也会跟着偏一点，所以只画一个点，只查抹字。
+        for (pitch, wholeLine) in [(CGFloat(15), true), (13, false)] {
+            let shot = scene(width: size.width, height: size.height) {
+                NSColor.white.setFill()
+                NSRect(origin: .zero, size: size).fill()
+                text(first, at: CGPoint(x: 10, y: 8), size: 14)
+                text(second, at: CGPoint(x: 10, y: 8 + pitch), size: 14)
+            }
+            let upper = VisionOCRService.OCRBlock(text: first, lines: [.init(text: first, boundingBox: normalized(CGRect(x: 10, y: 9.5, width: width(first), height: 13.7)))])
+            let lowerLine = VisionOCRService.OCRLine(text: second, boundingBox: normalized(CGRect(x: 10, y: 9.5 + pitch, width: width(second), height: 13.7)))
+            let lower = VisionOCRService.OCRBlock(text: second, lines: [lowerLine])
+            let output = try #require(ScreenshotTranslationRenderer.render(.init(
+                image: shot.cgImage, pointSize: size, blocks: [upper, lower], translations: [upper.id: wholeLine ? "短句" : "."]
+            )))
+            let ink = ScreenshotTranslationRenderer.lineInk(of: lowerLine, in: try #require(PixelBuffer(image: shot.cgImage))).rect
+            let baseline = 8 + pitch + font.ascender
+            let top = wholeLine ? ink.minY / 2 : baseline - font.xHeight
+            let region = CGRect(x: 10, y: top, width: width(second) + 2, height: size.height - top)
+            #expect(try maxDifference(shot.cgImage, output, in: region) == 0, "行距 \(pitch)：没翻的下一段被抹了（从 y=\(top) 往下）")
+            #expect(try maxDifference(shot.cgImage, output, in: CGRect(x: 60, y: 12, width: 100, height: 8)) > 0, "行距 \(pitch)：上面那段没换掉")
         }
     }
 
