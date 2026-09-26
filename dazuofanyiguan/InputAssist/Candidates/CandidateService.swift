@@ -189,7 +189,7 @@ final class CandidateService {
                 apiKey: apiKey,
                 appleTranslationCoordinator: coordinator,
                 onRateLimit: { rateLimit in
-                    log?.warn("Input Assist 遇到限流（\(rateLimit.apiCode)），2 秒后重试")
+                    log?.warn("选区翻译遇到限流（\(rateLimit.apiCode)），2 秒后重试")
                     try await Task.sleep(nanoseconds: 2_000_000_000)
                 }
             )
@@ -224,7 +224,7 @@ final class CandidateService {
         do {
             return try KeychainStore.getString(for: "openAIAPIKey")
         } catch {
-            log?.error("Input Assist 读取 Keychain 失败：\(error.localizedDescription)")
+            log?.error("选区翻译读取钥匙串失败：\(error.localizedDescription)")
             return nil
         }
     }

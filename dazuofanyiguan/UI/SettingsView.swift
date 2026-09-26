@@ -258,7 +258,7 @@ struct SettingsView: View {
         do {
             draftAPIKey = (try KeychainStore.getString(for: "openAIAPIKey")) ?? ""
         } catch {
-            log.error("读取 Keychain 失败：\(error.localizedDescription)")
+            log.error("读取钥匙串失败：\(error.localizedDescription)")
         }
 
         // 权限暂不可用时不永久改写用户偏好，只停止运行中的全局热键。
@@ -412,7 +412,7 @@ struct SettingsView: View {
             log.info("API Key 已清除")
             presentAlert(title: "已清除", message: "API Key 已从系统钥匙串中删除。")
         } catch {
-            log.error("清除 Keychain 失败：\(error.localizedDescription)")
+            log.error("清除钥匙串失败：\(error.localizedDescription)")
             presentAlert(title: "清除失败", message: error.localizedDescription)
         }
     }

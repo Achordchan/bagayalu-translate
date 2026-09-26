@@ -132,7 +132,7 @@ final class InputAssistCoordinator: ObservableObject {
             hotkeyMonitor.unregister()
             selectionMonitor.stop()
             lastStatusMessage = "需要辅助功能权限才能读取和替换选中文本"
-            log?.warn("Input Assist 未启动：当前构建尚未获得辅助功能权限")
+            log?.warn("选区翻译未启动：尚未获得辅助功能权限")
             return
         }
 
@@ -141,7 +141,7 @@ final class InputAssistCoordinator: ObservableObject {
 
         if settings.isSelectionAutoShowEnabled {
             if !selectionMonitor.start() {
-                log?.warn("Input Assist 无法启动选区自动显示监听")
+                log?.warn("选区翻译无法开始监听选中文字")
             }
         } else {
             selectionMonitor.stop()
@@ -179,7 +179,7 @@ final class InputAssistCoordinator: ObservableObject {
 
         let identity = InputAssistAppIdentity.frontmost()
         guard allowsApplication(identity) else {
-            log?.info("Input Assist 跳过当前应用（应用范围设置）")
+            log?.info("选区翻译已跳过当前应用（按「应用范围」设置）")
             // 原来这里是静默返回的：用户在被排除的应用里按快捷键，什么都不会发生，
             // 也无从知道是被自己的设置挡掉的。
             toast?.show("当前应用在选区翻译的排除列表中", style: .info)
@@ -270,12 +270,12 @@ final class InputAssistCoordinator: ObservableObject {
         // 用户也可能在这 200ms 里刚好把这个应用加进了黑名单。
         let identity = InputAssistAppIdentity.frontmost()
         guard allowsApplication(identity) else {
-            log?.info("Input Assist 跳过当前应用（应用范围设置）")
+            log?.info("选区翻译已跳过当前应用（按「应用范围」设置）")
             return
         }
 
         guard let capture = InputAssistAXTextCapture.captureSelectedText() else {
-            log?.warn("Input Assist 打开辅助功能树后仍未读到选中文本")
+            log?.warn("选区翻译未能读取选中的文字")
             toast?.show("已为当前应用开启辅助功能读取，请重新选中一次文字", style: .info)
             return
         }
@@ -381,7 +381,7 @@ final class InputAssistCoordinator: ObservableObject {
             showsCacheBadge: settings.showsCacheBadge,
             commitMode: commitMode
         ) else {
-            log?.error("Input Assist 无法安装候选按键拦截，已取消本次触发")
+            log?.error("选区翻译无法接管候选快捷键，已取消本次操作")
             currentSession = nil
             currentRequest = nil
             return
@@ -503,15 +503,15 @@ final class InputAssistCoordinator: ObservableObject {
             case .editorPaste: metrics.editorPasteCount += 1
             case .alreadyMatching: metrics.alreadyMatchingCount += 1
             }
-            log?.info("Input Assist 原位替换完成（\(strategy.rawValue)）")
+            log?.info("选区翻译已替换原文（\(strategy.rawValue)）")
             return true
         case .aborted(let reason):
             metrics.safeAbortCount += 1
-            log?.warn("Input Assist 放弃原位替换：\(reason.rawValue)")
+            log?.warn("选区翻译放弃替换原文：\(reason.rawValue)")
             return false
         case .failed(let message):
             metrics.safeAbortCount += 1
-            log?.warn("Input Assist 原位替换不可用：\(message)")
+            log?.warn("选区翻译无法替换原文：\(message)")
             return false
         }
     }

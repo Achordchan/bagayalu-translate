@@ -93,7 +93,7 @@ final class TranslatorViewModel: ObservableObject {
     ) async throws {
         let base = "请求过多（\(rateLimit.apiCode)）：\(rateLimit.apiMessage)"
         lastErrorMessage = base
-        log.warn("翻译遇到限流：\(base)，2秒后重试")
+        log.warn("翻译遇到限流：\(base)，2 秒后重试")
 
         if feedbackMode == .standard {
             toast.show(base, style: .warning, duration: 1.0)
@@ -197,7 +197,7 @@ final class TranslatorViewModel: ObservableObject {
             do {
                 apiKey = try KeychainStore.getString(for: "openAIAPIKey")
             } catch {
-                log.error("读取 Keychain 失败：\(error.localizedDescription)")
+                log.error("读取钥匙串失败：\(error.localizedDescription)")
                 apiKey = nil
             }
         } else {
@@ -205,9 +205,9 @@ final class TranslatorViewModel: ObservableObject {
         }
 
         if let estimated = estimatedAITokenCount {
-            log.info("开始翻译（引擎：\(request.engineTitle) sl=\(request.sourceLanguageCode) tl=\(request.targetLanguageCode) 字数=\(request.rawText.count) 预计Token=\(estimated)）")
+            log.info("开始翻译（\(request.engineTitle)，\(request.sourceLanguageCode) → \(request.targetLanguageCode)，\(request.rawText.count) 字，预计 \(estimated) Token）")
         } else {
-            log.info("开始翻译（引擎：\(request.engineTitle) sl=\(request.sourceLanguageCode) tl=\(request.targetLanguageCode) 字数=\(request.rawText.count)）")
+            log.info("开始翻译（\(request.engineTitle)，\(request.sourceLanguageCode) → \(request.targetLanguageCode)，\(request.rawText.count) 字）")
         }
         let start = Date()
 

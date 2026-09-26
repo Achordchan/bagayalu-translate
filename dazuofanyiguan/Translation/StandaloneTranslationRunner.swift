@@ -31,7 +31,7 @@ enum StandaloneTranslationRunner {
             do {
                 apiKey = try KeychainStore.getString(for: "openAIAPIKey")
             } catch {
-                log.error("读取 Keychain 失败：\(error.localizedDescription)")
+                log.error("读取钥匙串失败：\(error.localizedDescription)")
                 apiKey = nil
             }
         } else {
@@ -45,14 +45,14 @@ enum StandaloneTranslationRunner {
             onAITextUpdate: onAITextUpdate,
             onRateLimit: { rateLimit in
                 let base = "请求过多（\(rateLimit.apiCode)）：\(rateLimit.apiMessage)"
-                log.warn("Mini 翻译遇到限流：\(base)，2秒后重试")
+                log.warn("Mini 翻译遇到限流：\(base)，2 秒后重试")
                 try await Task.sleep(nanoseconds: 2_000_000_000)
                 log.info("Mini 限流倒计时结束，开始重试")
             }
         )
 
         let cost = Int(Date().timeIntervalSince(start) * 1000)
-        log.info("Mini 独立翻译完成（\(cost)ms）")
+        log.info("Mini 翻译完成（\(cost)ms）")
         return result
     }
 }
