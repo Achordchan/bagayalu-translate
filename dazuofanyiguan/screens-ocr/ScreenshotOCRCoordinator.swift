@@ -140,6 +140,8 @@ final class ScreenshotOCRCoordinator: ObservableObject {
             },
             onFinishTapped: { [weak self] in
                 Task { @MainActor in
+                    // 按钮这时是灰的；真点进来了也别往下走，什么都没复制就退出，用户会以为复制好了。
+                    guard self?.session?.canExport == true else { return }
                     await self?.finishCaptureToPasteboardIfPossible(settings: settings, log: log)
                     try? await Task.sleep(nanoseconds: 650_000_000)
                     self?.cancelAll()
@@ -310,6 +312,7 @@ final class ScreenshotOCRCoordinator: ObservableObject {
     private func pinSelectionIfPossible(settings: AppSettings, log: LogStore, toast: ToastCenter) async {
         guard let session else { return }
         guard let selectionWindow else { return }
+        guard session.canExport else { return }
 
         if session.capturedImage == nil {
             let rectInScreen = selectionWindow.selectionRectInScreen().integral
@@ -322,7 +325,9 @@ final class ScreenshotOCRCoordinator: ObservableObject {
                 }
             }
         }
-        guard let image = session.capturedImage else { return }
+        // 翻完了钉的是贴了译文的图：钉图就是为了一边看译文一边做别的事。
+        guard let export = session.imageForExport() else { return }
+        let image = export.image
 
         let rectInScreen = selectionWindow.selectionRectInScreen().integral
         let maxW: CGFloat = 520
@@ -356,7 +361,11 @@ final class ScreenshotOCRCoordinator: ObservableObject {
         pinnedWindows.append(pinned)
         pinned.orderFrontRegardless()
         pinned.makeKey()
-        session.showHUD("已钉到屏幕", style: .success)
+        if export.kind == .originalBecauseOverlayFailed {
+            session.showHUD("译文图没画出来，钉的是原截图", style: .warning)
+        } else {
+            session.showHUD("已钉到屏幕", style: .success)
+        }
 
         // 钉图后退出截图翻译，但保留钉图窗口。
         try? await Task.sleep(nanoseconds: 420_000_000)
@@ -392,19 +401,25 @@ final class ScreenshotOCRCoordinator: ObservableObject {
             }
         }
 
-        guard let image = session.capturedImage else { return }
+        // 选区里显示的是哪张就复制哪张：翻完了是贴了译文的图。
+        guard let export = session.imageForExport() else { return }
+        let image = export.image
 
         // 用 PNG 数据写入剪贴板，保证“原汁原味”的像素输出（避免某些情况下写 NSImage 导致边缘异常）。
+        let pb = NSPasteboard.general
+        pb.clearContents()
         if let data = pngData(from: image) {
-            let pb = NSPasteboard.general
-            pb.clearContents()
             pb.setData(data, forType: .png)
-            session.showHUD("截图已保存到剪贴板", style: .success)
         } else {
-            let pb = NSPasteboard.general
-            pb.clearContents()
             pb.writeObjects([image])
-            session.showHUD("截图已保存到剪贴板", style: .success)
+        }
+        switch export.kind {
+        case .original:
+            session.showHUD("截图已复制到剪贴板", style: .success)
+        case .translated:
+            session.showHUD("译文截图已复制到剪贴板", style: .success)
+        case .originalBecauseOverlayFailed:
+            session.showHUD("译文图没画出来，复制的是原截图", style: .warning)
         }
     }
 
@@ -571,8 +586,12 @@ final class ScreenshotOCRCoordinator: ObservableObject {
 
     /// 按当前的识别结果和译文重画回贴图。放在后台画；正在画的时候又来的请求合并成一次，画完再按最新的译文画。
     /// 画好的图对不上当前的选区（换了选区、换了源语言、重新识别了）就丢掉。
+    /// 画的这段时间 `overlayRenderPending` 为 true，「钉到屏幕」「完成」是灰的，免得拿走上一批的图。
     private func scheduleOverlayRender() {
         overlayNeedsRender = true
+        if let session, !session.overlayRenderPending {
+            session.overlayRenderPending = true
+        }
         guard overlayRenderTask == nil else { return }
         overlayRenderTask = Task { @MainActor [weak self] in
             while let self, self.overlayNeedsRender {
@@ -596,6 +615,8 @@ final class ScreenshotOCRCoordinator: ObservableObject {
                 session.applyOverlayRender(rendered.map { NSImage(cgImage: $0, size: pointSize) })
             }
             self?.overlayRenderTask = nil
+            // 没有要画的了。换过会话的话旧会话已经扔掉，清当前这个就够。
+            self?.session?.overlayRenderPending = false
         }
     }
 
