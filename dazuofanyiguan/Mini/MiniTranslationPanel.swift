@@ -142,7 +142,9 @@ final class MiniTranslationPanel: NSPanel {
 
         isOpaque = false
         backgroundColor = .clear
-        hasShadow = false
+        // 阴影交给窗口服务器画：它按内容的透明度描出圆角轮廓，画在窗口外面，不会被裁。
+        // 以前用 SwiftUI 的 `.shadow`，只留了 6pt 边距，阴影被窗口边界切成一个直角灰框。
+        hasShadow = true
         level = .floating
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         hidesOnDeactivate = false
@@ -193,6 +195,7 @@ final class MiniTranslationPanel: NSPanel {
         )
         setFrameOrigin(origin)
         orderFrontRegardless()
+        refreshShadow()
         startOutsideClickMonitoring()
     }
 
@@ -222,6 +225,14 @@ final class MiniTranslationPanel: NSPanel {
             )
         )
         setFrame(NSRect(origin: origin, size: contentSize), display: true)
+        refreshShadow()
+    }
+
+    /// 窗口阴影是按上一次画出来的内容算的；改了尺寸之后要先把新内容画出来，再让它重算，
+    /// 否则阴影还停在旧的圆角矩形上。
+    private func refreshShadow() {
+        displayIfNeeded()
+        invalidateShadow()
     }
 
     private func startOutsideClickMonitoring() {
@@ -263,6 +274,8 @@ final class MiniTranslationPanel: NSPanel {
 }
 
 private struct MiniTranslationBubbleView: View {
+    static let cornerRadius: CGFloat = 16
+
     @ObservedObject var model: MiniTranslationBubbleModel
     @Environment(\.colorScheme) private var colorScheme
 
@@ -279,15 +292,16 @@ private struct MiniTranslationBubbleView: View {
         .padding(14)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(.regularMaterial)
+            ZStack {
+                MiniTranslationBackdrop(cornerRadius: Self.cornerRadius)
+                RoundedRectangle(cornerRadius: Self.cornerRadius, style: .circular)
+                    .fill(tintColor)
+            }
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
+            RoundedRectangle(cornerRadius: Self.cornerRadius, style: .circular)
                 .strokeBorder(borderColor, lineWidth: 0.5)
         )
-        .shadow(color: shadowColor, radius: 16, x: 0, y: 6)
-        .padding(6)
         .onHover { hovering in
             model.onHoverChange?(hovering)
         }
@@ -299,10 +313,12 @@ private struct MiniTranslationBubbleView: View {
             : Color.black.opacity(0.07)
     }
 
-    private var shadowColor: Color {
+    /// 材质是透的，深色模式下压在白网页上会被透成中灰（实测 `.popover` 约 128、`.hudWindow` 约 170），
+    /// 所以深色时再垫一层黑，保证在任何背景上都是深色面板。浅色模式不需要。
+    private var tintColor: Color {
         colorScheme == .dark
-            ? Color.black.opacity(0.42)
-            : Color.black.opacity(0.13)
+            ? Color.black.opacity(0.45)
+            : Color.clear
     }
 
     private var header: some View {
@@ -396,6 +412,41 @@ private struct MiniTranslationBubbleView: View {
                 .foregroundStyle(.primary)
                 .fixedSize(horizontal: false, vertical: true)
         }
+    }
+}
+
+/// 气泡的材质底。用 `NSVisualEffectView` 而不是 SwiftUI 的 `.regularMaterial`：
+/// 圆角要靠 `maskImage` 裁，窗口服务器才会按圆角去做背后的模糊和窗口阴影。
+private struct MiniTranslationBackdrop: NSViewRepresentable {
+    let cornerRadius: CGFloat
+
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        view.material = .popover
+        view.blendingMode = .behindWindow
+        view.state = .active
+        view.maskImage = Self.roundedMask(cornerRadius: cornerRadius)
+        return view
+    }
+
+    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {}
+
+    /// 可拉伸的圆角蒙版：四角按 capInsets 保持原样，中间拉伸，所以窗口改尺寸时不用重做。
+    private static func roundedMask(cornerRadius: CGFloat) -> NSImage {
+        let edge = cornerRadius * 2 + 1
+        let image = NSImage(size: NSSize(width: edge, height: edge), flipped: false) { rect in
+            NSColor.black.setFill()
+            NSBezierPath(roundedRect: rect, xRadius: cornerRadius, yRadius: cornerRadius).fill()
+            return true
+        }
+        image.capInsets = NSEdgeInsets(
+            top: cornerRadius,
+            left: cornerRadius,
+            bottom: cornerRadius,
+            right: cornerRadius
+        )
+        image.resizingMode = .stretch
+        return image
     }
 }
 
