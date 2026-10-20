@@ -197,7 +197,10 @@ jobs:
             "dist/$ZIP" "dist/Tolk-${VERSION}-macos.dmg" dist/appcast.xml; then
             if [ "$REPLACING" = true ]; then
               echo "发布失败，正在用备份恢复旧的 $TAG" >&2
-              mapfile -t OLD_FILES < "$BACKUP/files.txt"
+              # 新建失败时可能留下半成品（草稿或缺文件的 Release），先清掉再恢复；macOS 自带 Bash 3.2 没有 mapfile。
+              gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes >/dev/null 2>&1 || true
+              OLD_FILES=()
+              while IFS= read -r f; do OLD_FILES+=("$f"); done < "$BACKUP/files.txt"
               gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Tolk $TAG" --notes-file "$BACKUP/notes.md" --latest "${OLD_FILES[@]}" || echo "恢复也失败了，需要手动处理" >&2
             fi
             exit 1
