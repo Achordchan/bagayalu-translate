@@ -39,16 +39,13 @@ jobs:
         run: |
           [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "版本号必须是 x.y.z" >&2; exit 1; }
       - uses: actions/checkout@v4
-      - name: Fetch Tolk at the release tag
-        uses: actions/checkout@v4
+      # Tolk 仓库的发布产物只当"数据"下载，不 checkout、不执行它的任何代码；
+      # Sparkle 私钥只交给 Sparkle 官方的 sign_update（固定版本和哈希）。
+      - uses: actions/setup-python@v5
         with:
-          repository: Achordchan/tolk
-          ref: ${{ env.TAG }}
-          token: ${{ env.TOLK_TOKEN }}
-          path: tolk
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.27.1"
+          python-version: "3.12"
+      - name: Install verification dependencies
+        run: python -m pip install "cryptography>=41.0.0"
       - name: Download Tolk's macOS app
         env:
           GH_TOKEN: ${{ env.TOLK_TOKEN }}
@@ -129,9 +126,13 @@ jobs:
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then echo "$TAG 已存在，请提升版本号" >&2; exit 1; fi
           # Sparkle 比较构建号，必须大于线上已有的（旧版最高 141）：先看线上现在的 appcast，
           # 不是严格更大就拒绝，免得补发旧版本把更新源倒退，藏掉已经发布的新版本。
-          LIVE="$(curl -fsSL "https://github.com/$GITHUB_REPOSITORY/releases/latest/download/appcast.xml" 2>/dev/null \
-            | sed -n 's|.*<sparkle:version>\([0-9][0-9]*\)</sparkle:version>.*|\1|p' | sort -n | tail -1 || true)"
-          if [ -n "$LIVE" ] && [ "$BUILD" -le "$LIVE" ]; then
+          # 取不到或解析不出线上构建号时一律失败，不当成"没有旧版本"放行（本仓库一直有旧版 appcast）。
+          APPCAST="$RUNNER_TEMP/live-appcast.xml"
+          curl -fsSL --retry 3 --retry-delay 2 -o "$APPCAST" "https://github.com/$GITHUB_REPOSITORY/releases/latest/download/appcast.xml" \
+            || { echo "拿不到线上 appcast，无法确认构建号不会倒退，已停止" >&2; exit 1; }
+          LIVE="$(sed -n 's|.*<sparkle:version>\([0-9][0-9]*\)</sparkle:version>.*|\1|p' "$APPCAST" | sort -n | tail -1)"
+          [[ "$LIVE" =~ ^[0-9]+$ ]] || { echo "线上 appcast 里读不到构建号，已停止" >&2; exit 1; }
+          if [ "$BUILD" -le "$LIVE" ]; then
             echo "线上 appcast 的构建号是 $LIVE，要发布的 $BUILD 不是严格更大，拒绝（避免更新源倒退）" >&2; exit 1
           fi
           ZIP="bagayalu-translate-v${VERSION}-universal.zip"
@@ -139,13 +140,20 @@ jobs:
           ROOT="$RUNNER_TEMP/dmg-root"; mkdir -p "$ROOT"
           ditto "$APP" "$ROOT/Tolk.app"; ln -s /Applications "$ROOT/Applications"
           hdiutil create -volname "Tolk $VERSION" -srcfolder "$ROOT" -ov -format UDZO "dist/Tolk-${VERSION}-macos.dmg"
-          cd tolk
-          go run ./cmd/tolk-release notes -version "$VERSION" -changelog CHANGELOG.md -out ../dist/release-notes.md
+          GH_TOKEN="$TOLK_TOKEN" gh release view "$TAG" --repo Achordchan/tolk --json body -q .body > dist/release-notes.md
+          SPARKLE_VERSION=2.9.4
+          SPARKLE_SHA256=ce89daf967db1e1893ed3ebd67575ed82d3902563e3191ca92aaec9164fbdef9
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/sparkle.tar.xz" "https://github.com/sparkle-project/Sparkle/releases/download/$SPARKLE_VERSION/Sparkle-$SPARKLE_VERSION.tar.xz"
+          [ "$(shasum -a 256 "$RUNNER_TEMP/sparkle.tar.xz" | awk '{ print $1 }')" = "$SPARKLE_SHA256" ] || { echo "Sparkle 压缩包哈希不对" >&2; exit 1; }
+          mkdir -p "$RUNNER_TEMP/sparkle" && tar -xf "$RUNNER_TEMP/sparkle.tar.xz" -C "$RUNNER_TEMP/sparkle"
+          SIGN_OUT="$(printf '%s' "$SPARKLE_PRIVATE_KEY" | "$RUNNER_TEMP/sparkle/bin/sign_update" --ed-key-file - "dist/$ZIP")"
+          SIG="$(sed -n 's/.*sparkle:edSignature="\([^"]*\)".*/\1/p' <<< "$SIGN_OUT")"
+          [ -n "$SIG" ] || { echo "sign_update 没有给出签名" >&2; exit 1; }
+          PUB="$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' Configuration/App-Info.plist)"
           # 自检：签名必须能被旧版 bagayalu 内置的 SUPublicEDKey 验证，私钥不对会在这里失败。
-          go run ./cmd/tolk-release appcast -legacy -zip "../dist/$ZIP" -version "$VERSION" -build "$BUILD" \
-            -url "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/$ZIP" \
-            -notes ../dist/release-notes.md -out ../dist/appcast.xml
-          cd ..
+          python3 scripts/bridge_appcast.py --zip "dist/$ZIP" --version "$VERSION" --build "$BUILD" \
+            --url "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/$ZIP" \
+            --notes dist/release-notes.md --signature "$SIG" --pub "$PUB" --out dist/appcast.xml
           xmllint --noout dist/appcast.xml
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Tolk $TAG" --notes-file dist/release-notes.md --latest \
             "dist/$ZIP" "dist/Tolk-${VERSION}-macos.dmg" dist/appcast.xml
