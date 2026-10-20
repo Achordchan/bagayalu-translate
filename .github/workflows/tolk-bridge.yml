@@ -117,7 +117,7 @@ jobs:
         run: |
           set -euo pipefail
           [ -n "$SPARKLE_PRIVATE_KEY" ] || { echo "缺少 SPARKLE_PRIVATE_KEY" >&2; exit 1; }
-          if gh release view "$TAG" >/dev/null 2>&1; then echo "$TAG 已存在，请提升版本号" >&2; exit 1; fi
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then echo "$TAG 已存在，请提升版本号" >&2; exit 1; fi
           # Sparkle 比较构建号，必须大于线上已有的（旧版最高 141）。
           BUILD="$(( ${VERSION%%.*} * 10000 + $(echo "$VERSION" | cut -d. -f2) * 100 + $(echo "$VERSION" | cut -d. -f3) ))"
           ZIP="bagayalu-translate-v${VERSION}-universal.zip"
@@ -133,5 +133,5 @@ jobs:
             -notes ../dist/release-notes.md -out ../dist/appcast.xml
           cd ..
           xmllint --noout dist/appcast.xml
-          gh release create "$TAG" --target "$GITHUB_SHA" --title "Tolk $TAG" --notes-file dist/release-notes.md --latest \
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Tolk $TAG" --notes-file dist/release-notes.md --latest \
             "dist/$ZIP" "dist/Tolk-${VERSION}-macos.dmg" dist/appcast.xml
