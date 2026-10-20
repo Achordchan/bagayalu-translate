@@ -65,9 +65,8 @@ jobs:
           BUNDLE_BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "work/大佐翻译官v1.app/Contents/Info.plist")"
           [ "$BUNDLE_BUILD" = "$BUILD" ] || { echo "应用的 CFBundleVersion=$BUNDLE_BUILD，与要写进 appcast 的构建号 $BUILD 不一致" >&2; exit 1; }
           echo "BUILD=$BUILD" >> "$GITHUB_ENV"
-          HELPER="$(find "work/大佐翻译官v1.app" -name tolk-helper -type f -print -quit)"
-          [ -n "$HELPER" ] || { echo "应用里没有 tolk-helper" >&2; exit 1; }
-          echo "HELPER=$GITHUB_WORKSPACE/$HELPER" >> "$GITHUB_ENV"
+          # 压缩包里取出的路径不写进 $GITHUB_ENV（路径里的换行可以注入环境变量）；后面的步骤各自在 shell 变量里重新查找。
+          [ -n "$(find "work/大佐翻译官v1.app" -name tolk-helper -type f -print -quit)" ] || { echo "应用里没有 tolk-helper" >&2; exit 1; }
       - name: Re-sign with this repo's Apple Development certificate
         env:
           SIGNING_CERT_P12_BASE64: ${{ secrets.MACOS_DEV_CERT_P12_BASE64 }}
@@ -102,6 +101,8 @@ jobs:
           security list-keychains -d user -s "$KEYCHAIN" ${ORIGINAL_KEYCHAINS[@]+"${ORIGINAL_KEYCHAINS[@]}"}
           IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" | awk '/"Apple Development:/ { print $2; exit }')"
           [ -n "$IDENTITY" ] || { echo "没有有效的 Apple Development 签名身份" >&2; exit 1; }
+          HELPER="$(find "$APP" -name tolk-helper -type f -print -quit)"
+          [ -n "$HELPER" ] || { echo "应用里没有 tolk-helper" >&2; exit 1; }
           codesign --force --sign "$IDENTITY" --timestamp=none "$HELPER"
           codesign --force --deep --sign "$IDENTITY" --timestamp=none "$APP"
       - name: Verify the identity is unchanged
@@ -116,6 +117,9 @@ jobs:
           [ "$ACTUAL" = "$EXPECTED_DESIGNATED_REQUIREMENT" ] || { echo "签名身份要求与固定值不一致：$ACTUAL" >&2; exit 1; }
           ARCHS="$(lipo -archs "$APP/Contents/MacOS/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Contents/Info.plist")")"
           grep -q arm64 <<< "$ARCHS" && grep -q x86_64 <<< "$ARCHS" || { echo "不是通用二进制：$ARCHS" >&2; exit 1; }
+          HELPER="$(find "$APP" -name tolk-helper -type f -print -quit)"
+          HELPER_ARCHS="$(lipo -archs "$HELPER")"
+          grep -q arm64 <<< "$HELPER_ARCHS" && grep -q x86_64 <<< "$HELPER_ARCHS" || { echo "tolk-helper 不是通用二进制：$HELPER_ARCHS" >&2; exit 1; }
       - name: Package, sign the appcast and publish
         env:
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
@@ -151,9 +155,12 @@ jobs:
           [ -n "$SIG" ] || { echo "sign_update 没有给出签名" >&2; exit 1; }
           PUB="$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' Configuration/App-Info.plist)"
           # 自检：签名必须能被旧版 bagayalu 内置的 SUPublicEDKey 验证，私钥不对会在这里失败。
+          # 最低系统版本：以应用自己声明的为准；没声明就用旧版 bagayalu 的最低要求 15.1（不会把任何旧用户排除在外）。
+          MIN_OS="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$APP/Contents/Info.plist" 2>/dev/null || echo 15.1)"
+          [[ "$MIN_OS" =~ ^[0-9]+(\.[0-9]+){1,2}$ ]] || { echo "LSMinimumSystemVersion 格式不对：$MIN_OS" >&2; exit 1; }
           python3 scripts/bridge_appcast.py --zip "dist/$ZIP" --version "$VERSION" --build "$BUILD" \
             --url "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/$ZIP" \
-            --notes dist/release-notes.md --signature "$SIG" --pub "$PUB" --out dist/appcast.xml
+            --notes dist/release-notes.md --signature "$SIG" --pub "$PUB" --min-os "$MIN_OS" --out dist/appcast.xml
           xmllint --noout dist/appcast.xml
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Tolk $TAG" --notes-file dist/release-notes.md --latest \
             "dist/$ZIP" "dist/Tolk-${VERSION}-macos.dmg" dist/appcast.xml
