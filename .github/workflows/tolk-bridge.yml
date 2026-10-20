@@ -12,11 +12,6 @@ on:
         description: Tolk 的版本号（如 2.0.0），对应 Achordchan/tolk 的 v2.0.0 Release
         required: true
         type: string
-      replace_published:
-        description: 本仓库已经发布过这个版本（比如发布出去的有问题）时，先删掉它再重发；不勾选就拒绝
-        required: false
-        default: false
-        type: boolean
 
 permissions:
   contents: write
@@ -138,26 +133,16 @@ jobs:
         run: |
           set -euo pipefail
           [ -n "$SPARKLE_PRIVATE_KEY" ] || { echo "缺少 SPARKLE_PRIVATE_KEY" >&2; exit 1; }
-          # 只有"本仓库当前最新的就是这个 tag"时才允许替换：不会删掉不在线上的旧版本，也不会动更新源里更新的版本。
-          REPLACING=false
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            [ "${{ inputs.replace_published }}" = "true" ] || { echo "$TAG 已存在，请提升版本号（或勾选 replace_published 删掉重发）" >&2; exit 1; }
-            LATEST_TAG="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName)"
-            [ "$LATEST_TAG" = "$TAG" ] || { echo "最新 Release 是 $LATEST_TAG，不是 $TAG，只能替换当前的最新 Release" >&2; exit 1; }
-            REPLACING=true
-          fi
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then echo "$TAG 已存在，请提升版本号" >&2; exit 1; fi
           # Sparkle 比较构建号，必须大于线上已有的（旧版最高 141）：先看线上现在的 appcast，
           # 不是严格更大就拒绝，免得补发旧版本把更新源倒退，藏掉已经发布的新版本。
           # 取不到或解析不出线上构建号时一律失败，不当成"没有旧版本"放行（本仓库一直有旧版 appcast）。
-          # 替换最新 Release 时，线上那个就是同一个版本，构建号相等是预期的。
           APPCAST="$RUNNER_TEMP/live-appcast.xml"
           curl -fsSL --retry 3 --retry-delay 2 -o "$APPCAST" "https://github.com/$GITHUB_REPOSITORY/releases/latest/download/appcast.xml" \
             || { echo "拿不到线上 appcast，无法确认构建号不会倒退，已停止" >&2; exit 1; }
           LIVE="$(sed -n 's|.*<sparkle:version>\([0-9][0-9]*\)</sparkle:version>.*|\1|p' "$APPCAST" | sort -n | tail -1)"
           [[ "$LIVE" =~ ^[0-9]+$ ]] || { echo "线上 appcast 里读不到构建号，已停止" >&2; exit 1; }
-          if [ "$REPLACING" = true ]; then
-            [ "$BUILD" -ge "$LIVE" ] || { echo "线上 appcast 的构建号是 $LIVE，大于要发布的 $BUILD，拒绝" >&2; exit 1; }
-          elif [ "$BUILD" -le "$LIVE" ]; then
+          if [ "$BUILD" -le "$LIVE" ]; then
             echo "线上 appcast 的构建号是 $LIVE，要发布的 $BUILD 不是严格更大，拒绝（避免更新源倒退）" >&2; exit 1
           fi
           ZIP="bagayalu-translate-v${VERSION}-universal.zip"
@@ -184,31 +169,5 @@ jobs:
             --url "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/$ZIP" \
             --notes dist/release-notes.md --signature "$SIG" --pub "$PUB" --min-os "$MIN_OS" --out dist/appcast.xml
           xmllint --noout dist/appcast.xml
-          # 到这里新的产物都已经生成并验过签。替换时先把旧 Release 的文件和说明备份下来，
-          # 删除之后如果新的发布失败，就用备份把旧的恢复回去。
-          if [ "$REPLACING" = true ]; then
-            BACKUP="$RUNNER_TEMP/release-backup"; mkdir -p "$BACKUP"
-            gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$BACKUP"
-            gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body -q .body > "$BACKUP/notes.md"
-            ls "$BACKUP"/* | grep -v '/notes.md$' > "$BACKUP/files.txt"
-            # 旧 tag 指向的提交也记下来，恢复时 tag 还要落在原来的提交上。
-            OLD_SHA="$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq .sha)"
-            [[ "$OLD_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "读不到旧 tag 的提交，已停止（还没有删除任何东西）" >&2; exit 1; }
-            gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes
-          fi
-          if ! gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Tolk $TAG" --notes-file dist/release-notes.md --latest \
-            "dist/$ZIP" "dist/Tolk-${VERSION}-macos.dmg" dist/appcast.xml; then
-            if [ "$REPLACING" = true ]; then
-              echo "发布失败，正在用备份恢复旧的 $TAG" >&2
-              # 新建失败时可能留下半成品（草稿或缺文件的 Release），先清掉再恢复；macOS 自带 Bash 3.2 没有 mapfile。
-              # 草稿 Release 按 tag 查不到，所以用接口按 tag 名列出来逐个删除（包括草稿），再清掉 tag。
-              for RID in $(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate -q ".[] | select(.tag_name == \"$TAG\") | .id"); do
-                gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$RID" >/dev/null || true
-              done
-              gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG" >/dev/null 2>&1 || true
-              OLD_FILES=()
-              while IFS= read -r f; do OLD_FILES+=("$f"); done < "$BACKUP/files.txt"
-              gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$OLD_SHA" --title "Tolk $TAG" --notes-file "$BACKUP/notes.md" --latest "${OLD_FILES[@]}" || echo "恢复也失败了，需要手动处理" >&2
-            fi
-            exit 1
-          fi
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Tolk $TAG" --notes-file dist/release-notes.md --latest \
+            "dist/$ZIP" "dist/Tolk-${VERSION}-macos.dmg" dist/appcast.xml
