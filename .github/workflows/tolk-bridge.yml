@@ -59,6 +59,12 @@ jobs:
           mv "$APP" "work/大佐翻译官v1.app"
           echo "APP=$GITHUB_WORKSPACE/work/大佐翻译官v1.app" >> "$GITHUB_ENV"
           /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "work/大佐翻译官v1.app/Contents/Info.plist" | grep -qx 'achord.dazuofanyiguan'
+          # Sparkle 比较的是应用里的 CFBundleVersion，appcast 写的构建号必须和它一致，
+          # 否则 appcast 说 20000、应用自己却是更小的号，会被 Sparkle 当成降级。
+          BUILD="$(( ${VERSION%%.*} * 10000 + $(echo "$VERSION" | cut -d. -f2) * 100 + $(echo "$VERSION" | cut -d. -f3) ))"
+          BUNDLE_BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "work/大佐翻译官v1.app/Contents/Info.plist")"
+          [ "$BUNDLE_BUILD" = "$BUILD" ] || { echo "应用的 CFBundleVersion=$BUNDLE_BUILD，与要写进 appcast 的构建号 $BUILD 不一致" >&2; exit 1; }
+          echo "BUILD=$BUILD" >> "$GITHUB_ENV"
           HELPER="$(find "work/大佐翻译官v1.app" -name tolk-helper -type f -print -quit)"
           [ -n "$HELPER" ] || { echo "应用里没有 tolk-helper" >&2; exit 1; }
           echo "HELPER=$GITHUB_WORKSPACE/$HELPER" >> "$GITHUB_ENV"
@@ -118,8 +124,13 @@ jobs:
           set -euo pipefail
           [ -n "$SPARKLE_PRIVATE_KEY" ] || { echo "缺少 SPARKLE_PRIVATE_KEY" >&2; exit 1; }
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then echo "$TAG 已存在，请提升版本号" >&2; exit 1; fi
-          # Sparkle 比较构建号，必须大于线上已有的（旧版最高 141）。
-          BUILD="$(( ${VERSION%%.*} * 10000 + $(echo "$VERSION" | cut -d. -f2) * 100 + $(echo "$VERSION" | cut -d. -f3) ))"
+          # Sparkle 比较构建号，必须大于线上已有的（旧版最高 141）：先看线上现在的 appcast，
+          # 不是严格更大就拒绝，免得补发旧版本把更新源倒退，藏掉已经发布的新版本。
+          LIVE="$(curl -fsSL "https://github.com/$GITHUB_REPOSITORY/releases/latest/download/appcast.xml" 2>/dev/null \
+            | sed -n 's|.*<sparkle:version>\([0-9][0-9]*\)</sparkle:version>.*|\1|p' | sort -n | tail -1 || true)"
+          if [ -n "$LIVE" ] && [ "$BUILD" -le "$LIVE" ]; then
+            echo "线上 appcast 的构建号是 $LIVE，要发布的 $BUILD 不是严格更大，拒绝（避免更新源倒退）" >&2; exit 1
+          fi
           ZIP="bagayalu-translate-v${VERSION}-universal.zip"
           ditto -c -k --sequesterRsrc --keepParent "$APP" "dist/$ZIP"
           ROOT="$RUNNER_TEMP/dmg-root"; mkdir -p "$ROOT"
