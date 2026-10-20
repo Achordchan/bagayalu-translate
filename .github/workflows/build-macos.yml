@@ -512,6 +512,10 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     needs: build-macos
     runs-on: ubuntu-latest
+    # 和 tolk-bridge.yml 共用同一个发布锁：两边都在改"最新 Release"的 appcast，不能同时进行。
+    concurrency:
+      group: release-feed
+      cancel-in-progress: false
     permissions:
       contents: write
 
@@ -541,6 +545,16 @@ jobs:
             find dist -type f -print >&2 || true
             exit 1
           fi
+
+          # 在发布锁里再看一次线上 appcast：新 appcast 的构建号必须严格更大，
+          # 免得（比如 Tolk 桥接发布之后）补发旧版本，把更新源倒退、藏掉已发布的更新。取不到就失败。
+          LIVE_FEED="$RUNNER_TEMP/live-appcast.xml"
+          curl -fsSL --retry 3 --retry-delay 2 -o "$LIVE_FEED" "https://github.com/$GITHUB_REPOSITORY/releases/latest/download/appcast.xml" \
+            || { echo "拿不到线上 appcast，无法确认构建号不会倒退，已停止" >&2; exit 1; }
+          LIVE="$(sed -n 's|.*<sparkle:version>\([0-9][0-9]*\)</sparkle:version>.*|\1|p' "$LIVE_FEED" | sort -n | tail -1)"
+          NEW="$(sed -n 's|.*<sparkle:version>\([0-9][0-9]*\)</sparkle:version>.*|\1|p' "$APPCAST" | sort -n | tail -1)"
+          [[ "$LIVE" =~ ^[0-9]+$ && "$NEW" =~ ^[0-9]+$ ]] || { echo "appcast 里读不到构建号（线上=$LIVE，新=$NEW）" >&2; exit 1; }
+          [ "$NEW" -gt "$LIVE" ] || { echo "新 appcast 的构建号 $NEW 不比线上的 $LIVE 更大，拒绝（避免更新源倒退）" >&2; exit 1; }
 
           # appcast 仅在 workflow_dispatch 的 build job 生成；push 构建不进入此 job。
           gh release create "v$RELEASE_VERSION" \

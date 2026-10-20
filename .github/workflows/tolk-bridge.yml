@@ -16,16 +16,16 @@ on:
 permissions:
   contents: write
 
-concurrency:
-  group: tolk-bridge
-  cancel-in-progress: false
-
 jobs:
   bridge:
     # 这个工作流会用本仓库的证书和 Sparkle 私钥签名并发布"最新 Release"，只允许在默认分支上跑：
     # 手动触发时选了别的分支也会通过 workflow_dispatch，所以这里显式拦住。
     if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
     runs-on: macos-15
+    # 和 build-macos.yml 的发布 job 共用同一个发布锁（线上构建号检查也在锁里）。
+    concurrency:
+      group: release-feed
+      cancel-in-progress: false
     env:
       VERSION: ${{ inputs.version }}
       TAG: v${{ inputs.version }}
