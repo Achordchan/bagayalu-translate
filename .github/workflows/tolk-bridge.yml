@@ -59,6 +59,12 @@ jobs:
           mv "$APP" "work/大佐翻译官v1.app"
           echo "APP=$GITHUB_WORKSPACE/work/大佐翻译官v1.app" >> "$GITHUB_ENV"
           /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "work/大佐翻译官v1.app/Contents/Info.plist" | grep -qx 'achord.dazuofanyiguan'
+          # 旧版 Sparkle 要求新应用带有和自己相同的 SUPublicEDKey，否则报"此更新未正确签名"。
+          # Tolk 自己的更新器不用这个键，所以桥接版里写入旧版的公钥（取自本仓库的 Info.plist，重新签名之前改）。
+          LEGACY_PUB="$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' Configuration/App-Info.plist)"
+          [ -n "$LEGACY_PUB" ] || { echo "读不到旧版 SUPublicEDKey" >&2; exit 1; }
+          /usr/libexec/PlistBuddy -c "Delete :SUPublicEDKey" "work/大佐翻译官v1.app/Contents/Info.plist" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Add :SUPublicEDKey string $LEGACY_PUB" "work/大佐翻译官v1.app/Contents/Info.plist"
           # Sparkle 比较的是应用里的 CFBundleVersion，appcast 写的构建号必须和它一致，
           # 否则 appcast 说 20000、应用自己却是更小的号，会被 Sparkle 当成降级。
           BUILD="$(( ${VERSION%%.*} * 10000 + $(echo "$VERSION" | cut -d. -f2) * 100 + $(echo "$VERSION" | cut -d. -f3) ))"
@@ -144,7 +150,8 @@ jobs:
           ROOT="$RUNNER_TEMP/dmg-root"; mkdir -p "$ROOT"
           ditto "$APP" "$ROOT/Tolk.app"; ln -s /Applications "$ROOT/Applications"
           hdiutil create -volname "Tolk $VERSION" -srcfolder "$ROOT" -ov -format UDZO "dist/Tolk-${VERSION}-macos.dmg"
-          GH_TOKEN="$TOLK_TOKEN" gh release view "$TAG" --repo Achordchan/tolk --json body -q .body > dist/release-notes.md
+          GH_TOKEN="$TOLK_TOKEN" gh release view "$TAG" --repo Achordchan/tolk --json body -q .body | grep -Evi 'DZFYQ-SIG|^update=' > dist/release-notes.md || true
+          [ -s dist/release-notes.md ] || { echo "发布说明为空" >&2; exit 1; }
           SPARKLE_VERSION=2.9.4
           SPARKLE_SHA256=ce89daf967db1e1893ed3ebd67575ed82d3902563e3191ca92aaec9164fbdef9
           curl -fsSL --retry 3 -o "$RUNNER_TEMP/sparkle.tar.xz" "https://github.com/sparkle-project/Sparkle/releases/download/$SPARKLE_VERSION/Sparkle-$SPARKLE_VERSION.tar.xz"
