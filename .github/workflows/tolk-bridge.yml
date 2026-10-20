@@ -1,0 +1,137 @@
+name: Tolk bridge (macOS)
+
+# 把 Tolk 的 Mac 构建，按旧版 bagayalu 的 Sparkle 更新格式发布成本仓库的最新 Release，
+# 让还在用 bagayalu 的用户点「检查更新」就升级成 Tolk。
+# 签名证书和 Sparkle 私钥都用本仓库已有的 Secrets，私钥不出这个仓库。
+# 先在 Achordchan/tolk 里运行 Release 工作流，得到 v<版本> 的 Release，再运行本工作流。
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Tolk 的版本号（如 2.0.0），对应 Achordchan/tolk 的 v2.0.0 Release
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tolk-bridge
+  cancel-in-progress: false
+
+jobs:
+  bridge:
+    runs-on: macos-15
+    env:
+      VERSION: ${{ inputs.version }}
+      TAG: v${{ inputs.version }}
+      # Tolk 仓库是私有时，在本仓库加一个只读令牌 TOLK_READ_TOKEN；公开后可以不配。
+      TOLK_TOKEN: ${{ secrets.TOLK_READ_TOKEN || github.token }}
+      # 用户的授权绑在这条身份要求上；对不上就失败，不发出去。
+      EXPECTED_TEAM_ID: S336CKXSUQ
+      EXPECTED_DESIGNATED_REQUIREMENT: 'identifier "achord.dazuofanyiguan" and anchor apple generic and certificate leaf[subject.CN] = "Apple Development: Chenchiyu chen (74524Q654V)" and certificate 1[field.1.2.840.113635.100.6.2.1] /* exists */'
+    steps:
+      - name: Check inputs
+        run: |
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "版本号必须是 x.y.z" >&2; exit 1; }
+      - uses: actions/checkout@v4
+      - name: Fetch Tolk at the release tag
+        uses: actions/checkout@v4
+        with:
+          repository: Achordchan/tolk
+          ref: ${{ env.TAG }}
+          token: ${{ env.TOLK_TOKEN }}
+          path: tolk
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.1"
+      - name: Download Tolk's macOS app
+        env:
+          GH_TOKEN: ${{ env.TOLK_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist work
+          gh release download "$TAG" --repo Achordchan/tolk --dir work --pattern "Tolk-${VERSION}-macos.zip"
+          ditto -x -k "work/Tolk-${VERSION}-macos.zip" work/app
+          APP="$(find work/app -maxdepth 2 -name '*.app' -print -quit)"
+          [ -n "$APP" ] || { echo "压缩包里没有 .app" >&2; exit 1; }
+          mv "$APP" "work/大佐翻译官v1.app"
+          echo "APP=$GITHUB_WORKSPACE/work/大佐翻译官v1.app" >> "$GITHUB_ENV"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "work/大佐翻译官v1.app/Contents/Info.plist" | grep -qx 'achord.dazuofanyiguan'
+          HELPER="$(find "work/大佐翻译官v1.app" -name tolk-helper -type f -print -quit)"
+          [ -n "$HELPER" ] || { echo "应用里没有 tolk-helper" >&2; exit 1; }
+          echo "HELPER=$GITHUB_WORKSPACE/$HELPER" >> "$GITHUB_ENV"
+      - name: Re-sign with this repo's Apple Development certificate
+        env:
+          SIGNING_CERT_P12_BASE64: ${{ secrets.MACOS_DEV_CERT_P12_BASE64 }}
+          SIGNING_CERT_PASSWORD: ${{ secrets.MACOS_DEV_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          [ -n "${SIGNING_CERT_P12_BASE64:-}" ] && [ -n "${SIGNING_CERT_PASSWORD:-}" ] || { echo "缺少 MACOS_DEV_CERT_P12_BASE64 / MACOS_DEV_CERT_PASSWORD" >&2; exit 1; }
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 16)"
+          P12="$RUNNER_TEMP/signing.p12"
+          ORIGINAL_KEYCHAINS=()
+          while IFS= read -r line; do
+            line="$(printf '%s' "$line" | sed -E 's/^[[:space:]]*"//; s/"[[:space:]]*$//')"
+            [ -n "$line" ] && ORIGINAL_KEYCHAINS+=("$line")
+          done < <(security list-keychains -d user)
+          cleanup() {
+            set +e
+            security list-keychains -d user -s ${ORIGINAL_KEYCHAINS[@]+"${ORIGINAL_KEYCHAINS[@]}"}
+            security delete-keychain "$KEYCHAIN" >/dev/null 2>&1
+            rm -f "$P12"
+          }
+          trap cleanup EXIT
+          printf '%s' "$SIGNING_CERT_P12_BASE64" | base64 --decode > "$P12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$P12" -k "$KEYCHAIN" -P "$SIGNING_CERT_PASSWORD" -T /usr/bin/codesign >/dev/null
+          WWDR_CERT="scripts/certs/AppleWWDRCAG3.cer"
+          [ "$(shasum -a 256 "$WWDR_CERT" | awk '{ print $1 }')" = "dcf21878c77f4198e4b4614f03d696d89c66c66008d4244e1b99161aac91601f" ] || { echo "中间证书指纹不对" >&2; exit 1; }
+          security import "$WWDR_CERT" -k "$KEYCHAIN" >/dev/null
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          security list-keychains -d user -s "$KEYCHAIN" ${ORIGINAL_KEYCHAINS[@]+"${ORIGINAL_KEYCHAINS[@]}"}
+          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" | awk '/"Apple Development:/ { print $2; exit }')"
+          [ -n "$IDENTITY" ] || { echo "没有有效的 Apple Development 签名身份" >&2; exit 1; }
+          codesign --force --sign "$IDENTITY" --timestamp=none "$HELPER"
+          codesign --force --deep --sign "$IDENTITY" --timestamp=none "$APP"
+      - name: Verify the identity is unchanged
+        run: |
+          set -euo pipefail
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          INFO="$(codesign -dv --verbose=4 "$APP" 2>&1)"
+          ! grep -q 'flags=.*adhoc' <<< "$INFO" || { echo "仍是 ad-hoc 签名" >&2; exit 1; }
+          ! grep -q 'flags=.*runtime' <<< "$INFO" || { echo "不应启用 hardened runtime" >&2; exit 1; }
+          [ "$(sed -n 's/^TeamIdentifier=//p' <<< "$INFO")" = "$EXPECTED_TEAM_ID" ] || { echo "TeamIdentifier 不对" >&2; exit 1; }
+          ACTUAL="$(codesign -d -r- "$APP" 2>&1 | sed -n 's/^.*designated => //p')"
+          [ "$ACTUAL" = "$EXPECTED_DESIGNATED_REQUIREMENT" ] || { echo "签名身份要求与固定值不一致：$ACTUAL" >&2; exit 1; }
+          ARCHS="$(lipo -archs "$APP/Contents/MacOS/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Contents/Info.plist")")"
+          grep -q arm64 <<< "$ARCHS" && grep -q x86_64 <<< "$ARCHS" || { echo "不是通用二进制：$ARCHS" >&2; exit 1; }
+      - name: Package, sign the appcast and publish
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [ -n "$SPARKLE_PRIVATE_KEY" ] || { echo "缺少 SPARKLE_PRIVATE_KEY" >&2; exit 1; }
+          if gh release view "$TAG" >/dev/null 2>&1; then echo "$TAG 已存在，请提升版本号" >&2; exit 1; fi
+          # Sparkle 比较构建号，必须大于线上已有的（旧版最高 141）。
+          BUILD="$(( ${VERSION%%.*} * 10000 + $(echo "$VERSION" | cut -d. -f2) * 100 + $(echo "$VERSION" | cut -d. -f3) ))"
+          ZIP="bagayalu-translate-v${VERSION}-universal.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "dist/$ZIP"
+          ROOT="$RUNNER_TEMP/dmg-root"; mkdir -p "$ROOT"
+          ditto "$APP" "$ROOT/Tolk.app"; ln -s /Applications "$ROOT/Applications"
+          hdiutil create -volname "Tolk $VERSION" -srcfolder "$ROOT" -ov -format UDZO "dist/Tolk-${VERSION}-macos.dmg"
+          cd tolk
+          go run ./cmd/tolk-release notes -version "$VERSION" -changelog CHANGELOG.md -out ../dist/release-notes.md
+          # 自检：签名必须能被旧版 bagayalu 内置的 SUPublicEDKey 验证，私钥不对会在这里失败。
+          go run ./cmd/tolk-release appcast -legacy -zip "../dist/$ZIP" -version "$VERSION" -build "$BUILD" \
+            -url "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/$ZIP" \
+            -notes ../dist/release-notes.md -out ../dist/appcast.xml
+          cd ..
+          xmllint --noout dist/appcast.xml
+          gh release create "$TAG" --target "$GITHUB_SHA" --title "Tolk $TAG" --notes-file dist/release-notes.md --latest \
+            "dist/$ZIP" "dist/Tolk-${VERSION}-macos.dmg" dist/appcast.xml
