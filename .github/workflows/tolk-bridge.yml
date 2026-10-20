@@ -191,6 +191,9 @@ jobs:
             gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$BACKUP"
             gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body -q .body > "$BACKUP/notes.md"
             ls "$BACKUP"/* | grep -v '/notes.md$' > "$BACKUP/files.txt"
+            # 旧 tag 指向的提交也记下来，恢复时 tag 还要落在原来的提交上。
+            OLD_SHA="$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq .sha)"
+            [[ "$OLD_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "读不到旧 tag 的提交，已停止（还没有删除任何东西）" >&2; exit 1; }
             gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes
           fi
           if ! gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Tolk $TAG" --notes-file dist/release-notes.md --latest \
@@ -205,7 +208,7 @@ jobs:
               gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG" >/dev/null 2>&1 || true
               OLD_FILES=()
               while IFS= read -r f; do OLD_FILES+=("$f"); done < "$BACKUP/files.txt"
-              gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Tolk $TAG" --notes-file "$BACKUP/notes.md" --latest "${OLD_FILES[@]}" || echo "恢复也失败了，需要手动处理" >&2
+              gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$OLD_SHA" --title "Tolk $TAG" --notes-file "$BACKUP/notes.md" --latest "${OLD_FILES[@]}" || echo "恢复也失败了，需要手动处理" >&2
             fi
             exit 1
           fi
